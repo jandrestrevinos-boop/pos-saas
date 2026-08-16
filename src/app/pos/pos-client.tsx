@@ -1,0 +1,340 @@
+"use client";
+
+import { useMemo, useState } from "react";
+import Link from "next/link";
+import { formatMxn } from "@/lib/format";
+
+type Category = { id: string; name: string };
+type Product = { id: string; name: string; price: string; categoryId: string };
+type CartLine = { product: Product; quantity: number };
+
+const PAYMENT_METHODS: { value: "CASH" | "CARD" | "TRANSFER" | "OTHER"; label: string }[] = [
+  { value: "CASH", label: "Efectivo" },
+  { value: "CARD", label: "Tarjeta" },
+  { value: "TRANSFER", label: "Transferencia" },
+  { value: "OTHER", label: "Otro" },
+];
+
+export function PosClient({
+  categories,
+  products,
+  userName,
+}: {
+  categories: Category[];
+  products: Product[];
+  userName: string;
+}) {
+  const [activeCategory, setActiveCategory] = useState<string>(categories[0]?.id ?? "");
+  const [cart, setCart] = useState<CartLine[]>([]);
+  const [discount, setDiscount] = useState(0);
+  const [checkoutOpen, setCheckoutOpen] = useState(false);
+
+  const visibleProducts = useMemo(
+    () => products.filter((p) => p.categoryId === activeCategory),
+    [products, activeCategory]
+  );
+
+  const subtotal = cart.reduce((sum, line) => sum + Number(line.product.price) * line.quantity, 0);
+  const safeDiscount = Math.min(discount, subtotal);
+  const total = subtotal - safeDiscount;
+
+  function addToCart(product: Product) {
+    setCart((prev) => {
+      const existing = prev.find((l) => l.product.id === product.id);
+      if (existing) {
+        return prev.map((l) => (l.product.id === product.id ? { ...l, quantity: l.quantity + 1 } : l));
+      }
+      return [...prev, { product, quantity: 1 }];
+    });
+  }
+
+  function changeQuantity(productId: string, delta: number) {
+    setCart((prev) =>
+      prev
+        .map((l) => (l.product.id === productId ? { ...l, quantity: l.quantity + delta } : l))
+        .filter((l) => l.quantity > 0)
+    );
+  }
+
+  function resetSale() {
+    setCart([]);
+    setDiscount(0);
+    setCheckoutOpen(false);
+  }
+
+  return (
+    <div className="h-screen flex flex-col bg-paper">
+      {/* Encabezado */}
+      <header className="flex items-center justify-between px-5 py-3 border-b border-line bg-paper-raised shrink-0">
+        <div className="flex items-center gap-4">
+          <Link href="/dashboard" className="text-sm text-muted hover:text-ink">
+            ← Salir
+          </Link>
+          <p className="font-display text-lg font-semibold">Punto de Venta</p>
+        </div>
+        <p className="text-sm text-muted">{userName}</p>
+      </header>
+
+      <div className="flex-1 flex overflow-hidden">
+        {/* Columna izquierda: categorías + productos */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          <div className="flex gap-2 px-5 py-4 overflow-x-auto shrink-0 border-b border-line bg-paper-raised">
+            {categories.length === 0 ? (
+              <p className="text-sm text-muted">No hay categorías activas.</p>
+            ) : (
+              categories.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => setActiveCategory(c.id)}
+                  className={`shrink-0 rounded-md px-5 py-3 text-sm font-medium transition-colors ${
+                    activeCategory === c.id ? "bg-ink-950 text-white" : "bg-white border border-line text-ink"
+                  }`}
+                >
+                  {c.name}
+                </button>
+              ))
+            )}
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-5">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+              {visibleProducts.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => addToCart(p)}
+                  className="bg-paper-raised border border-line rounded-lg p-4 text-left active:scale-[0.98] transition-transform hover:border-ember"
+                >
+                  <p className="font-medium mb-1">{p.name}</p>
+                  <p className="font-mono text-sm text-muted">{formatMxn(p.price)}</p>
+                </button>
+              ))}
+              {visibleProducts.length === 0 && (
+                <p className="text-sm text-muted col-span-full">No hay productos en esta categoría.</p>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Columna derecha: carrito */}
+        <aside className="w-full max-w-sm border-l border-line bg-paper-raised flex flex-col shrink-0">
+          <div className="px-5 py-4 border-b border-line">
+            <p className="font-display text-lg font-semibold">Carrito</p>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-5 py-3">
+            {cart.length === 0 ? (
+              <p className="text-sm text-muted text-center py-10">Toca un producto para agregarlo.</p>
+            ) : (
+              <ul className="space-y-3">
+                {cart.map((line) => (
+                  <li key={line.product.id} className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">{line.product.name}</p>
+                      <p className="text-xs text-muted font-mono">{formatMxn(line.product.price)} c/u</p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={() => changeQuantity(line.product.id, -1)}
+                        className="w-8 h-8 rounded-md border border-line text-lg leading-none"
+                        aria-label="Restar"
+                      >
+                        −
+                      </button>
+                      <span className="w-5 text-center font-mono text-sm">{line.quantity}</span>
+                      <button
+                        onClick={() => changeQuantity(line.product.id, 1)}
+                        className="w-8 h-8 rounded-md border border-line text-lg leading-none"
+                        aria-label="Sumar"
+                      >
+                        +
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="ticket-edge px-5 py-4 space-y-2">
+            <label className="flex items-center justify-between text-sm">
+              <span className="text-muted">Descuento (MXN)</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={discount || ""}
+                onChange={(e) => setDiscount(parseFloat(e.target.value) || 0)}
+                className="w-24 rounded-md border border-line px-2 py-1 text-right font-mono"
+                placeholder="0.00"
+              />
+            </label>
+            <div className="flex items-center justify-between text-sm text-muted">
+              <span>Subtotal</span>
+              <span className="font-mono">{formatMxn(subtotal)}</span>
+            </div>
+          </div>
+
+          <div className="px-5 pb-5 pt-3">
+            <div className="flex items-center justify-between mb-4">
+              <span className="font-display text-xl font-semibold">Total</span>
+              <span className="font-display text-2xl font-semibold">{formatMxn(total)}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={resetSale}
+                disabled={cart.length === 0}
+                className="rounded-md border border-line py-3 text-sm font-medium disabled:opacity-40"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => setCheckoutOpen(true)}
+                disabled={cart.length === 0}
+                className="rounded-md bg-ember text-white py-3 text-sm font-medium disabled:opacity-40"
+              >
+                Cobrar
+              </button>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      {checkoutOpen && (
+        <CheckoutModal total={total} discount={safeDiscount} cart={cart} onClose={() => setCheckoutOpen(false)} onDone={resetSale} />
+      )}
+    </div>
+  );
+}
+
+function CheckoutModal({
+  total,
+  discount,
+  cart,
+  onClose,
+  onDone,
+}: {
+  total: number;
+  discount: number;
+  cart: CartLine[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER">("CASH");
+  const [cashReceived, setCashReceived] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [completedOrder, setCompletedOrder] = useState<{ orderNumber: number } | null>(null);
+
+  const cashReceivedNum = parseFloat(cashReceived) || 0;
+  const change = cashReceivedNum - total;
+
+  async function handleConfirm() {
+    setError("");
+
+    if (method === "CASH" && cashReceivedNum < total) {
+      setError("El efectivo recibido es menor al total.");
+      return;
+    }
+
+    setSaving(true);
+    const res = await fetch("/api/sales", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        items: cart.map((l) => ({ productId: l.product.id, quantity: l.quantity })),
+        discount,
+        paymentMethod: method,
+        cashReceived: method === "CASH" ? cashReceivedNum : undefined,
+      }),
+    });
+    const data = await res.json();
+    setSaving(false);
+
+    if (!res.ok) {
+      setError(data.error ?? "No se pudo registrar la venta");
+      return;
+    }
+
+    setCompletedOrder({ orderNumber: data.order.orderNumber });
+  }
+
+  if (completedOrder) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="absolute inset-0 bg-ink-950/50" />
+        <div className="relative bg-paper-raised rounded-lg border border-line w-full max-w-sm p-8 text-center">
+          <p className="text-sage text-4xl mb-3">✓</p>
+          <p className="font-display text-2xl font-semibold mb-1">Venta registrada</p>
+          <p className="text-muted text-sm mb-1">Folio #{completedOrder.orderNumber}</p>
+          <p className="font-mono text-xl mb-6">{formatMxn(total)}</p>
+          <button onClick={onDone} className="w-full rounded-md bg-ember text-white py-3 text-sm font-medium">
+            Nueva venta
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-ink-950/50" onClick={onClose} />
+      <div className="relative bg-paper-raised rounded-lg border border-line w-full max-w-sm p-6">
+        <h2 className="font-display text-xl font-semibold mb-1">Cobrar</h2>
+        <p className="font-mono text-3xl font-semibold mb-5">{formatMxn(total)}</p>
+
+        <p className="text-sm font-medium mb-2">Método de pago</p>
+        <div className="grid grid-cols-2 gap-2 mb-5">
+          {PAYMENT_METHODS.map((m) => (
+            <button
+              key={m.value}
+              onClick={() => setMethod(m.value)}
+              className={`rounded-md border py-3 text-sm font-medium ${
+                method === m.value ? "border-ember bg-ember/10 text-ember-dark" : "border-line text-ink"
+              }`}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+
+        {method === "CASH" && (
+          <div className="mb-5 space-y-2">
+            <label className="block">
+              <span className="block text-sm font-medium mb-1.5">Efectivo recibido</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                autoFocus
+                value={cashReceived}
+                onChange={(e) => setCashReceived(e.target.value)}
+                className="w-full rounded-md border border-line px-3 py-2 font-mono"
+                placeholder="0.00"
+              />
+            </label>
+            {cashReceivedNum > 0 && (
+              <p className="text-sm text-muted">
+                Cambio: <span className="font-mono font-medium text-ink">{formatMxn(Math.max(change, 0))}</span>
+              </p>
+            )}
+          </div>
+        )}
+
+        {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
+
+        <div className="flex gap-2">
+          <button onClick={onClose} className="flex-1 rounded-md border border-line py-3 text-sm font-medium">
+            Cancelar
+          </button>
+          <button
+            onClick={handleConfirm}
+            disabled={saving}
+            className="flex-1 rounded-md bg-ember text-white py-3 text-sm font-medium disabled:opacity-50"
+          >
+            {saving ? "Guardando..." : "Confirmar"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

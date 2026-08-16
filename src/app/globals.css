@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --ink-950: #14171f;
+  --ink-800: #1e2330;
+  --ink-line: #2b3040;
+  --paper: #fbf9f5;
+  --paper-raised: #ffffff;
+  --line: #e7e1d6;
+  --ember: #e8562c;
+  --ember-dark: #c8431e;
+  --marigold: #f0a93b;
+  --sage: #3f6152;
+  --sage-light: #eaf1ed;
+  --text: #1c1a17;
+  --text-muted: #6b6459;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--text);
+  font-family: "Inter", -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-display {
+  font-family: "Fraunces", serif;
+  font-optical-sizing: auto;
+}
+
+.font-mono {
+  font-family: "IBM Plex Mono", monospace;
+}
+
+/* Elemento firma: borde de "ticket perforado" — usado con moderación
+   en tarjetas de estadísticas y de empresas/sucursales. */
+.ticket-edge {
+  position: relative;
+}
+.ticket-edge::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background-image: repeating-linear-gradient(
+    90deg,
+    var(--line) 0,
+    var(--line) 6px,
+    transparent 6px,
+    transparent 12px
+  );
+}
+
+::selection {
+  background: var(--marigold);
+  color: var(--ink-950);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ember);
+  outline-offset: 2px;
+}

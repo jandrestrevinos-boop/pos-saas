@@ -1,0 +1,460 @@
+// ============================================================
+// POS SaaS Multiempresa — Esquema de base de datos (Fase 1)
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ------------------------------------------------------------
+// TENANCY / PLATAFORMA
+// ------------------------------------------------------------
+
+model Company {
+  id        String   @id @default(uuid())
+  name      String
+  legalName String?
+  taxId     String? // RFC (para cuando se integre facturación)
+  status    CompanyStatus @default(ACTIVE)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branches      Branch[]
+  users         User[]
+  categories    Category[]
+  products      Product[]
+  customers     Customer[]
+  orders        Order[]
+  auditLogs     AuditLog[]
+  subscription  Subscription?
+
+  @@map("companies")
+}
+
+enum CompanyStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+model Branch {
+  id        String   @id @default(uuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name      String
+  address   String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users              User[]
+  orders             Order[]
+  cashRegisters      CashRegister[]
+  inventoryMovements InventoryMovement[]
+
+  @@index([companyId])
+  @@map("branches")
+}
+
+model Plan {
+  id             String   @id @default(uuid())
+  name           String   @unique // "Básico", "Profesional", "Empresarial"
+  maxBranches    Int
+  maxUsers       Int
+  maxCashRegisters Int
+  priceMxn       Decimal  @db.Decimal(10, 2)
+  features       Json? // flags de características habilitadas
+  createdAt      DateTime @default(now())
+
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+model Subscription {
+  id            String   @id @default(uuid())
+  companyId     String   @unique
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  planId        String
+  plan          Plan     @relation(fields: [planId], references: [id])
+
+  status        SubscriptionStatus @default(TRIALING)
+  startDate     DateTime @default(now())
+  renewalDate   DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  license License?
+
+  @@map("subscriptions")
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+model License {
+  id                  String   @id @default(uuid())
+  subscriptionId      String   @unique
+  subscription        Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  allowedBranches     Int
+  allowedCashRegisters Int
+  allowedUsers        Int
+  createdAt           DateTime @default(now())
+
+  @@map("licenses")
+}
+
+// ------------------------------------------------------------
+// IDENTIDAD Y PERMISOS
+// ------------------------------------------------------------
+
+model User {
+  id           String   @id @default(uuid())
+  companyId    String?  // null solo para SUPER_ADMIN de plataforma
+  company      Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  branchId     String?
+  branch       Branch?  @relation(fields: [branchId], references: [id])
+
+  name         String
+  email        String   @unique
+  passwordHash String
+  roleId       String
+  role         Role     @relation(fields: [roleId], references: [id])
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  orders             Order[]
+  cashMovements       CashMovement[]
+  inventoryMovements  InventoryMovement[]
+  auditLogs           AuditLog[]
+
+  @@index([companyId])
+  @@map("users")
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique // SUPER_ADMIN, ADMIN_EMPRESA, GERENTE, CAJERO, MESERO
+  description String?
+
+  users       User[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id     String @id @default(uuid())
+  key    String @unique // "products.create", "cash.close", "reports.view"...
+  label  String
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+// ------------------------------------------------------------
+// CATÁLOGO
+// ------------------------------------------------------------
+
+model Category {
+  id        String   @id @default(uuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name      String
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+
+  products Product[]
+
+  @@index([companyId])
+  @@map("categories")
+}
+
+model Product {
+  id          String   @id @default(uuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  categoryId  String
+  category    Category @relation(fields: [categoryId], references: [id])
+
+  name        String
+  sku         String?
+  barcode     String?
+  description String?
+  price       Decimal  @db.Decimal(10, 2)
+  cost        Decimal? @db.Decimal(10, 2)
+  imageUrl    String?
+  isActive    Boolean  @default(true)
+  tracksInventory Boolean @default(false)
+  stock       Int      @default(0)
+  taxRate     Decimal  @default(0) @db.Decimal(5, 2) // porcentaje, ej. 16.00
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  modifierGroups     ProductModifierGroup[]
+  orderItems         OrderItem[]
+  inventoryMovements InventoryMovement[]
+
+  @@index([companyId])
+  @@map("products")
+}
+
+model ProductModifierGroup {
+  id        String  @id @default(uuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  name      String // "Extras", "Opciones"
+  minSelect Int     @default(0)
+  maxSelect Int     @default(1)
+
+  options ProductModifierOption[]
+
+  @@map("product_modifier_groups")
+}
+
+model ProductModifierOption {
+  id      String  @id @default(uuid())
+  groupId String
+  group   ProductModifierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  name        String // "Queso", "Aguacate"
+  extraPrice  Decimal @default(0) @db.Decimal(10, 2)
+
+  orderItemLinks OrderItemModifier[]
+
+  @@map("product_modifier_options")
+}
+
+// ------------------------------------------------------------
+// OPERACIÓN: PEDIDOS / VENTAS
+// ------------------------------------------------------------
+
+model Order {
+  id        String   @id @default(uuid())
+  localId   String   @unique // UUID generado en cliente, para soporte offline
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  branchId  String
+  branch    Branch   @relation(fields: [branchId], references: [id])
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  customerId String?
+  customer  Customer? @relation(fields: [customerId], references: [id])
+
+  orderNumber Int      @default(autoincrement())
+  status      OrderStatus @default(PENDING)
+  subtotal    Decimal  @db.Decimal(10, 2)
+  discount    Decimal  @default(0) @db.Decimal(10, 2)
+  tax         Decimal  @default(0) @db.Decimal(10, 2)
+  total       Decimal  @db.Decimal(10, 2)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  items    OrderItem[]
+  payments Payment[]
+
+  @@index([companyId, branchId])
+  @@index([createdAt])
+  @@map("orders")
+}
+
+enum OrderStatus {
+  PENDING
+  IN_PREPARATION
+  READY
+  DELIVERED
+  CANCELED
+}
+
+model OrderItem {
+  id        String  @id @default(uuid())
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  quantity        Int
+  unitPriceAtSale Decimal @db.Decimal(10, 2) // precio congelado al momento de la venta
+  lineTotal       Decimal @db.Decimal(10, 2)
+
+  modifiers OrderItemModifier[]
+
+  @@map("order_items")
+}
+
+model OrderItemModifier {
+  orderItemId String
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  optionId    String
+  option      ProductModifierOption @relation(fields: [optionId], references: [id])
+  priceAtSale Decimal @db.Decimal(10, 2)
+
+  @@id([orderItemId, optionId])
+  @@map("order_item_modifiers")
+}
+
+model Payment {
+  id      String  @id @default(uuid())
+  orderId String
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  method     PaymentMethod
+  amount     Decimal @db.Decimal(10, 2)
+  cashReceived Decimal? @db.Decimal(10, 2)
+  change       Decimal? @db.Decimal(10, 2)
+  createdAt  DateTime @default(now())
+
+  @@map("payments")
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  TRANSFER
+  OTHER
+}
+
+// ------------------------------------------------------------
+// CAJA
+// ------------------------------------------------------------
+
+model CashRegister {
+  id       String @id @default(uuid())
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  openedAt    DateTime  @default(now())
+  closedAt    DateTime?
+  openingCash Decimal   @db.Decimal(10, 2)
+  countedCash Decimal?  @db.Decimal(10, 2)
+  expectedCash Decimal? @db.Decimal(10, 2)
+  difference   Decimal? @db.Decimal(10, 2)
+  status       CashRegisterStatus @default(OPEN)
+
+  movements CashMovement[]
+
+  @@index([branchId])
+  @@map("cash_registers")
+}
+
+enum CashRegisterStatus {
+  OPEN
+  CLOSED
+}
+
+model CashMovement {
+  id             String @id @default(uuid())
+  cashRegisterId String
+  cashRegister   CashRegister @relation(fields: [cashRegisterId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User @relation(fields: [userId], references: [id])
+
+  type      CashMovementType
+  amount    Decimal @db.Decimal(10, 2)
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@map("cash_movements")
+}
+
+enum CashMovementType {
+  SALE
+  CASH_IN
+  CASH_OUT
+  REFUND
+}
+
+// ------------------------------------------------------------
+// INVENTARIO
+// ------------------------------------------------------------
+
+model InventoryMovement {
+  id        String  @id @default(uuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  branchId  String
+  branch    Branch  @relation(fields: [branchId], references: [id])
+  userId    String
+  user      User    @relation(fields: [userId], references: [id])
+
+  type      InventoryMovementType
+  quantity  Int
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@map("inventory_movements")
+}
+
+enum InventoryMovementType {
+  IN
+  OUT
+  ADJUSTMENT
+  WASTE
+}
+
+// ------------------------------------------------------------
+// CLIENTES
+// ------------------------------------------------------------
+
+model Customer {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name      String
+  phone     String?
+  email     String?
+  createdAt DateTime @default(now())
+
+  orders Order[]
+
+  @@index([companyId])
+  @@map("customers")
+}
+
+// ------------------------------------------------------------
+// AUDITORÍA
+// ------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  companyId  String?
+  company    Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id])
+
+  action     String // "CREATE", "UPDATE", "DELETE", "LOGIN", "SALE", etc.
+  entity     String // "Product", "Order", "CashRegister"...
+  entityId   String?
+  previousData Json?
+  newData      Json?
+  ipAddress    String?
+  createdAt    DateTime @default(now())
+
+  @@index([companyId])
+  @@index([entity, entityId])
+  @@map("audit_logs")
+}
