@@ -34,7 +34,7 @@ export const salesService = {
     // Tipo mínimo explícito: evita depender de la inferencia automática de
     // Prisma para estos dos campos, que es lo único que usamos aquí.
     type SaleProduct = { id: string; price: number | string };
-    const productMap = new Map((products as SaleProduct[]).map((p) => [p.id, p]));
+    const productMap = new Map((products as unknown as SaleProduct[]).map((p) => [p.id, p]));
 
     let subtotal = 0;
     const orderItemsData = input.items.map((item) => {

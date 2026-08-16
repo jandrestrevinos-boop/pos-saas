@@ -68,7 +68,7 @@ export const cashService = {
 
     const salesTotals = await this.computeSalesTotals(branchId, register.openedAt);
     type MovementRow = { type: string; amount: number | string };
-    const movements = register.movements as MovementRow[];
+    const movements = register.movements as unknown as MovementRow[];
     const cashIn = movements.filter((m) => m.type === "CASH_IN").reduce((s, m) => s + Number(m.amount), 0);
     const cashOut = movements
       .filter((m) => m.type === "CASH_OUT" || m.type === "REFUND")

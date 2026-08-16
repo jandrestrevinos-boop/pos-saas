@@ -26,7 +26,7 @@ export const reportsService = {
         branch: { select: { name: true } },
       },
       orderBy: { createdAt: "desc" },
-    })) as ReportOrder[];
+    })) as unknown as ReportOrder[];
 
     const totalSales = orders.reduce((sum, o) => sum + Number(o.total), 0);
     const totalOrders = orders.length;
