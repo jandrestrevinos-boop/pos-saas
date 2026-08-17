@@ -14,38 +14,17 @@ export const authOptions: AuthOptions = {
         password: { label: "Contraseña", type: "password" },
       },
       async authorize(credentials) {
-        if (!credentials?.email || !credentials?.password) {
-          console.log("[auth] Falta correo o contraseña en la petición");
-          return null;
-        }
+        if (!credentials?.email || !credentials?.password) return null;
 
-        let user;
-        try {
-          user = await prisma.user.findUnique({
-            where: { email: credentials.email },
-            include: { role: { include: { permissions: { include: { permission: true } } } } },
-          });
-        } catch (err) {
-          console.log("[auth] Error consultando la base de datos:", err);
-          return null;
-        }
+        const user = await prisma.user.findUnique({
+          where: { email: credentials.email },
+          include: { role: { include: { permissions: { include: { permission: true } } } } },
+        });
 
-        if (!user) {
-          console.log(`[auth] No existe usuario con correo: ${credentials.email}`);
-          return null;
-        }
-        if (!user.isActive) {
-          console.log(`[auth] Usuario ${credentials.email} está inactivo`);
-          return null;
-        }
+        if (!user || !user.isActive) return null;
 
         const validPassword = await bcrypt.compare(credentials.password, user.passwordHash);
-        if (!validPassword) {
-          console.log(`[auth] Contraseña incorrecta para: ${credentials.email}`);
-          return null;
-        }
-
-        console.log(`[auth] Login exitoso: ${credentials.email}`);
+        if (!validPassword) return null;
 
         return {
           id: user.id,
