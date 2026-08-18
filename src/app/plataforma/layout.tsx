@@ -17,7 +17,7 @@ export default async function PlataformaLayout({ children }: { children: React.R
 
   return (
     <div className="min-h-screen flex">
-      <SidebarNav items={NAV_ITEMS} brand="Plataforma" userName={session.user.name ?? ""} />
+      <SidebarNav items={NAV_ITEMS} brand="Tappy" userName={session.user.name ?? ""} />
       <main className="flex-1 p-8 bg-paper">{children}</main>
     </div>
   );
