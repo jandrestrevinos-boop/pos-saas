@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { StatCard, Button } from "@/components/ui";
 import { formatMxn } from "@/lib/format";
 import Link from "next/link";
+import { MonthlyRevenueChart } from "./monthly-revenue-chart";
 
 export default async function CompanyDashboard() {
   const session = await getServerSession(authOptions);
@@ -44,7 +45,7 @@ export default async function CompanyDashboard() {
         <StatCard label="Ventas del mes" value={formatMxn(monthTotal)} />
         <StatCard label="Ticket promedio" value={todayOrders.length > 0 ? formatMxn(avgTicket) : "—"} />
         <StatCard label="Productos más vendidos" value="—" sublabel="Se activa en Fase 4" />
-      </div>
+      </div><MonthlyRevenueChart />
 
       <p className="text-xs font-medium uppercase tracking-wide text-muted mb-3">Catálogo actual</p>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

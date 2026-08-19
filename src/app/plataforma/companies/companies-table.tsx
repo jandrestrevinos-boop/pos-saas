@@ -70,6 +70,21 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
     }
   }
 
+  async function deleteCompany(company: Company) {
+    const confirmed = confirm(
+      `¿Eliminar "${company.name}" por completo? Esto borra todos sus usuarios, productos, ventas e historial. Esta acción no se puede deshacer.`
+    );
+    if (!confirmed) return;
+
+    const res = await fetch(`/api/companies/${company.id}`, { method: "DELETE" });
+    if (res.ok) {
+      setCompanies((prev) => prev.filter((c) => c.id !== company.id));
+    } else {
+      const data = await res.json();
+      alert(data.error ?? "No se pudo eliminar la empresa");
+    }
+  }
+
   return (
     <>
       <div className="flex justify-end mb-4">
@@ -113,6 +128,9 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
                     </Button>
                     <Button variant="ghost" onClick={() => toggleStatus(c)}>
                       {c.status === "ACTIVE" ? "Suspender" : "Activar"}
+                    </Button>
+                    <Button variant="ghost" onClick={() => deleteCompany(c)} className="text-ember-dark hover:bg-ember/10">
+                      Eliminar
                     </Button>
                   </td>
                 </tr>
@@ -315,6 +333,19 @@ function CompanyUsersModal({
     load();
   }
 
+  async function handleDeleteUser(user: CompanyUser) {
+    const confirmed = confirm(`¿Eliminar a ${user.name} (${user.email})? Esta acción no se puede deshacer.`);
+    if (!confirmed) return;
+
+    const res = await fetch(`/api/companies/${company.id}/users/${user.id}`, { method: "DELETE" });
+    if (res.ok) {
+      setUsers((prev) => prev.filter((u) => u.id !== user.id));
+    } else {
+      const data = await res.json();
+      alert(data.error ?? "No se pudo eliminar el usuario");
+    }
+  }
+
   return (
     <Modal open onClose={onClose} title={`Usuarios de ${company.name}`}>
       {loading ? (
@@ -331,7 +362,15 @@ function CompanyUsersModal({
                     <p className="font-medium">{u.name}</p>
                     <p className="text-muted font-mono text-xs">{u.email}</p>
                   </div>
-                  <span className="text-xs text-muted">{ROLE_LABELS[u.role.name] ?? u.role.name}</span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-xs text-muted">{ROLE_LABELS[u.role.name] ?? u.role.name}</span>
+                    <button
+                      onClick={() => handleDeleteUser(u)}
+                      className="text-xs text-ember-dark hover:underline"
+                    >
+                      Eliminar
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>

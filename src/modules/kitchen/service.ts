@@ -30,12 +30,8 @@ export const kitchenService = {
     return prisma.order.update({ where: { id: orderId }, data: { status: next as never } });
   },
 
-  /** Determina si el plan contratado por la empresa incluye la pantalla de cocina. */
+  /** La Pantalla de Cocina está disponible en todos los planes — la diferenciación de precio es por capacidad (usuarios/sucursales/cajas), no por funciones. El costo de implementación (hardware, instalación) se cotiza aparte del plan de software. */
   async isEnabledForCompany(companyId: string): Promise<boolean> {
-    const subscription = await prisma.subscription.findUnique({
-      where: { companyId },
-      include: { plan: true },
-    });
-    return subscription?.plan.name !== "Básico";
+    return true;
   },
 };
