@@ -37,25 +37,37 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
     setSaving(true);
     setError("");
 
-    const res = await fetch("/api/companies", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(form),
-    });
-    const data = await res.json();
-    setSaving(false);
+    try {
+      const res = await fetch("/api/companies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(form),
+      });
 
-    if (!res.ok) {
-      setError(data.error ?? "Ocurrió un error");
-      return;
+      let data: { error?: string; company?: unknown } = {};
+      try {
+        data = await res.json();
+      } catch {
+        setError("El servidor no respondió correctamente. Intenta de nuevo.");
+        return;
+      }
+
+      if (!res.ok) {
+        setError(data.error ?? "Ocurrió un error");
+        return;
+      }
+
+      setCompanies((prev) => [
+        { ...(data.company as Company), branches: [{ id: "new" }], users: [], subscription: { plan: { name: plans.find((p) => p.id === form.planId)?.name ?? "" } } },
+        ...prev,
+      ]);
+      setModalOpen(false);
+      setForm({ name: "", branchName: "Principal", planId: plans[0]?.id ?? "" });
+    } catch {
+      setError("No se pudo conectar con el servidor. Revisa tu conexión e intenta de nuevo.");
+    } finally {
+      setSaving(false);
     }
-
-    setCompanies((prev) => [
-      { ...data.company, branches: [{ id: "new" }], users: [], subscription: { plan: { name: plans.find((p) => p.id === form.planId)?.name ?? "" } } },
-      ...prev,
-    ]);
-    setModalOpen(false);
-    setForm({ name: "", branchName: "Principal", planId: plans[0]?.id ?? "" });
   }
 
   async function toggleStatus(company: Company) {
@@ -316,21 +328,35 @@ function CompanyUsersModal({
     e.preventDefault();
     setSaving(true);
     setError("");
-    const res = await fetch(`/api/companies/${company.id}/users`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(form),
-    });
-    const data = await res.json();
-    setSaving(false);
-    if (!res.ok) {
-      setError(data.error ?? "Ocurrió un error");
-      return;
+    try {
+      const res = await fetch(`/api/companies/${company.id}/users`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(form),
+      });
+
+      let data: { error?: string; user?: unknown } = {};
+      try {
+        data = await res.json();
+      } catch {
+        setError("El servidor no respondió correctamente. Intenta de nuevo.");
+        return;
+      }
+
+      if (!res.ok) {
+        setError(data.error ?? "Ocurrió un error");
+        return;
+      }
+
+      setShowCreate(false);
+      setForm({ name: "", email: "", password: "", roleId: form.roleId });
+      onUserCreated();
+      load();
+    } catch {
+      setError("No se pudo conectar con el servidor. Revisa tu conexión e intenta de nuevo.");
+    } finally {
+      setSaving(false);
     }
-    setShowCreate(false);
-    setForm({ name: "", email: "", password: "", roleId: form.roleId });
-    onUserCreated();
-    load();
   }
 
   async function handleDeleteUser(user: CompanyUser) {
