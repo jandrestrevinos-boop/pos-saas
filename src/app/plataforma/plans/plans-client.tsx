@@ -26,6 +26,21 @@ export function PlansClient({ initialPlans }: { initialPlans: Plan[] }) {
   const [plans, setPlans] = useState(initialPlans);
   const [editing, setEditing] = useState<Plan | null>(null);
 
+function buildDisplayFeatures(plan: Plan): string[] {
+  const nonCapacity = (plan.features ?? []).filter((f) => !/sucursal|caja|usuario/i.test(f));
+
+  if (plan.name === "Empresarial") {
+    return ["Multi-sucursal", `Hasta ${plan.maxCashRegisters} cajas`, `Hasta ${plan.maxUsers} usuarios`, ...nonCapacity];
+  }
+
+  return [
+    `${plan.maxBranches} sucursal${plan.maxBranches === 1 ? "" : "es"}`,
+    `Hasta ${plan.maxCashRegisters} caja${plan.maxCashRegisters === 1 ? "" : "s"}`,
+    `Hasta ${plan.maxUsers} usuario${plan.maxUsers === 1 ? "" : "s"}`,
+    ...nonCapacity,
+  ];
+}
+
   function handleUpdated(updated: Plan) {
     setPlans((prev) => prev.map((p) => (p.id === updated.id ? { ...p, ...updated } : p)));
     setEditing(null);
@@ -49,7 +64,7 @@ export function PlansClient({ initialPlans }: { initialPlans: Plan[] }) {
             </p>
 
             <ul className="space-y-1.5 mb-5 text-sm">
-              {(plan.features ?? []).map((f) => (
+              {buildDisplayFeatures(plan).map((f) => (
                 <li key={f} className="flex items-start gap-2">
                   <span className="text-sage mt-0.5">✓</span>
                   <span>{f}</span>
