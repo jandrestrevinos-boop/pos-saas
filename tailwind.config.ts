@@ -5,13 +5,13 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        ink: { 950: "#14171F", 800: "#1E2330", line: "#2B3040", DEFAULT: "#1C1A17" },
-        paper: { DEFAULT: "#FBF9F5", raised: "#FFFFFF" },
-        line: "#E7E1D6",
-        ember: { DEFAULT: "#E8562C", dark: "#C8431E" },
-        marigold: "#F0A93B",
-        sage: { DEFAULT: "#3F6152", light: "#EAF1ED" },
-        muted: "#6B6459",
+        ink: { 950: "#0A0F2E", 800: "#141B3D", line: "#232B55", DEFAULT: "#0F172A" },
+        paper: { DEFAULT: "#F7F9FC", raised: "#FFFFFF" },
+        line: "#E2E8F0",
+        ember: { DEFAULT: "#0038FF", dark: "#0026B8" },
+        marigold: "#00B4D8",
+        sage: { DEFAULT: "#3F7D20", light: "#EAF3DE" },
+        muted: "#64748B",
       },
       fontFamily: {
         display: ["Fraunces", "serif"],
