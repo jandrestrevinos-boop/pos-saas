@@ -29,19 +29,19 @@ export function MonthlyRevenueChart() {
       <Card className="p-5">
         <ResponsiveContainer width="100%" height={260}>
           <BarChart data={months} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#E7E1D6" vertical={false} />
-            <XAxis dataKey="label" tick={{ fontSize: 12, fill: "#6B6459" }} axisLine={{ stroke: "#E7E1D6" }} tickLine={false} />
+            <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" vertical={false} />
+            <XAxis dataKey="label" tick={{ fontSize: 12, fill: "#64748B" }} axisLine={{ stroke: "#E2E8F0" }} tickLine={false} />
             <YAxis
-              tick={{ fontSize: 12, fill: "#6B6459" }}
+              tick={{ fontSize: 12, fill: "#64748B" }}
               axisLine={false}
               tickLine={false}
               tickFormatter={(v) => `$${v >= 1000 ? `${Math.round(v / 1000)}k` : v}`}
             />
             <Tooltip
               formatter={(value: number) => [formatMxn(value), "Ingresos"]}
-              contentStyle={{ borderRadius: 8, border: "1px solid #E7E1D6", fontSize: 13 }}
+              contentStyle={{ borderRadius: 8, border: "1px solid #E2E8F0", fontSize: 13 }}
             />
-            <Bar dataKey="total" fill="#E8562C" radius={[4, 4, 0, 0]} />
+            <Bar dataKey="total" fill="#0038FF" radius={[4, 4, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </Card>
