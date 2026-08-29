@@ -1,7 +1,5 @@
 import { prisma } from "@/lib/prisma";
 
-// Tipo mínimo explícito de lo que usamos de cada orden — evita depender de
-// la inferencia automática completa de Prisma para este cálculo.
 type ReportOrder = {
   userId: string;
   total: number | string;
@@ -11,7 +9,7 @@ type ReportOrder = {
     productId: string;
     quantity: number;
     lineTotal: number | string;
-    product: { name: string; categoryId: string; category: { name: string } };
+    product: { name: string; categoryId: string; cost: number | string | null; category: { name: string } };
   }[];
 };
 
@@ -39,25 +37,45 @@ export const reportsService = {
       }
     }
 
-    const productTotals = new Map<string, { name: string; quantity: number; revenue: number }>();
-    const categoryTotals = new Map<string, { name: string; revenue: number }>();
+    let totalCost = 0;
+    let itemsWithoutCost = 0;
+
+    const productTotals = new Map<string, { name: string; quantity: number; revenue: number; cost: number }>();
+    const categoryTotals = new Map<string, { name: string; revenue: number; cost: number }>();
+
     for (const order of orders) {
       for (const item of order.items) {
         const key = item.productId;
-        const current = productTotals.get(key) ?? { name: item.product.name, quantity: 0, revenue: 0 };
+        const hasCost = item.product.cost !== null && item.product.cost !== undefined;
+        const unitCost = hasCost ? Number(item.product.cost) : 0;
+        const lineCost = unitCost * item.quantity;
+        totalCost += lineCost;
+        if (!hasCost) itemsWithoutCost += item.quantity;
+
+        const current = productTotals.get(key) ?? { name: item.product.name, quantity: 0, revenue: 0, cost: 0 };
         current.quantity += item.quantity;
         current.revenue += Number(item.lineTotal);
+        current.cost += lineCost;
         productTotals.set(key, current);
 
         const catKey = item.product.categoryId;
-        const catCurrent = categoryTotals.get(catKey) ?? { name: item.product.category.name, revenue: 0 };
+        const catCurrent = categoryTotals.get(catKey) ?? { name: item.product.category.name, revenue: 0, cost: 0 };
         catCurrent.revenue += Number(item.lineTotal);
+        catCurrent.cost += lineCost;
         categoryTotals.set(catKey, catCurrent);
       }
     }
 
-    const topProducts = [...productTotals.values()].sort((a, b) => b.revenue - a.revenue).slice(0, 10);
-    const byCategory = [...categoryTotals.values()].sort((a, b) => b.revenue - a.revenue);
+    const totalProfit = totalSales - totalCost;
+    const profitMargin = totalSales > 0 ? (totalProfit / totalSales) * 100 : 0;
+
+    const topProducts = [...productTotals.values()]
+      .map((p) => ({ ...p, profit: p.revenue - p.cost }))
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 10);
+    const byCategory = [...categoryTotals.values()]
+      .map((c) => ({ ...c, profit: c.revenue - c.cost }))
+      .sort((a, b) => b.revenue - a.revenue);
 
     const byUser = new Map<string, { name: string; total: number; count: number }>();
     for (const order of orders) {
@@ -71,6 +89,10 @@ export const reportsService = {
       totalSales,
       totalOrders,
       avgTicket,
+      totalCost,
+      totalProfit,
+      profitMargin,
+      itemsWithoutCost,
       byPaymentMethod,
       topProducts,
       byCategory,

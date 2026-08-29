@@ -5,6 +5,10 @@ import { Card, StatCard } from "@/components/ui";
 import { formatMxn } from "@/lib/format";
 
 type Report = {
+  totalCost: number;
+  totalProfit: number;
+  profitMargin: number;
+  itemsWithoutCost: number;
   totalSales: number;
   totalOrders: number;
   avgTicket: number;
@@ -78,6 +82,8 @@ export function ReportsClient() {
       ) : (
         <>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <StatCard label="Utilidad real" value={formatMxn(report.totalProfit)} sublabel={`${report.profitMargin.toFixed(0)}% de margen`} />
+            <StatCard label="Costo total" value={formatMxn(report.totalCost)} sublabel={report.itemsWithoutCost > 0 ? `${report.itemsWithoutCost} productos sin costo capturado` : undefined} />
             <StatCard label="Ventas totales" value={formatMxn(report.totalSales)} />
             <StatCard label="Número de ventas" value={report.totalOrders} />
             <StatCard label="Ticket promedio" value={formatMxn(report.avgTicket)} />
