@@ -223,7 +223,16 @@ function CheckoutModal({
   const [cashReceived, setCashReceived] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [completedOrder, setCompletedOrder] = useState<{ orderNumber: number } | null>(null);
+  const [completedOrder, setCompletedOrder] = useState<{
+  orderNumber: number;
+  items: { quantity: number; name: string; unitPrice: number }[];
+  subtotal: number;
+  discount: number;
+  total: number;
+  paymentMethod: string;
+  cashReceived: number;
+  change: number;
+} | null>(null);
 
   const cashReceivedNum = parseFloat(cashReceived) || 0;
   const change = cashReceivedNum - total;
@@ -255,25 +264,104 @@ function CheckoutModal({
       return;
     }
 
-    setCompletedOrder({ orderNumber: data.order.orderNumber });
+    setCompletedOrder({
+  orderNumber: data.order.orderNumber,
+  items: cart.map((l) => ({
+    quantity: l.quantity,
+    name: l.product.name,
+    unitPrice: Number(l.product.price),
+  })),
+  subtotal: subtotal,
+  discount: discount,
+  total: total,
+  paymentMethod: method,
+  cashReceived: cashReceivedNum,
+  change: Math.max(change, 0),
+});
   }
 
   if (completedOrder) {
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-        <div className="absolute inset-0 bg-ink-950/50" />
-        <div className="relative bg-paper-raised rounded-lg border border-line w-full max-w-sm p-8 text-center">
-          <p className="text-sage text-4xl mb-3">✓</p>
-          <p className="font-display text-2xl font-semibold mb-1">Venta registrada</p>
-          <p className="text-muted text-sm mb-1">Folio #{completedOrder.orderNumber}</p>
-          <p className="font-mono text-xl mb-6">{formatMxn(total)}</p>
-          <button onClick={onDone} className="w-full rounded-md bg-ember text-white py-3 text-sm font-medium">
-            Nueva venta
-          </button>
-        </div>
-      </div>
-    );
+    function printTicket() {
+    const win = window.open("", "_blank", "width=302,height=600");
+    if (!win) return;
+    win.document.write(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8"/>
+        <title>Ticket #${completedOrder.orderNumber}</title>
+        <style>
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body {
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            width: 72mm;
+            padding: 4mm;
+            color: #000;
+          }
+          .center { text-align: center; }
+          .bold { font-weight: bold; }
+          .large { font-size: 14px; }
+          .divider { border-top: 1px dashed #000; margin: 4px 0; }
+          .row { display: flex; justify-content: space-between; }
+          .total-row { font-size: 13px; font-weight: bold; }
+        </style>
+      </head>
+      <body>
+        <div class="center bold large">Tappy</div>
+        <div class="center" style="margin-bottom:6px;font-size:10px;">Punto de Venta</div>
+        <div class="divider"></div>
+        <div class="row"><span>Folio:</span><span>#${completedOrder.orderNumber}</span></div>
+        <div class="row"><span>Fecha:</span><span>${new Date().toLocaleString("es-MX",{dateStyle:"short",timeStyle:"short"})}</span></div>
+        <div class="divider"></div>
+        ${completedOrder.items.map((item: { quantity: number; name: string; unitPrice: number }) => `
+          <div class="row">
+            <span>${item.quantity}x ${item.name}</span>
+            <span>$${(item.quantity * item.unitPrice).toFixed(2)}</span>
+          </div>
+        `).join("")}
+        <div class="divider"></div>
+        <div class="row"><span>Subtotal</span><span>$${completedOrder.subtotal.toFixed(2)}</span></div>
+        ${completedOrder.discount > 0 ? `<div class="row"><span>Descuento</span><span>-$${completedOrder.discount.toFixed(2)}</span></div>` : ""}
+        <div class="row total-row"><span>TOTAL</span><span>$${completedOrder.total.toFixed(2)}</span></div>
+        ${completedOrder.paymentMethod === "CASH" && completedOrder.change > 0 ? `
+          <div class="row"><span>Efectivo</span><span>$${completedOrder.cashReceived.toFixed(2)}</span></div>
+          <div class="row"><span>Cambio</span><span>$${completedOrder.change.toFixed(2)}</span></div>
+        ` : ""}
+        <div class="divider"></div>
+        <div class="center" style="margin-top:4px;font-size:10px;">¡Gracias por su compra!</div>
+        <div class="center" style="font-size:9px;margin-top:2px;">Powered by Tappy</div>
+        <br/><br/>
+      </body>
+      </html>
+    `);
+    win.document.close();
+    win.focus();
+    win.print();
+    win.close();
   }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-ink-950/50" />
+      <div className="relative bg-paper-raised rounded-lg border border-line w-full max-w-sm p-8 text-center">
+        <p className="text-sage text-4xl mb-3">✓</p>
+        <p className="font-display text-2xl font-semibold mb-1">Venta registrada</p>
+        <p className="text-muted text-sm mb-1">Folio #{completedOrder.orderNumber}</p>
+        <p className="font-mono text-xl mb-6">{formatMxn(total)}</p>
+        <button
+          onClick={printTicket}
+          className="w-full rounded-md border border-line py-3 text-sm font-medium mb-3"
+        >
+          🖨️ Imprimir ticket
+        </button>
+        <button onClick={onDone} className="w-full rounded-md bg-ember text-white py-3 text-sm font-medium">
+          Nueva venta
+        </button>
+      </div>
+    </div>
+  );
+}
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
