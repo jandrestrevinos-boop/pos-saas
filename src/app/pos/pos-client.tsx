@@ -200,7 +200,7 @@ export function PosClient({
       </div>
 
       {checkoutOpen && (
-        <CheckoutModal total={total} discount={safeDiscount} cart={cart} onClose={() => setCheckoutOpen(false)} onDone={resetSale} />
+        <CheckoutModal total={total} discount={safeDiscount} subtotal={subtotal} cart={cart} onClose={() => setCheckoutOpen(false)} onDone={resetSale} />
       )}
     </div>
   );
@@ -209,12 +209,14 @@ export function PosClient({
 function CheckoutModal({
   total,
   discount,
+  subtotal,
   cart,
   onClose,
   onDone,
 }: {
   total: number;
   discount: number;
+  subtotal: number;
   cart: CartLine[];
   onClose: () => void;
   onDone: () => void;
@@ -223,16 +225,17 @@ function CheckoutModal({
   const [cashReceived, setCashReceived] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+
   const [completedOrder, setCompletedOrder] = useState<{
-  orderNumber: number;
-  items: { quantity: number; name: string; unitPrice: number }[];
-  subtotal: number;
-  discount: number;
-  total: number;
-  paymentMethod: string;
-  cashReceived: number;
-  change: number;
-} | null>(null);
+    orderNumber: number;
+    items: { quantity: number; name: string; unitPrice: number }[];
+    subtotal: number;
+    discount: number;
+    total: number;
+    paymentMethod: string;
+    cashReceived: number;
+    change: number;
+  } | null>(null);
 
   const cashReceivedNum = parseFloat(cashReceived) || 0;
   const change = cashReceivedNum - total;
@@ -246,149 +249,335 @@ function CheckoutModal({
     }
 
     setSaving(true);
-    const res = await fetch("/api/sales", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        items: cart.map((l) => ({ productId: l.product.id, quantity: l.quantity })),
+
+    try {
+      const res = await fetch("/api/sales", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: cart.map((l) => ({
+            productId: l.product.id,
+            quantity: l.quantity,
+          })),
+          discount,
+          paymentMethod: method,
+          cashReceived: method === "CASH" ? cashReceivedNum : undefined,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.error ?? "No se pudo registrar la venta");
+        return;
+      }
+
+      setCompletedOrder({
+        orderNumber: data.order.orderNumber,
+        items: cart.map((l) => ({
+          quantity: l.quantity,
+          name: l.product.name,
+          unitPrice: Number(l.product.price),
+        })),
+        subtotal,
         discount,
+        total,
         paymentMethod: method,
-        cashReceived: method === "CASH" ? cashReceivedNum : undefined,
-      }),
-    });
-    const data = await res.json();
-    setSaving(false);
-
-    if (!res.ok) {
-      setError(data.error ?? "No se pudo registrar la venta");
-      return;
+        cashReceived: cashReceivedNum,
+        change: Math.max(change, 0),
+      });
+    } catch (err) {
+      setError("No se pudo conectar con el servidor.");
+    } finally {
+      setSaving(false);
     }
-
-    setCompletedOrder({
-  orderNumber: data.order.orderNumber,
-  items: cart.map((l) => ({
-    quantity: l.quantity,
-    name: l.product.name,
-    unitPrice: Number(l.product.price),
-  })),
-  subtotal: subtotal,
-  discount: discount,
-  total: total,
-  paymentMethod: method,
-  cashReceived: cashReceivedNum,
-  change: Math.max(change, 0),
-});
   }
 
+  // -----------------------------
+  // TICKET DE VENTA COMPLETADA
+  // -----------------------------
   if (completedOrder) {
-    function printTicket() {
-    const win = window.open("", "_blank", "width=302,height=600");
-    if (!win) return;
-    win.document.write(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8"/>
-        <title>Ticket #${completedOrder.orderNumber}</title>
-        <style>
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body {
-            font-family: 'Courier New', monospace;
-            font-size: 11px;
-            width: 72mm;
-            padding: 4mm;
-            color: #000;
-          }
-          .center { text-align: center; }
-          .bold { font-weight: bold; }
-          .large { font-size: 14px; }
-          .divider { border-top: 1px dashed #000; margin: 4px 0; }
-          .row { display: flex; justify-content: space-between; }
-          .total-row { font-size: 13px; font-weight: bold; }
-        </style>
-      </head>
-      <body>
-        <div class="center bold large">Tappy</div>
-        <div class="center" style="margin-bottom:6px;font-size:10px;">Punto de Venta</div>
-        <div class="divider"></div>
-        <div class="row"><span>Folio:</span><span>#${completedOrder.orderNumber}</span></div>
-        <div class="row"><span>Fecha:</span><span>${new Date().toLocaleString("es-MX",{dateStyle:"short",timeStyle:"short"})}</span></div>
-        <div class="divider"></div>
-        ${completedOrder.items.map((item: { quantity: number; name: string; unitPrice: number }) => `
-          <div class="row">
-            <span>${item.quantity}x ${item.name}</span>
-            <span>$${(item.quantity * item.unitPrice).toFixed(2)}</span>
+    const printTicket = () => {
+      const win = window.open("", "_blank", "width=302,height=600");
+
+      if (!win) return;
+
+      win.document.write(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8"/>
+          <title>Ticket #${completedOrder.orderNumber}</title>
+          <style>
+            * {
+              margin: 0;
+              padding: 0;
+              box-sizing: border-box;
+            }
+
+            body {
+              font-family: 'Courier New', monospace;
+              font-size: 11px;
+              width: 72mm;
+              padding: 4mm;
+              color: #000;
+            }
+
+            .center {
+              text-align: center;
+            }
+
+            .bold {
+              font-weight: bold;
+            }
+
+            .large {
+              font-size: 14px;
+            }
+
+            .divider {
+              border-top: 1px dashed #000;
+              margin: 4px 0;
+            }
+
+            .row {
+              display: flex;
+              justify-content: space-between;
+            }
+
+            .total-row {
+              font-size: 13px;
+              font-weight: bold;
+            }
+          </style>
+        </head>
+
+        <body>
+          <div class="center bold large">Tappy</div>
+
+          <div
+            class="center"
+            style="margin-bottom:6px;font-size:10px;"
+          >
+            Punto de Venta
           </div>
-        `).join("")}
-        <div class="divider"></div>
-        <div class="row"><span>Subtotal</span><span>$${completedOrder.subtotal.toFixed(2)}</span></div>
-        ${completedOrder.discount > 0 ? `<div class="row"><span>Descuento</span><span>-$${completedOrder.discount.toFixed(2)}</span></div>` : ""}
-        <div class="row total-row"><span>TOTAL</span><span>$${completedOrder.total.toFixed(2)}</span></div>
-        ${completedOrder.paymentMethod === "CASH" && completedOrder.change > 0 ? `
-          <div class="row"><span>Efectivo</span><span>$${completedOrder.cashReceived.toFixed(2)}</span></div>
-          <div class="row"><span>Cambio</span><span>$${completedOrder.change.toFixed(2)}</span></div>
-        ` : ""}
-        <div class="divider"></div>
-        <div class="center" style="margin-top:4px;font-size:10px;">¡Gracias por su compra!</div>
-        <div class="center" style="font-size:9px;margin-top:2px;">Powered by Tappy</div>
-        <br/><br/>
-      </body>
-      </html>
-    `);
-    win.document.close();
-    win.focus();
-    win.print();
-    win.close();
+
+          <div class="divider"></div>
+
+          <div class="row">
+            <span>Folio:</span>
+            <span>#${completedOrder.orderNumber}</span>
+          </div>
+
+          <div class="row">
+            <span>Fecha:</span>
+            <span>
+              ${new Date().toLocaleString("es-MX", {
+                dateStyle: "short",
+                timeStyle: "short",
+              })}
+            </span>
+          </div>
+
+          <div class="divider"></div>
+
+          ${completedOrder.items
+            .map(
+              (item) => `
+                <div class="row">
+                  <span>${item.quantity}x ${item.name}</span>
+                  <span>
+                    $${(item.quantity * item.unitPrice).toFixed(2)}
+                  </span>
+                </div>
+              `
+            )
+            .join("")}
+
+          <div class="divider"></div>
+
+          <div class="row">
+            <span>Subtotal</span>
+            <span>$${completedOrder.subtotal.toFixed(2)}</span>
+          </div>
+
+          ${
+            completedOrder.discount > 0
+              ? `
+                <div class="row">
+                  <span>Descuento</span>
+                  <span>-$${completedOrder.discount.toFixed(2)}</span>
+                </div>
+              `
+              : ""
+          }
+
+          <div class="row total-row">
+            <span>TOTAL</span>
+            <span>$${completedOrder.total.toFixed(2)}</span>
+          </div>
+
+          ${
+            completedOrder.paymentMethod === "CASH" &&
+            completedOrder.change > 0
+              ? `
+                <div class="row">
+                  <span>Efectivo</span>
+                  <span>$${completedOrder.cashReceived.toFixed(2)}</span>
+                </div>
+
+                <div class="row">
+                  <span>Cambio</span>
+                  <span>$${completedOrder.change.toFixed(2)}</span>
+                </div>
+              `
+              : ""
+          }
+
+          <div class="divider"></div>
+
+          <div
+            class="center"
+            style="margin-top:4px;font-size:10px;"
+          >
+            ¡Gracias por su compra!
+          </div>
+
+          <div
+            class="center"
+            style="font-size:9px;margin-top:2px;"
+          >
+            Powered by Tappy
+          </div>
+
+          <br/>
+          <br/>
+        </body>
+        </html>
+      `);
+
+      win.document.close();
+      win.focus();
+      win.print();
+      win.close();
+    };
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="absolute inset-0 bg-ink-950/50" />
+
+        <div className="relative bg-paper-raised rounded-lg border border-line w-full max-w-sm p-8 text-center">
+          <p className="text-sage text-4xl mb-3">✓</p>
+
+          <p className="font-display text-2xl font-semibold mb-1">
+            Venta registrada
+          </p>
+
+          <p className="text-muted text-sm mb-1">
+            Folio #{completedOrder.orderNumber}
+          </p>
+
+          <p className="font-mono text-xl mb-6">
+            {formatMxn(completedOrder.total)}
+          </p>
+
+          <button
+            onClick={printTicket}
+            className="w-full rounded-md border border-line py-3 text-sm font-medium mb-3"
+          >
+            🖨️ Imprimir ticket
+          </button>
+
+          <button
+            onClick={onDone}
+            className="w-full rounded-md bg-ember text-white py-3 text-sm font-medium"
+          >
+            Nueva venta
+          </button>
+        </div>
+      </div>
+    );
   }
 
+  // -----------------------------
+  // MODAL DE COBRO
+  // -----------------------------
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-ink-950/50" />
-      <div className="relative bg-paper-raised rounded-lg border border-line w-full max-w-sm p-8 text-center">
-        <p className="text-sage text-4xl mb-3">✓</p>
-        <p className="font-display text-2xl font-semibold mb-1">Venta registrada</p>
-        <p className="text-muted text-sm mb-1">Folio #{completedOrder.orderNumber}</p>
-        <p className="font-mono text-xl mb-6">{formatMxn(total)}</p>
-        <button
-          onClick={printTicket}
-          className="w-full rounded-md border border-line py-3 text-sm font-medium mb-3"
-        >
-          🖨️ Imprimir ticket
-        </button>
-        <button onClick={onDone} className="w-full rounded-md bg-ember text-white py-3 text-sm font-medium">
-          Nueva venta
-        </button>
-      </div>
-    </div>
-  );
-}
+      <div
+        className="absolute inset-0 bg-ink-950/50"
+        onClick={onClose}
+      />
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-ink-950/50" onClick={onClose} />
       <div className="relative bg-paper-raised rounded-lg border border-line w-full max-w-sm p-6">
-        <h2 className="font-display text-xl font-semibold mb-1">Cobrar</h2>
-        <p className="font-mono text-3xl font-semibold mb-5">{formatMxn(total)}</p>
+        <h2 className="font-display text-2xl font-semibold mb-1">
+          Cobrar venta
+        </h2>
 
-        <p className="text-sm font-medium mb-2">Método de pago</p>
+        <p className="text-muted text-sm mb-6">
+          Total:{" "}
+          <span className="font-mono font-semibold text-ink">
+            {formatMxn(total)}
+          </span>
+        </p>
+
         <div className="grid grid-cols-2 gap-2 mb-5">
-          {PAYMENT_METHODS.map((m) => (
-            <button
-              key={m.value}
-              onClick={() => setMethod(m.value)}
-              className={`rounded-md border py-3 text-sm font-medium ${
-                method === m.value ? "border-ember bg-ember/10 text-ember-dark" : "border-line text-ink"
-              }`}
-            >
-              {m.label}
-            </button>
-          ))}
+          <button
+            type="button"
+            onClick={() => setMethod("CASH")}
+            className={`rounded-md border py-3 text-sm font-medium ${
+              method === "CASH"
+                ? "bg-ember text-white border-ember"
+                : "border-line"
+            }`}
+          >
+            Efectivo
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setMethod("CARD")}
+            className={`rounded-md border py-3 text-sm font-medium ${
+              method === "CARD"
+                ? "bg-ember text-white border-ember"
+                : "border-line"
+            }`}
+          >
+            Tarjeta
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setMethod("TRANSFER")}
+            className={`rounded-md border py-3 text-sm font-medium ${
+              method === "TRANSFER"
+                ? "bg-ember text-white border-ember"
+                : "border-line"
+            }`}
+          >
+            Transferencia
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setMethod("OTHER")}
+            className={`rounded-md border py-3 text-sm font-medium ${
+              method === "OTHER"
+                ? "bg-ember text-white border-ember"
+                : "border-line"
+            }`}
+          >
+            Otro
+          </button>
         </div>
 
         {method === "CASH" && (
           <div className="mb-5 space-y-2">
             <label className="block">
-              <span className="block text-sm font-medium mb-1.5">Efectivo recibido</span>
+              <span className="block text-sm font-medium mb-1.5">
+                Efectivo recibido
+              </span>
+
               <input
                 type="number"
                 min="0"
@@ -400,20 +589,32 @@ function CheckoutModal({
                 placeholder="0.00"
               />
             </label>
+
             {cashReceivedNum > 0 && (
               <p className="text-sm text-muted">
-                Cambio: <span className="font-mono font-medium text-ink">{formatMxn(Math.max(change, 0))}</span>
+                Cambio:{" "}
+                <span className="font-mono font-medium text-ink">
+                  {formatMxn(Math.max(change, 0))}
+                </span>
               </p>
             )}
           </div>
         )}
 
-        {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
+        {error && (
+          <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">
+            {error}
+          </p>
+        )}
 
         <div className="flex gap-2">
-          <button onClick={onClose} className="flex-1 rounded-md border border-line py-3 text-sm font-medium">
+          <button
+            onClick={onClose}
+            className="flex-1 rounded-md border border-line py-3 text-sm font-medium"
+          >
             Cancelar
           </button>
+
           <button
             onClick={handleConfirm}
             disabled={saving}
