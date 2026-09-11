@@ -23,7 +23,7 @@ const WHATSAPP_LINK = 'https://api.whatsapp.com/send/?phone=5218123557288&text=Q
 
 export default function TappyLandingPage() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [openFaq, setOpenFaq] = useState(null);
+  const [openFaq, setOpenFaq] = useState<number | null>(null);
 
   return (
     <div className="min-h-screen bg-white text-gray-900 scroll-smooth">
@@ -166,13 +166,13 @@ export default function TappyLandingPage() {
 
                         
                         <div className="bg-gray-50 rounded-lg p-4 h-32 flex items-end gap-2">
-                            <div className="flex-1 bg-gradient-to-t from-blue-400 to-green-300 rounded-t opacity-80 hover:opacity-100 transition" style="height: 40%;"></div>
-                            <div className="flex-1 bg-gradient-to-t from-blue-400 to-green-300 rounded-t opacity-80 hover:opacity-100 transition" style="height: 60%;"></div>
-                            <div className="flex-1 bg-gradient-to-t from-blue-400 to-green-300 rounded-t opacity-80 hover:opacity-100 transition" style="height: 45%;"></div>
-                            <div className="flex-1 bg-gradient-to-t from-blue-400 to-green-300 rounded-t opacity-80 hover:opacity-100 transition" style="height: 70%;"></div>
-                            <div className="flex-1 bg-gradient-to-t from-blue-400 to-green-300 rounded-t opacity-80 hover:opacity-100 transition" style="height: 55%;"></div>
-                            <div className="flex-1 bg-gradient-to-t from-blue-400 to-green-300 rounded-t opacity-80 hover:opacity-100 transition" style="height: 80%;"></div>
-                            <div className="flex-1 bg-gradient-to-t from-blue-400 to-green-300 rounded-t opacity-80 hover:opacity-100 transition" style="height: 75%;"></div>
+                            <div className="flex-1 bg-gradient-to-t from-blue-400 to-green-300 rounded-t opacity-80 hover:opacity-100 transition" style={{ height: '40%' }}></div>
+                            <div className="flex-1 bg-gradient-to-t from-blue-400 to-green-300 rounded-t opacity-80 hover:opacity-100 transition" style={{ height: '60%' }}></div>
+                            <div className="flex-1 bg-gradient-to-t from-blue-400 to-green-300 rounded-t opacity-80 hover:opacity-100 transition" style={{ height: '45%' }}></div>
+                            <div className="flex-1 bg-gradient-to-t from-blue-400 to-green-300 rounded-t opacity-80 hover:opacity-100 transition" style={{ height: '70%' }}></div>
+                            <div className="flex-1 bg-gradient-to-t from-blue-400 to-green-300 rounded-t opacity-80 hover:opacity-100 transition" style={{ height: '55%' }}></div>
+                            <div className="flex-1 bg-gradient-to-t from-blue-400 to-green-300 rounded-t opacity-80 hover:opacity-100 transition" style={{ height: '80%' }}></div>
+                            <div className="flex-1 bg-gradient-to-t from-blue-400 to-green-300 rounded-t opacity-80 hover:opacity-100 transition" style={{ height: '75%' }}></div>
                         </div>
                     </div>
                 </div>
