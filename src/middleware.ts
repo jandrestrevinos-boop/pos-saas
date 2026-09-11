@@ -6,6 +6,11 @@ export default withAuth(
     const { pathname } = req.nextUrl;
     const role = req.nextauth.token?.roleName;
 
+    // Excluir webhook de autenticación
+    if (pathname.startsWith("/inicio/webhook")) {
+      return NextResponse.next();
+    }
+
     // Solo SUPER_ADMIN puede entrar a /plataforma/*
     if (pathname.startsWith("/plataforma") && role !== "SUPER_ADMIN") {
       return NextResponse.redirect(new URL("/dashboard", req.url));
