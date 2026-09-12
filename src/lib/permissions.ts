@@ -19,6 +19,7 @@ export const PERMISSIONS = {
   INVENTORY_MANAGE: "inventory.manage",
   REPORTS_VIEW: "reports.view",
   SETTINGS_MANAGE: "settings.manage",
+  HARDWARE_FINANCING_MANAGE: "hardware_financing.manage", // solo SUPER_ADMIN: crear/liquidar/reestructurar financiamientos
 } as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];

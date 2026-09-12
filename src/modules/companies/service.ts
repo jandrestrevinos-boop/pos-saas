@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
+import { hardwareFinancingService } from "@/modules/hardwareFinancing/service";
 
 export const createCompanySchema = z.object({
   name: z.string().min(2, "El nombre es obligatorio"),
@@ -52,7 +53,21 @@ export const companiesService = {
   },
 
   async setStatus(id: string, status: "ACTIVE" | "SUSPENDED") {
-    return prisma.company.update({ where: { id }, data: { status } });
+    const company = await prisma.company.update({ where: { id }, data: { status } });
+
+    // Regla #10 de la spec de financiamiento: suspender/cancelar la
+    // empresa en TAPI NUNCA debe borrar ni alterar un financiamiento de
+    // hardware con saldo pendiente. Este es el punto de enganche más
+    // cercano hoy (no existe todavía un endpoint dedicado de "cancelar
+    // suscripción" — solo este de suspender empresa); si más adelante se
+    // agrega cancelación real de Subscription, replicar esta misma llamada ahí.
+    if (status === "SUSPENDED") {
+      await hardwareFinancingService.logNoEffectEvent(id, "SUBSCRIPTION_CANCELLED_NO_EFFECT", {
+        companyStatus: status,
+      });
+    }
+
+    return company;
   },
 
   async changePlan(companyId: string, planId: string) {
@@ -73,6 +88,15 @@ export const companiesService = {
     }
 
     await prisma.subscription.update({ where: { companyId }, data: { planId } });
+
+    // Regla #9 de la spec de financiamiento: un cambio de plan de software
+    // NUNCA debe tocar un financiamiento de hardware activo. No hace falta
+    // ningún ajuste aquí — HardwareFinancing vive en tablas separadas —
+    // solo dejamos constancia en auditoría para quien revise el historial.
+    await hardwareFinancingService.logNoEffectEvent(companyId, "PLAN_CHANGED_NO_EFFECT", {
+      fromPlanId: subscription.planId,
+      toPlanId: planId,
+    });
 
     if (subscription.license) {
       await prisma.license.update({
