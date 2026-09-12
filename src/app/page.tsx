@@ -301,67 +301,31 @@ export default function TappyLandingPage() {
                 <div className="group bg-white/10 backdrop-blur-md rounded-2xl p-8 border border-white/30 hover:bg-white/20 hover:shadow-2xl transition-all duration-300 cursor-pointer">
                     <div className="w-16 h-16 bg-gradient-to-br from-blue-600 via-blue-500 to-cyan-400 rounded-2xl mb-4 flex items-center justify-center group-hover:scale-110 transition-transform duration-300 shadow-lg shadow-blue-500/20"><UtensilsCrossed className="w-8 h-8 text-white" /></div><h3 className="text-xl font-semibold text-gray-900 mb-2">Restaurante</h3>
                     <p className="text-gray-600 mb-4">Controla ventas, productos, inventario y operación diaria.</p>
-                    <a href="#" className="inline-flex items-center gap-2 text-blue-600 hover:text-blue-700 font-semibold group/btn transition">
-                        Conoce más
-                        <svg className="w-5 h-5 group-hover/btn:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6"></path>
-                        </svg>
-                    </a>
                 </div>
 
                 <div className="group bg-white/10 backdrop-blur-md rounded-2xl p-8 border border-white/30 hover:bg-white/20 hover:shadow-2xl transition-all duration-300 cursor-pointer">
                     <div className="w-16 h-16 bg-gradient-to-br from-blue-600 via-blue-500 to-cyan-400 rounded-2xl mb-4 flex items-center justify-center group-hover:scale-110 transition-transform duration-300 shadow-lg shadow-blue-500/20"><Coffee className="w-8 h-8 text-white" /></div><h3 className="text-xl font-semibold text-gray-900 mb-2">Cafetería</h3>
                     <p className="text-gray-600 mb-4">Agiliza pedidos y controla tus productos desde un solo lugar.</p>
-                    <a href="#" className="inline-flex items-center gap-2 text-blue-600 hover:text-blue-700 font-semibold group/btn transition">
-                        Conoce más
-                        <svg className="w-5 h-5 group-hover/btn:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6"></path>
-                        </svg>
-                    </a>
                 </div>
 
                 <div className="group bg-white/10 backdrop-blur-md rounded-2xl p-8 border border-white/30 hover:bg-white/20 hover:shadow-2xl transition-all duration-300 cursor-pointer">
                     <div className="w-16 h-16 bg-gradient-to-br from-blue-600 via-blue-500 to-cyan-400 rounded-2xl mb-4 flex items-center justify-center group-hover:scale-110 transition-transform duration-300 shadow-lg shadow-blue-500/20"><Flame className="w-8 h-8 text-white" /></div><h3 className="text-xl font-semibold text-gray-900 mb-2">Taquería</h3>
                     <p className="text-gray-600 mb-4">Registra ventas rápidamente y controla tus productos.</p>
-                    <a href="#" className="inline-flex items-center gap-2 text-blue-600 hover:text-blue-700 font-semibold group/btn transition">
-                        Conoce más
-                        <svg className="w-5 h-5 group-hover/btn:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6"></path>
-                        </svg>
-                    </a>
                 </div>
 
                 <div className="group bg-white/10 backdrop-blur-md rounded-2xl p-8 border border-white/30 hover:bg-white/20 hover:shadow-2xl transition-all duration-300 cursor-pointer">
                     <div className="w-16 h-16 bg-gradient-to-br from-blue-600 via-blue-500 to-cyan-400 rounded-2xl mb-4 flex items-center justify-center group-hover:scale-110 transition-transform duration-300 shadow-lg shadow-blue-500/20"><Zap className="w-8 h-8 text-white" /></div><h3 className="text-xl font-semibold text-gray-900 mb-2">Comida Rápida</h3>
                     <p className="text-gray-600 mb-4">Reduce tiempos de atención y mantén el control de tus ventas.</p>
-                    <a href="#" className="inline-flex items-center gap-2 text-blue-600 hover:text-blue-700 font-semibold group/btn transition">
-                        Conoce más
-                        <svg className="w-5 h-5 group-hover/btn:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6"></path>
-                        </svg>
-                    </a>
                 </div>
 
                 <div className="group bg-white/10 backdrop-blur-md rounded-2xl p-8 border border-white/30 hover:bg-white/20 hover:shadow-2xl transition-all duration-300 cursor-pointer">
                     <div className="w-16 h-16 bg-gradient-to-br from-blue-600 via-blue-500 to-cyan-400 rounded-2xl mb-4 flex items-center justify-center group-hover:scale-110 transition-transform duration-300 shadow-lg shadow-blue-500/20"><Martini className="w-8 h-8 text-white" /></div><h3 className="text-xl font-semibold text-gray-900 mb-2">Bar</h3>
                     <p className="text-gray-600 mb-4">Controla productos, ventas e inventario.</p>
-                    <a href="#" className="inline-flex items-center gap-2 text-blue-600 hover:text-blue-700 font-semibold group/btn transition">
-                        Conoce más
-                        <svg className="w-5 h-5 group-hover/btn:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6"></path>
-                        </svg>
-                    </a>
                 </div>
 
                 <div className="group bg-white/10 backdrop-blur-md rounded-2xl p-8 border border-white/30 hover:bg-white/20 hover:shadow-2xl transition-all duration-300 cursor-pointer">
                     <div className="w-16 h-16 bg-gradient-to-br from-blue-600 via-blue-500 to-cyan-400 rounded-2xl mb-4 flex items-center justify-center group-hover:scale-110 transition-transform duration-300 shadow-lg shadow-blue-500/20"><Store className="w-8 h-8 text-white" /></div><h3 className="text-xl font-semibold text-gray-900 mb-2">Restaurante Pequeño</h3>
                     <p className="text-gray-600 mb-4">Empieza con las herramientas necesarias para tu negocio.</p>
-                    <a href="#" className="inline-flex items-center gap-2 text-blue-600 hover:text-blue-700 font-semibold group/btn transition">
-                        Conoce más
-                        <svg className="w-5 h-5 group-hover/btn:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6"></path>
-                        </svg>
-                    </a>
                 </div>
             </div>
         </div>
@@ -422,7 +386,7 @@ export default function TappyLandingPage() {
                 <div className="bg-white rounded-2xl p-8 border border-gray-200 hover:border-blue-300 transition-all duration-300">
                     <h3 className="text-2xl font-bold text-gray-900 mb-2">🟢 Tappy Básico</h3>
                     <div className="mb-6">
-                        <span className="text-4xl font-bold text-blue-600">$299</span>
+                        <span className="text-4xl font-bold text-blue-600">$599</span>
                         <span className="text-gray-600 ml-2">MXN/mes</span>
                     </div>
                     <p className="text-gray-600 mb-8">Negocios que comienzan o tienen una sola operación</p>
@@ -508,7 +472,7 @@ export default function TappyLandingPage() {
                     </div>
                     <h3 className="text-2xl font-bold mb-2">🔵 Tappy Profesional</h3>
                     <div className="mb-6">
-                        <span className="text-4xl font-bold">$599</span>
+                        <span className="text-4xl font-bold">$1,199</span>
                         <span className="text-blue-200 ml-2">MXN/mes</span>
                     </div>
                     <p className="text-blue-100 mb-8">Negocios que quieren conectar y automatizar</p>
@@ -591,7 +555,7 @@ export default function TappyLandingPage() {
                 <div className="bg-white rounded-2xl p-8 border border-gray-200 hover:border-blue-300 transition-all duration-300">
                     <h3 className="text-2xl font-bold text-gray-900 mb-2">🟣 Tappy Empresarial</h3>
                     <div className="mb-6">
-                        <span className="text-4xl font-bold text-blue-600">$999</span>
+                        <span className="text-4xl font-bold text-blue-600">$1,999</span>
                         <span className="text-gray-600 ml-2">MXN/mes</span>
                     </div>
                     <p className="text-gray-600 mb-8">Empresas que administran varias sucursales</p>
