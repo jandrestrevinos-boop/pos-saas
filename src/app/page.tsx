@@ -41,10 +41,10 @@ export default function TappyLandingPage() {
     
     <nav className="sticky top-0 z-50 bg-white border-b border-gray-100 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex justify-between items-center h-16">
+            <div className="flex justify-between items-center h-24">
                 
                 <a href="/" className="flex-shrink-0 font-bold text-2xl flex items-center gap-2 hover:opacity-80 transition">
-                    <img src="/images/logo.png" alt="Tappy" className="h-16 w-auto" />
+                    <img src="/images/logo.png" alt="Tappy" className="h-20 w-auto" />
                 </a>
 
                 
@@ -460,9 +460,9 @@ export default function TappyLandingPage() {
                             <span>Soporte Estándar</span>
                         </li>
                     </ul>
-                    <button className="w-full px-6 py-3 border-2 border-blue-600 text-blue-600 rounded-lg font-semibold hover:bg-blue-50 transition-all duration-300">
+                    <a href="https://api.whatsapp.com/send/?phone=5218123557288&text=Quiero%20contratar%20el%20plan%20B%C3%A1sico" target="_blank" className="block text-center w-full px-6 py-3 border-2 border-blue-600 text-blue-600 rounded-lg font-semibold hover:bg-blue-50 transition-all duration-300">
                         Elegir Básico
-                    </button>
+                    </a>
                 </div>
 
                 
@@ -546,9 +546,9 @@ export default function TappyLandingPage() {
                             <span>Soporte Prioritario</span>
                         </li>
                     </ul>
-                    <button className="w-full px-6 py-3 bg-white text-blue-600 rounded-lg font-semibold hover:bg-blue-50 transition-all duration-300">
+                    <a href="https://api.whatsapp.com/send/?phone=5218123557288&text=Quiero%20contratar%20el%20plan%20Profesional" target="_blank" className="block text-center w-full px-6 py-3 bg-white text-blue-600 rounded-lg font-semibold hover:bg-blue-50 transition-all duration-300">
                         Elegir Profesional
-                    </button>
+                    </a>
                 </div>
 
                 
@@ -645,9 +645,9 @@ export default function TappyLandingPage() {
                             <span>Soporte Prioritario</span>
                         </li>
                     </ul>
-                    <button className="w-full px-6 py-3 border-2 border-blue-600 text-blue-600 rounded-lg font-semibold hover:bg-blue-50 transition-all duration-300">
+                    <a href="https://api.whatsapp.com/send/?phone=5218123557288&text=Quiero%20contratar%20el%20plan%20Empresarial" target="_blank" className="block text-center w-full px-6 py-3 border-2 border-blue-600 text-blue-600 rounded-lg font-semibold hover:bg-blue-50 transition-all duration-300">
                         Elegir Empresarial
-                    </button>
+                    </a>
                 </div>
             </div>
 
