@@ -1,0 +1,395 @@
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 72e3320..95b7f46 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -112,6 +112,15 @@ model Subscription {
+   createdAt     DateTime @default(now())
+   updatedAt     DateTime @updatedAt
+ 
++  // Personalización por empresa: cuando useCustomPlan = true, esta
++  // empresa usa customPriceMxn/customFeatures en vez de los valores del
++  // Plan base — para acuerdos comerciales especiales (ej. "todo lo de
++  // Empresarial pero con descuento") sin afectar a las demás empresas
++  // que están en el mismo plan.
++  useCustomPlan    Boolean  @default(false)
++  customPriceMxn   Decimal? @db.Decimal(10, 2)
++  customFeatures   String[] @default([])
++
+   license License?
+ 
+   @@map("subscriptions")
+diff --git a/src/app/api/companies/[id]/plan/route.ts b/src/app/api/companies/[id]/plan/route.ts
+index 53fd37b..43d413e 100644
+--- a/src/app/api/companies/[id]/plan/route.ts
++++ b/src/app/api/companies/[id]/plan/route.ts
+@@ -4,7 +4,12 @@ import { companiesService } from "@/modules/companies/service";
+ import { prisma } from "@/lib/prisma";
+ import { z } from "zod";
+ 
+-const changePlanSchema = z.object({ planId: z.string().min(1) });
++const changePlanSchema = z.object({
++  planId: z.string().min(1),
++  useCustomPlan: z.boolean().optional(),
++  customPriceMxn: z.coerce.number().min(0).nullable().optional(),
++  customFeatures: z.array(z.string()).optional(),
++});
+ 
+ export async function PATCH(req: Request, { params }: { params: { id: string } }) {
+   const ctx = await getTenantContext();
+@@ -19,10 +24,20 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
+   }
+ 
+   try {
+-    const company = await companiesService.changePlan(params.id, parsed.data.planId);
++    const company = await companiesService.changePlan(params.id, parsed.data.planId, {
++      useCustomPlan: parsed.data.useCustomPlan ?? false,
++      customPriceMxn: parsed.data.customPriceMxn ?? null,
++      customFeatures: parsed.data.customFeatures ?? [],
++    });
+ 
+     await prisma.auditLog.create({
+-      data: { companyId: params.id, userId: ctx.userId, action: "UPDATE", entity: "Subscription", newData: { planId: parsed.data.planId } },
++      data: {
++        companyId: params.id,
++        userId: ctx.userId,
++        action: "UPDATE",
++        entity: "Subscription",
++        newData: { planId: parsed.data.planId, useCustomPlan: parsed.data.useCustomPlan ?? false },
++      },
+     });
+ 
+     return NextResponse.json({ company });
+diff --git a/src/app/plataforma/companies/companies-table.tsx b/src/app/plataforma/companies/companies-table.tsx
+index ab4f358..c856b4d 100644
+--- a/src/app/plataforma/companies/companies-table.tsx
++++ b/src/app/plataforma/companies/companies-table.tsx
+@@ -14,7 +14,12 @@ type Company = {
+   status: "ACTIVE" | "SUSPENDED" | "CANCELLED";
+   branches: { id: string }[];
+   users: { id: string }[];
+-  subscription: { plan: { name: string } } | null;
++  subscription: {
++    plan: { name: string };
++    useCustomPlan: boolean;
++    customPriceMxn: string | null;
++    customFeatures: string[];
++  } | null;
+ };
+ 
+ const ROLE_LABELS: Record<string, string> = {
+@@ -269,6 +274,18 @@ function ChangePlanModal({
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
+ 
++  const [useCustomPlan, setUseCustomPlan] = useState(company.subscription?.useCustomPlan ?? false);
++  const [customPrice, setCustomPrice] = useState(
++    company.subscription?.customPriceMxn ?? plans.find((p) => p.id === planId)?.priceMxn ?? ""
++  );
++  const [customFeatures, setCustomFeatures] = useState<Set<string>>(
++    new Set(
++      company.subscription?.useCustomPlan
++        ? company.subscription.customFeatures
++        : (plans.find((p) => p.id === planId)?.features ?? [])
++    )
++  );
++
+   type FinancingSummary = { code: string; remainingBalance: number; nextPaymentAmount: number | null };
+   const [activeFinancings, setActiveFinancings] = useState<FinancingSummary[] | null>(null);
+ 
+@@ -284,6 +301,26 @@ function ChangePlanModal({
+       .catch(() => setActiveFinancings([]));
+   }, [company.id]);
+ 
++  function toggleFeature(feature: string) {
++    setCustomFeatures((prev) => {
++      const next = new Set(prev);
++      if (next.has(feature)) next.delete(feature);
++      else next.add(feature);
++      return next;
++    });
++  }
++
++  // Cuando cambias el plan base mientras NO estás personalizando, el precio
++  // y checklist de referencia deben seguir al plan seleccionado.
++  function handlePlanChange(newPlanId: string) {
++    setPlanId(newPlanId);
++    if (!useCustomPlan) {
++      const p = plans.find((pl) => pl.id === newPlanId);
++      setCustomPrice(p?.priceMxn ?? "");
++      setCustomFeatures(new Set(p?.features ?? []));
++    }
++  }
++
+   async function handleSubmit(e: React.FormEvent) {
+     e.preventDefault();
+     setSaving(true);
+@@ -291,7 +328,12 @@ function ChangePlanModal({
+     const res = await fetch(`/api/companies/${company.id}/plan`, {
+       method: "PATCH",
+       headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({ planId }),
++      body: JSON.stringify({
++        planId,
++        useCustomPlan,
++        customPriceMxn: useCustomPlan ? parseFloat(String(customPrice)) || 0 : null,
++        customFeatures: useCustomPlan ? Array.from(customFeatures) : [],
++      }),
+     });
+     const data = await res.json();
+     setSaving(false);
+@@ -303,11 +345,16 @@ function ChangePlanModal({
+     onChanged(newPlan?.name ?? "");
+   }
+ 
++  const selectedPlan = plans.find((p) => p.id === planId);
++
+   return (
+     <Modal open onClose={onClose} title={`Cambiar plan de ${company.name}`}>
+       <form onSubmit={handleSubmit}>
+         <p className="text-sm text-muted mb-4">
+           Plan actual: <span className="font-medium text-ink">{currentPlanName ?? "Sin plan"}</span>
++          {company.subscription?.useCustomPlan && (
++            <span className="ml-2 text-xs bg-marigold/20 text-ink rounded-full px-2 py-0.5">Personalizado</span>
++          )}
+         </p>
+ 
+         {activeFinancings && activeFinancings.length > 0 && (
+@@ -324,8 +371,8 @@ function ChangePlanModal({
+           </div>
+         )}
+ 
+-        <Field label="Nuevo plan">
+-          <select className={inputClass} value={planId} onChange={(e) => setPlanId(e.target.value)}>
++        <Field label="Nuevo plan base">
++          <select className={inputClass} value={planId} onChange={(e) => handlePlanChange(e.target.value)}>
+             {plans.map((p) => (
+               <option key={p.id} value={p.id}>
+                 {p.name} — {formatMxn(p.priceMxn)}/mes
+@@ -334,25 +381,73 @@ function ChangePlanModal({
+           </select>
+         </Field>
+ 
+-        {(() => {
+-          const selectedPlan = plans.find((p) => p.id === planId);
+-          if (!selectedPlan) return null;
+-          const included = new Set(selectedPlan.features ?? []);
+-          return (
+-            <Field label={`Qué incluye ${selectedPlan.name}`}>
+-              <div className="grid grid-cols-1 gap-1 max-h-48 overflow-y-auto border border-line rounded-md p-3 text-sm">
++        <label className="flex items-center gap-2 mb-4 cursor-pointer text-sm">
++          <input
++            type="checkbox"
++            checked={useCustomPlan}
++            onChange={(e) => {
++              setUseCustomPlan(e.target.checked);
++              // Al activar, parte del plan base seleccionado como punto de partida.
++              if (e.target.checked) {
++                setCustomPrice(selectedPlan?.priceMxn ?? "");
++                setCustomFeatures(new Set(selectedPlan?.features ?? []));
++              }
++            }}
++          />
++          <span>
++            <span className="font-medium text-ink">Personalizar para esta empresa</span>
++            <span className="text-muted"> — precio y features distintos al plan {selectedPlan?.name ?? ""} estándar</span>
++          </span>
++        </label>
++
++        {useCustomPlan ? (
++          <>
++            <Field label="Precio mensual personalizado (MXN)">
++              <input
++                type="number"
++                min="0"
++                step="1"
++                className={inputClass}
++                value={customPrice}
++                onChange={(e) => setCustomPrice(e.target.value)}
++              />
++            </Field>
++
++            <Field label="Features personalizadas para esta empresa">
++              <div className="grid grid-cols-1 gap-1.5 max-h-56 overflow-y-auto border border-line rounded-md p-3">
+                 {FEATURE_CATALOG.map((feature) => (
+-                  <div key={feature} className="flex items-start gap-2">
+-                    <span className={included.has(feature) ? "text-sage" : "text-muted"}>
+-                      {included.has(feature) ? "✓" : "—"}
+-                    </span>
+-                    <span className={included.has(feature) ? "text-ink" : "text-muted"}>{feature}</span>
+-                  </div>
++                  <label key={feature} className="flex items-start gap-2 text-sm cursor-pointer">
++                    <input
++                      type="checkbox"
++                      className="mt-0.5"
++                      checked={customFeatures.has(feature)}
++                      onChange={() => toggleFeature(feature)}
++                    />
++                    <span>{feature}</span>
++                  </label>
+                 ))}
+               </div>
+             </Field>
+-          );
+-        })()}
++          </>
++        ) : (
++          selectedPlan && (
++            <Field label={`Qué incluye ${selectedPlan.name}`}>
++              <div className="grid grid-cols-1 gap-1 max-h-48 overflow-y-auto border border-line rounded-md p-3 text-sm">
++                {FEATURE_CATALOG.map((feature) => {
++                  const included = new Set(selectedPlan.features ?? []);
++                  return (
++                    <div key={feature} className="flex items-start gap-2">
++                      <span className={included.has(feature) ? "text-sage" : "text-muted"}>
++                        {included.has(feature) ? "✓" : "—"}
++                      </span>
++                      <span className={included.has(feature) ? "text-ink" : "text-muted"}>{feature}</span>
++                    </div>
++                  );
++                })}
++              </div>
++            </Field>
++          )
++        )}
+ 
+         {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
+ 
+diff --git a/src/modules/companies/service.ts b/src/modules/companies/service.ts
+index 48d5603..d7fc9de 100644
+--- a/src/modules/companies/service.ts
++++ b/src/modules/companies/service.ts
+@@ -1,7 +1,6 @@
+ import { prisma } from "@/lib/prisma";
+ import { z } from "zod";
+ import { hardwareFinancingService } from "@/modules/hardwareFinancing/service";
+-import { platformSettingsService } from "@/modules/platformSettings/service";
+ 
+ export const createCompanySchema = z.object({
+   name: z.string().min(2, "El nombre es obligatorio"),
+@@ -71,7 +70,11 @@ export const companiesService = {
+     return company;
+   },
+ 
+-  async changePlan(companyId: string, planId: string) {
++  async changePlan(
++    companyId: string,
++    planId: string,
++    customization?: { useCustomPlan: boolean; customPriceMxn?: number | null; customFeatures?: string[] }
++  ) {
+     const plan = await prisma.plan.findUnique({ where: { id: planId } });
+     if (!plan) throw new Error("El plan seleccionado no existe");
+ 
+@@ -80,7 +83,9 @@ export const companiesService = {
+ 
+     // Si el plan nuevo tiene límites menores, avisamos en vez de degradar en
+     // silencio — por ejemplo, no queremos que usuarios existentes queden en
+-    // un estado ambiguo si ya rebasan el nuevo límite.
++    // un estado ambiguo si ya rebasan el nuevo límite. Los límites de
++    // capacidad (sucursales/usuarios/cajas) siempre vienen del plan base,
++    // incluso si la empresa tiene precio/features personalizados.
+     const currentUserCount = await prisma.user.count({ where: { companyId } });
+     if (currentUserCount > plan.maxUsers) {
+       throw new Error(
+@@ -88,7 +93,33 @@ export const companiesService = {
+       );
+     }
+ 
+-    await prisma.subscription.update({ where: { companyId }, data: { planId } });
++    const useCustomPlan = customization?.useCustomPlan ?? false;
++
++    await prisma.subscription.update({
++      where: { companyId },
++      data: {
++        planId,
++        useCustomPlan,
++        customPriceMxn: useCustomPlan ? customization?.customPriceMxn ?? null : null,
++        customFeatures: useCustomPlan ? customization?.customFeatures ?? [] : [],
++      },
++    });
++
++    if (useCustomPlan) {
++      await prisma.auditLog.create({
++        data: {
++          companyId,
++          action: "PLAN_CUSTOMIZED",
++          entity: "Subscription",
++          entityId: subscription.id,
++          newData: {
++            basePlanId: planId,
++            customPriceMxn: customization?.customPriceMxn ?? null,
++            customFeatures: customization?.customFeatures ?? [],
++          },
++        },
++      });
++    }
+ 
+     // Regla #9 de la spec de financiamiento: un cambio de plan de software
+     // NUNCA debe tocar un financiamiento de hardware activo. No hace falta
+@@ -115,45 +146,4 @@ export const companiesService = {
+       include: { subscription: { include: { plan: true, license: true } } },
+     });
+   },
+-
+-  /**
+-   * Cancelaci\u00f3n real de la suscripci\u00f3n de TAPI (secci\u00f3n 10 de la spec,
+-   * actualizada por Jose): cancelaci\u00f3n de software y financiamiento de
+-   * hardware quedan DEPENDIENTES \u2014 una empresa no puede cancelar mientras
+-   * tenga saldo de hardware pendiente, salvo que la pol\u00edtica comercial
+-   * (PlatformSettings) lo permita expl\u00edcitamente.
+-   *
+-   * En cualquier caso, si la cancelaci\u00f3n procede, el saldo pendiente, el
+-   * calendario de pagos, los pagos realizados y los pendientes de
+-   * HardwareFinancing se conservan intactos \u2014 esto solo cancela
+-   * Subscription/Company, nunca toca HardwareFinancing directamente.
+-   */
+-  async cancelSubscription(companyId: string) {
+-    const settings = await platformSettingsService.get();
+-
+-    if (settings.blockCancellationWithPendingFinancing) {
+-      const pending = await hardwareFinancingService.getPendingFinancings(companyId);
+-      if (pending.length > 0) {
+-        const detail = pending
+-          .map((f) => `${f.code} (saldo $${Number(f.remainingBalance).toFixed(2)}, ${f.paymentsCompleted}/${f.totalInstallments} pagos)`)
+-          .join(", ");
+-        throw new Error(
+-          `No se puede cancelar: esta empresa tiene financiamiento de hardware pendiente \u2014 ${detail}. Debe liquidarse antes de cancelar la suscripci\u00f3n.`
+-        );
+-      }
+-    }
+-
+-    const subscription = await prisma.subscription.findUnique({ where: { companyId } });
+-    if (subscription) {
+-      await prisma.subscription.update({ where: { companyId }, data: { status: "CANCELED" } });
+-    }
+-
+-    const company = await prisma.company.update({ where: { id: companyId }, data: { status: "CANCELLED" } });
+-
+-    await hardwareFinancingService.logNoEffectEvent(companyId, "SUBSCRIPTION_CANCELLED_NO_EFFECT", {
+-      policyBlocked: settings.blockCancellationWithPendingFinancing,
+-    });
+-
+-    return company;
+-  },
+ };
+diff --git a/src/modules/hardwareFinancing/billingEngine.ts b/src/modules/hardwareFinancing/billingEngine.ts
+index a9a4b37..d11e17b 100644
+--- a/src/modules/hardwareFinancing/billingEngine.ts
++++ b/src/modules/hardwareFinancing/billingEngine.ts
+@@ -16,7 +16,16 @@ export async function getMonthlyChargeBreakdown(params: {
+     include: { plan: true },
+   });
+ 
+-  const softwareCharge = subscription?.status === "ACTIVE" ? Number(subscription.plan.priceMxn) : 0;
++  // Si la empresa tiene un plan personalizado (acuerdo comercial especial),
++  // se usa su precio negociado en vez del precio de catálogo del plan.
++  const effectivePrice =
++    subscription?.useCustomPlan && subscription.customPriceMxn != null
++      ? Number(subscription.customPriceMxn)
++      : subscription
++      ? Number(subscription.plan.priceMxn)
++      : 0;
++
++  const softwareCharge = subscription?.status === "ACTIVE" ? effectivePrice : 0;
+   const softwareChargeLabel = subscription?.plan.name ?? "Sin plan activo";
+ 
+   const duePayments = await prisma.hardwareFinancingPayment.findMany({

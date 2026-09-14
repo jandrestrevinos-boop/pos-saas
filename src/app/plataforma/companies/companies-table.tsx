@@ -4,16 +4,22 @@ import { useEffect, useState } from "react";
 import { Button, Card, StatusBadge } from "@/components/ui";
 import { Modal, Field, inputClass } from "@/components/ui/modal";
 import { formatMxn } from "@/lib/format";
+import { FEATURE_CATALOG } from "@/lib/plan-features";
 
-type Plan = { id: string; name: string; priceMxn: string };
+type Plan = { id: string; name: string; priceMxn: string; features: string[] | null };
 type Role = { id: string; name: string };
 type Company = {
   id: string;
   name: string;
-  status: "ACTIVE" | "SUSPENDED";
+  status: "ACTIVE" | "SUSPENDED" | "CANCELLED";
   branches: { id: string }[];
   users: { id: string }[];
-  subscription: { plan: { name: string } } | null;
+  subscription: {
+    plan: { name: string };
+    useCustomPlan?: boolean;
+    customPriceMxn?: string | null;
+    customFeatures?: string[];
+  } | null;
 };
 
 const ROLE_LABELS: Record<string, string> = {
@@ -82,6 +88,21 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
     }
   }
 
+  async function cancelSubscription(company: Company) {
+    const confirmed = confirm(
+      `\u00bfCancelar la suscripci\u00f3n de TAPI de "${company.name}"? Si tiene financiamiento de hardware pendiente y la pol\u00edtica lo bloquea, no se podr\u00e1 cancelar hasta liquidarlo.`
+    );
+    if (!confirmed) return;
+
+    const res = await fetch(`/api/companies/${company.id}/cancel`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.error ?? "No se pudo cancelar la suscripci\u00f3n");
+      return;
+    }
+    setCompanies((prev) => prev.map((c) => (c.id === company.id ? { ...c, status: "CANCELLED" } : c)));
+  }
+
   async function deleteCompany(company: Company) {
     const confirmed = confirm(
       `¿Eliminar "${company.name}" por completo? Esto borra todos sus usuarios, productos, ventas e historial. Esta acción no se puede deshacer.`
@@ -132,15 +153,25 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
                   <td className="px-5 py-3 font-mono">{c.branches.length}</td>
                   <td className="px-5 py-3 font-mono">{c.users.length}</td>
                   <td className="px-5 py-3">
-                    <StatusBadge status={c.status} label={c.status === "ACTIVE" ? "Activa" : "Suspendida"} />
+                    <StatusBadge
+                      status={c.status}
+                      label={c.status === "ACTIVE" ? "Activa" : c.status === "SUSPENDED" ? "Suspendida" : "Cancelada"}
+                    />
                   </td>
                   <td className="px-5 py-3 text-right space-x-1">
                     <Button variant="ghost" onClick={() => setUsersCompany(c)}>
                       Usuarios
                     </Button>
-                    <Button variant="ghost" onClick={() => toggleStatus(c)}>
-                      {c.status === "ACTIVE" ? "Suspender" : "Activar"}
-                    </Button>
+                    {c.status !== "CANCELLED" && (
+                      <Button variant="ghost" onClick={() => toggleStatus(c)}>
+                        {c.status === "ACTIVE" ? "Suspender" : "Activar"}
+                      </Button>
+                    )}
+                    {c.status !== "CANCELLED" && (
+                      <Button variant="ghost" onClick={() => cancelSubscription(c)} className="text-ember-dark hover:bg-ember/10">
+                        Cancelar suscripci\u00f3n
+                      </Button>
+                    )}
                     <Button variant="ghost" onClick={() => deleteCompany(c)} className="text-ember-dark hover:bg-ember/10">
                       Eliminar
                     </Button>
@@ -243,6 +274,53 @@ function ChangePlanModal({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
+  const [useCustomPlan, setUseCustomPlan] = useState(company.subscription?.useCustomPlan ?? false);
+  const [customPrice, setCustomPrice] = useState(
+    company.subscription?.customPriceMxn ?? plans.find((p) => p.id === planId)?.priceMxn ?? ""
+  );
+  const [customFeatures, setCustomFeatures] = useState<Set<string>>(
+    new Set(
+      company.subscription?.useCustomPlan
+        ? company.subscription.customFeatures
+        : (plans.find((p) => p.id === planId)?.features ?? [])
+    )
+  );
+
+  type FinancingSummary = { code: string; remainingBalance: number; nextPaymentAmount: number | null };
+  const [activeFinancings, setActiveFinancings] = useState<FinancingSummary[] | null>(null);
+
+  useEffect(() => {
+    fetch(`/api/hardware-financing?companyId=${company.id}`)
+      .then((res) => (res.ok ? res.json() : { financings: [] }))
+      .then((data) => {
+        const active = (data.financings ?? []).filter((f: { status: string }) =>
+          ["ACTIVE", "PARTIALLY_PAID", "OVERDUE", "PENDING"].includes(f.status)
+        );
+        setActiveFinancings(active);
+      })
+      .catch(() => setActiveFinancings([]));
+  }, [company.id]);
+
+  function toggleFeature(feature: string) {
+    setCustomFeatures((prev) => {
+      const next = new Set(prev);
+      if (next.has(feature)) next.delete(feature);
+      else next.add(feature);
+      return next;
+    });
+  }
+
+  // Cuando cambias el plan base mientras NO estás personalizando, el precio
+  // y checklist de referencia deben seguir al plan seleccionado.
+  function handlePlanChange(newPlanId: string) {
+    setPlanId(newPlanId);
+    if (!useCustomPlan) {
+      const p = plans.find((pl) => pl.id === newPlanId);
+      setCustomPrice(p?.priceMxn ?? "");
+      setCustomFeatures(new Set(p?.features ?? []));
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
@@ -250,7 +328,12 @@ function ChangePlanModal({
     const res = await fetch(`/api/companies/${company.id}/plan`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ planId }),
+      body: JSON.stringify({
+        planId,
+        useCustomPlan,
+        customPriceMxn: useCustomPlan ? parseFloat(String(customPrice)) || 0 : null,
+        customFeatures: useCustomPlan ? Array.from(customFeatures) : [],
+      }),
     });
     const data = await res.json();
     setSaving(false);
@@ -262,14 +345,34 @@ function ChangePlanModal({
     onChanged(newPlan?.name ?? "");
   }
 
+  const selectedPlan = plans.find((p) => p.id === planId);
+
   return (
     <Modal open onClose={onClose} title={`Cambiar plan de ${company.name}`}>
       <form onSubmit={handleSubmit}>
         <p className="text-sm text-muted mb-4">
           Plan actual: <span className="font-medium text-ink">{currentPlanName ?? "Sin plan"}</span>
+          {company.subscription?.useCustomPlan && (
+            <span className="ml-2 text-xs bg-marigold/20 text-ink rounded-full px-2 py-0.5">Personalizado</span>
+          )}
         </p>
-        <Field label="Nuevo plan">
-          <select className={inputClass} value={planId} onChange={(e) => setPlanId(e.target.value)}>
+
+        {activeFinancings && activeFinancings.length > 0 && (
+          <div className="text-xs bg-sage-light border border-sage/30 rounded-md px-3 py-2 mb-4">
+            <p className="font-medium text-ink mb-1">
+              Esta empresa tiene {activeFinancings.length === 1 ? "un financiamiento de hardware activo" : `${activeFinancings.length} financiamientos de hardware activos`}
+            </p>
+            {activeFinancings.map((f) => (
+              <p key={f.code} className="text-muted">
+                {f.code} — saldo pendiente {formatMxn(String(f.remainingBalance))}
+              </p>
+            ))}
+            <p className="text-muted mt-1">Cambiar el plan de software no lo afecta: sigue su calendario normal.</p>
+          </div>
+        )}
+
+        <Field label="Nuevo plan base">
+          <select className={inputClass} value={planId} onChange={(e) => handlePlanChange(e.target.value)}>
             {plans.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name} — {formatMxn(p.priceMxn)}/mes
@@ -277,6 +380,74 @@ function ChangePlanModal({
             ))}
           </select>
         </Field>
+
+        <label className="flex items-center gap-2 mb-4 cursor-pointer text-sm">
+          <input
+            type="checkbox"
+            checked={useCustomPlan}
+            onChange={(e) => {
+              setUseCustomPlan(e.target.checked);
+              // Al activar, parte del plan base seleccionado como punto de partida.
+              if (e.target.checked) {
+                setCustomPrice(selectedPlan?.priceMxn ?? "");
+                setCustomFeatures(new Set(selectedPlan?.features ?? []));
+              }
+            }}
+          />
+          <span>
+            <span className="font-medium text-ink">Personalizar para esta empresa</span>
+            <span className="text-muted"> — precio y features distintos al plan {selectedPlan?.name ?? ""} estándar</span>
+          </span>
+        </label>
+
+        {useCustomPlan ? (
+          <>
+            <Field label="Precio mensual personalizado (MXN)">
+              <input
+                type="number"
+                min="0"
+                step="1"
+                className={inputClass}
+                value={customPrice}
+                onChange={(e) => setCustomPrice(e.target.value)}
+              />
+            </Field>
+
+            <Field label="Features personalizadas para esta empresa">
+              <div className="grid grid-cols-1 gap-1.5 max-h-56 overflow-y-auto border border-line rounded-md p-3">
+                {FEATURE_CATALOG.map((feature) => (
+                  <label key={feature} className="flex items-start gap-2 text-sm cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={customFeatures.has(feature)}
+                      onChange={() => toggleFeature(feature)}
+                    />
+                    <span>{feature}</span>
+                  </label>
+                ))}
+              </div>
+            </Field>
+          </>
+        ) : (
+          selectedPlan && (
+            <Field label={`Qué incluye ${selectedPlan.name}`}>
+              <div className="grid grid-cols-1 gap-1 max-h-48 overflow-y-auto border border-line rounded-md p-3 text-sm">
+                {FEATURE_CATALOG.map((feature) => {
+                  const included = new Set(selectedPlan.features ?? []);
+                  return (
+                    <div key={feature} className="flex items-start gap-2">
+                      <span className={included.has(feature) ? "text-sage" : "text-muted"}>
+                        {included.has(feature) ? "✓" : "—"}
+                      </span>
+                      <span className={included.has(feature) ? "text-ink" : "text-muted"}>{feature}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </Field>
+          )
+        )}
 
         {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
 

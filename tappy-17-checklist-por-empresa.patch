@@ -1,0 +1,128 @@
+diff --git a/src/app/plataforma/companies/companies-table.tsx b/src/app/plataforma/companies/companies-table.tsx
+index df9eeb8..bf8135c 100644
+--- a/src/app/plataforma/companies/companies-table.tsx
++++ b/src/app/plataforma/companies/companies-table.tsx
+@@ -4,8 +4,9 @@ import { useEffect, useState } from "react";
+ import { Button, Card, StatusBadge } from "@/components/ui";
+ import { Modal, Field, inputClass } from "@/components/ui/modal";
+ import { formatMxn } from "@/lib/format";
++import { FEATURE_CATALOG } from "@/lib/plan-features";
+ 
+-type Plan = { id: string; name: string; priceMxn: string };
++type Plan = { id: string; name: string; priceMxn: string; features: string[] | null };
+ type Role = { id: string; name: string };
+ type Company = {
+   id: string;
+@@ -308,6 +309,26 @@ function ChangePlanModal({
+           </select>
+         </Field>
+ 
++        {(() => {
++          const selectedPlan = plans.find((p) => p.id === planId);
++          if (!selectedPlan) return null;
++          const included = new Set(selectedPlan.features ?? []);
++          return (
++            <Field label={`Qué incluye ${selectedPlan.name}`}>
++              <div className="grid grid-cols-1 gap-1 max-h-48 overflow-y-auto border border-line rounded-md p-3 text-sm">
++                {FEATURE_CATALOG.map((feature) => (
++                  <div key={feature} className="flex items-start gap-2">
++                    <span className={included.has(feature) ? "text-sage" : "text-muted"}>
++                      {included.has(feature) ? "✓" : "—"}
++                    </span>
++                    <span className={included.has(feature) ? "text-ink" : "text-muted"}>{feature}</span>
++                  </div>
++                ))}
++              </div>
++            </Field>
++          );
++        })()}
++
+         {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
+ 
+         <div className="flex justify-end gap-2">
+diff --git a/src/app/plataforma/plans/plans-client.tsx b/src/app/plataforma/plans/plans-client.tsx
+index 3dd3d01..bdd6376 100644
+--- a/src/app/plataforma/plans/plans-client.tsx
++++ b/src/app/plataforma/plans/plans-client.tsx
+@@ -4,6 +4,7 @@ import { useState } from "react";
+ import { Button, Card } from "@/components/ui";
+ import { Modal, Field, inputClass } from "@/components/ui/modal";
+ import { formatMxn } from "@/lib/format";
++import { FEATURE_CATALOG } from "@/lib/plan-features";
+ 
+ type Plan = {
+   id: string;
+@@ -22,36 +23,6 @@ const PLAN_ACCENTS: Record<string, string> = {
+   Empresarial: "border-marigold",
+ };
+ 
+-/**
+- * Catálogo de features editables por plan (checklist en el modal). No
+- * incluye sucursales/usuarios/cajas — esos ya se editan como números
+- * aparte y se renderizan dinámicamente en buildDisplayFeatures().
+- */
+-const FEATURE_CATALOG = [
+-  "Menús por turno/hora",
+-  "Gestión de mesas",
+-  "Comandas digitales para cocina",
+-  "Automatizaciones avanzadas",
+-  "Integración con delivery (Uber Eats, DoorDash, Rappi)",
+-  "WhatsApp Business",
+-  "Pagos integrados (tarjetas desde el POS)",
+-  "API básica",
+-  "Conexión con Contpaq/SAT",
+-  "Dashboard avanzado (15+ gráficos)",
+-  "Control de acceso por rol",
+-  "Auditoría de cajas",
+-  "Soporte prioritario (4h)",
+-  "Inventario compartido entre sucursales",
+-  "Transferencias automáticas entre sucursales",
+-  "Costeo por receta",
+-  "Dashboard empresarial (30+ métricas)",
+-  "Reportes consolidados",
+-  "Proyecciones con IA básica",
+-  "Auditoría avanzada",
+-  "Multi-moneda",
+-  "Soporte 24/7 con gestor de cuenta dedicado",
+-] as const;
+-
+ export function PlansClient({ initialPlans }: { initialPlans: Plan[] }) {
+   const [plans, setPlans] = useState(initialPlans);
+   const [editing, setEditing] = useState<Plan | null>(null);
+diff --git a/src/lib/plan-features.ts b/src/lib/plan-features.ts
+new file mode 100644
+index 0000000..70209a2
+--- /dev/null
++++ b/src/lib/plan-features.ts
+@@ -0,0 +1,31 @@
++/**
++ * Catálogo compartido de features editables por plan. No incluye
++ * sucursales/usuarios/cajas — esos se editan como números aparte y se
++ * renderizan dinámicamente en buildDisplayFeatures(). Usado tanto en el
++ * editor de planes (/plataforma/plans) como en la vista de features por
++ * empresa (/plataforma/companies).
++ */
++export const FEATURE_CATALOG = [
++  "Menús por turno/hora",
++  "Gestión de mesas",
++  "Comandas digitales para cocina",
++  "Automatizaciones avanzadas",
++  "Integración con delivery (Uber Eats, DoorDash, Rappi)",
++  "WhatsApp Business",
++  "Pagos integrados (tarjetas desde el POS)",
++  "API básica",
++  "Conexión con Contpaq/SAT",
++  "Dashboard avanzado (15+ gráficos)",
++  "Control de acceso por rol",
++  "Auditoría de cajas",
++  "Soporte prioritario (4h)",
++  "Inventario compartido entre sucursales",
++  "Transferencias automáticas entre sucursales",
++  "Costeo por receta",
++  "Dashboard empresarial (30+ métricas)",
++  "Reportes consolidados",
++  "Proyecciones con IA básica",
++  "Auditoría avanzada",
++  "Multi-moneda",
++  "Soporte 24/7 con gestor de cuenta dedicado",
++] as const;

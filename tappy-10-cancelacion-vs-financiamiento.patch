@@ -1,0 +1,368 @@
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index ffcc2dc..fbb7988 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -42,6 +42,25 @@ model Company {
+ enum CompanyStatus {
+   ACTIVE
+   SUSPENDED
++  CANCELLED
++}
++
++/// Configuraci\u00f3n de la plataforma (fila \u00fanica / singleton). Empieza solo
++/// con la pol\u00edtica de cancelaci\u00f3n (secci\u00f3n 10 de la spec de
++/// financiamiento), pensada para crecer con m\u00e1s reglas comerciales.
++model PlatformSettings {
++  id String @id @default(uuid())
++
++  // true (default): una empresa con saldo de hardware pendiente NO puede
++  // cancelar su suscripci\u00f3n de TAPI hasta liquidarlo.
++  // false: se permite cancelar de todos modos (override de regla comercial),
++  // el saldo/calendario/historial de financiamiento se conserva intacto,
++  // solo deja de bloquear la cancelaci\u00f3n.
++  blockCancellationWithPendingFinancing Boolean @default(true)
++
++  updatedAt DateTime @updatedAt
++
++  @@map("platform_settings")
+ }
+ 
+ model Branch {
+diff --git a/src/app/api/companies/[id]/cancel/route.ts b/src/app/api/companies/[id]/cancel/route.ts
+new file mode 100644
+index 0000000..8ad62b8
+--- /dev/null
++++ b/src/app/api/companies/[id]/cancel/route.ts
+@@ -0,0 +1,31 @@
++import { NextResponse } from "next/server";
++import { getTenantContext } from "@/lib/tenant-context";
++import { companiesService } from "@/modules/companies/service";
++import { prisma } from "@/lib/prisma";
++
++/**
++ * POST /api/companies/[id]/cancel
++ *
++ * Cancela la suscripción de TAPI de verdad (distinto de "Suspender", que
++ * ya existía). Bloquea si hay financiamiento de hardware con saldo
++ * pendiente, salvo que la política comercial (PlatformSettings) lo permita.
++ */
++export async function POST(_req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  if (!ctx.isSuperAdmin) {
++    return NextResponse.json({ error: "No autorizado" }, { status: 403 });
++  }
++
++  try {
++    const company = await companiesService.cancelSubscription(params.id);
++
++    await prisma.auditLog.create({
++      data: { companyId: params.id, userId: ctx.userId, action: "CANCEL", entity: "Subscription", newData: { companyStatus: company.status } },
++    });
++
++    return NextResponse.json({ company });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo cancelar la suscripción";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/platform-settings/route.ts b/src/app/api/platform-settings/route.ts
+new file mode 100644
+index 0000000..7121f1e
+--- /dev/null
++++ b/src/app/api/platform-settings/route.ts
+@@ -0,0 +1,34 @@
++import { NextResponse } from "next/server";
++import { getTenantContext } from "@/lib/tenant-context";
++import { platformSettingsService } from "@/modules/platformSettings/service";
++import { z } from "zod";
++
++const updateSchema = z.object({
++  blockCancellationWithPendingFinancing: z.boolean(),
++});
++
++export async function GET() {
++  const ctx = await getTenantContext();
++  if (!ctx.isSuperAdmin) {
++    return NextResponse.json({ error: "No autorizado" }, { status: 403 });
++  }
++
++  const settings = await platformSettingsService.get();
++  return NextResponse.json({ settings });
++}
++
++export async function PATCH(req: Request) {
++  const ctx = await getTenantContext();
++  if (!ctx.isSuperAdmin) {
++    return NextResponse.json({ error: "No autorizado" }, { status: 403 });
++  }
++
++  const body = await req.json();
++  const parsed = updateSchema.safeParse(body);
++  if (!parsed.success) {
++    return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  }
++
++  const settings = await platformSettingsService.update(parsed.data);
++  return NextResponse.json({ settings });
++}
+diff --git a/src/app/plataforma/companies/companies-table.tsx b/src/app/plataforma/companies/companies-table.tsx
+index 3e3f053..5dddd0e 100644
+--- a/src/app/plataforma/companies/companies-table.tsx
++++ b/src/app/plataforma/companies/companies-table.tsx
+@@ -10,7 +10,7 @@ type Role = { id: string; name: string };
+ type Company = {
+   id: string;
+   name: string;
+-  status: "ACTIVE" | "SUSPENDED";
++  status: "ACTIVE" | "SUSPENDED" | "CANCELLED";
+   branches: { id: string }[];
+   users: { id: string }[];
+   subscription: { plan: { name: string } } | null;
+@@ -82,6 +82,21 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
+     }
+   }
+ 
++  async function cancelSubscription(company: Company) {
++    const confirmed = confirm(
++      `\u00bfCancelar la suscripci\u00f3n de TAPI de "${company.name}"? Si tiene financiamiento de hardware pendiente y la pol\u00edtica lo bloquea, no se podr\u00e1 cancelar hasta liquidarlo.`
++    );
++    if (!confirmed) return;
++
++    const res = await fetch(`/api/companies/${company.id}/cancel`, { method: "POST" });
++    const data = await res.json();
++    if (!res.ok) {
++      alert(data.error ?? "No se pudo cancelar la suscripci\u00f3n");
++      return;
++    }
++    setCompanies((prev) => prev.map((c) => (c.id === company.id ? { ...c, status: "CANCELLED" } : c)));
++  }
++
+   async function deleteCompany(company: Company) {
+     const confirmed = confirm(
+       `¿Eliminar "${company.name}" por completo? Esto borra todos sus usuarios, productos, ventas e historial. Esta acción no se puede deshacer.`
+@@ -132,15 +147,25 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
+                   <td className="px-5 py-3 font-mono">{c.branches.length}</td>
+                   <td className="px-5 py-3 font-mono">{c.users.length}</td>
+                   <td className="px-5 py-3">
+-                    <StatusBadge status={c.status} label={c.status === "ACTIVE" ? "Activa" : "Suspendida"} />
++                    <StatusBadge
++                      status={c.status}
++                      label={c.status === "ACTIVE" ? "Activa" : c.status === "SUSPENDED" ? "Suspendida" : "Cancelada"}
++                    />
+                   </td>
+                   <td className="px-5 py-3 text-right space-x-1">
+                     <Button variant="ghost" onClick={() => setUsersCompany(c)}>
+                       Usuarios
+                     </Button>
+-                    <Button variant="ghost" onClick={() => toggleStatus(c)}>
+-                      {c.status === "ACTIVE" ? "Suspender" : "Activar"}
+-                    </Button>
++                    {c.status !== "CANCELLED" && (
++                      <Button variant="ghost" onClick={() => toggleStatus(c)}>
++                        {c.status === "ACTIVE" ? "Suspender" : "Activar"}
++                      </Button>
++                    )}
++                    {c.status !== "CANCELLED" && (
++                      <Button variant="ghost" onClick={() => cancelSubscription(c)} className="text-ember-dark hover:bg-ember/10">
++                        Cancelar suscripci\u00f3n
++                      </Button>
++                    )}
+                     <Button variant="ghost" onClick={() => deleteCompany(c)} className="text-ember-dark hover:bg-ember/10">
+                       Eliminar
+                     </Button>
+diff --git a/src/app/plataforma/layout.tsx b/src/app/plataforma/layout.tsx
+index 6cc6209..b24de3c 100644
+--- a/src/app/plataforma/layout.tsx
++++ b/src/app/plataforma/layout.tsx
+@@ -7,6 +7,7 @@ const NAV_ITEMS = [
+   { href: "/plataforma/dashboard", label: "Dashboard" },
+   { href: "/plataforma/companies", label: "Empresas" },
+   { href: "/plataforma/plans", label: "Planes" },
++  { href: "/plataforma/settings", label: "Configuración" },
+ ];
+ 
+ export default async function PlataformaLayout({ children }: { children: React.ReactNode }) {
+diff --git a/src/app/plataforma/settings/page.tsx b/src/app/plataforma/settings/page.tsx
+new file mode 100644
+index 0000000..2780bcc
+--- /dev/null
++++ b/src/app/plataforma/settings/page.tsx
+@@ -0,0 +1,14 @@
++import { platformSettingsService } from "@/modules/platformSettings/service";
++import { SettingsClient } from "./settings-client";
++
++export default async function SettingsPage() {
++  const settings = await platformSettingsService.get();
++
++  return (
++    <div>
++      <h1 className="font-display text-3xl font-semibold mb-1">Configuración</h1>
++      <p className="text-muted text-sm mb-8">Reglas comerciales de la plataforma.</p>
++      <SettingsClient initialSettings={JSON.parse(JSON.stringify(settings))} />
++    </div>
++  );
++}
+diff --git a/src/app/plataforma/settings/settings-client.tsx b/src/app/plataforma/settings/settings-client.tsx
+new file mode 100644
+index 0000000..0b0a4a2
+--- /dev/null
++++ b/src/app/plataforma/settings/settings-client.tsx
+@@ -0,0 +1,48 @@
++"use client";
++
++import { useState } from "react";
++import { Button, Card } from "@/components/ui";
++
++type Settings = { id: string; blockCancellationWithPendingFinancing: boolean };
++
++export function SettingsClient({ initialSettings }: { initialSettings: Settings }) {
++  const [settings, setSettings] = useState(initialSettings);
++  const [saving, setSaving] = useState(false);
++
++  async function toggle() {
++    setSaving(true);
++    const res = await fetch("/api/platform-settings", {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ blockCancellationWithPendingFinancing: !settings.blockCancellationWithPendingFinancing }),
++    });
++    setSaving(false);
++    if (res.ok) {
++      const data = await res.json();
++      setSettings(data.settings);
++    }
++  }
++
++  return (
++    <Card className="p-6 max-w-xl">
++      <p className="font-display text-lg font-semibold mb-1">Cancelación de suscripción vs. financiamiento de hardware</p>
++      <p className="text-sm text-muted mb-4">
++        Define si una empresa puede cancelar TAPI mientras todavía tiene saldo de hardware pendiente. En cualquier
++        caso, cancelar TAPI nunca borra ni modifica el saldo, calendario o historial de pagos del financiamiento.
++      </p>
++
++      <label className="flex items-start gap-3 mb-5 cursor-pointer">
++        <input type="checkbox" className="mt-1" checked={settings.blockCancellationWithPendingFinancing} onChange={toggle} disabled={saving} />
++        <span className="text-sm">
++          <span className="font-medium text-ink">Bloquear cancelación mientras haya saldo pendiente</span>
++          <br />
++          <span className="text-muted">
++            {settings.blockCancellationWithPendingFinancing
++              ? "Activo: una empresa debe terminar de pagar su hardware antes de poder cancelar TAPI."
++              : "Desactivado: una empresa puede cancelar TAPI aunque le quede saldo de hardware pendiente (el saldo se conserva igual, solo deja de bloquear)."}
++          </span>
++        </span>
++      </label>
++    </Card>
++  );
++}
+diff --git a/src/modules/companies/service.ts b/src/modules/companies/service.ts
+index caf20a6..48d5603 100644
+--- a/src/modules/companies/service.ts
++++ b/src/modules/companies/service.ts
+@@ -1,6 +1,7 @@
+ import { prisma } from "@/lib/prisma";
+ import { z } from "zod";
+ import { hardwareFinancingService } from "@/modules/hardwareFinancing/service";
++import { platformSettingsService } from "@/modules/platformSettings/service";
+ 
+ export const createCompanySchema = z.object({
+   name: z.string().min(2, "El nombre es obligatorio"),
+@@ -114,4 +115,45 @@ export const companiesService = {
+       include: { subscription: { include: { plan: true, license: true } } },
+     });
+   },
++
++  /**
++   * Cancelaci\u00f3n real de la suscripci\u00f3n de TAPI (secci\u00f3n 10 de la spec,
++   * actualizada por Jose): cancelaci\u00f3n de software y financiamiento de
++   * hardware quedan DEPENDIENTES \u2014 una empresa no puede cancelar mientras
++   * tenga saldo de hardware pendiente, salvo que la pol\u00edtica comercial
++   * (PlatformSettings) lo permita expl\u00edcitamente.
++   *
++   * En cualquier caso, si la cancelaci\u00f3n procede, el saldo pendiente, el
++   * calendario de pagos, los pagos realizados y los pendientes de
++   * HardwareFinancing se conservan intactos \u2014 esto solo cancela
++   * Subscription/Company, nunca toca HardwareFinancing directamente.
++   */
++  async cancelSubscription(companyId: string) {
++    const settings = await platformSettingsService.get();
++
++    if (settings.blockCancellationWithPendingFinancing) {
++      const pending = await hardwareFinancingService.getPendingFinancings(companyId);
++      if (pending.length > 0) {
++        const detail = pending
++          .map((f) => `${f.code} (saldo $${Number(f.remainingBalance).toFixed(2)}, ${f.paymentsCompleted}/${f.totalInstallments} pagos)`)
++          .join(", ");
++        throw new Error(
++          `No se puede cancelar: esta empresa tiene financiamiento de hardware pendiente \u2014 ${detail}. Debe liquidarse antes de cancelar la suscripci\u00f3n.`
++        );
++      }
++    }
++
++    const subscription = await prisma.subscription.findUnique({ where: { companyId } });
++    if (subscription) {
++      await prisma.subscription.update({ where: { companyId }, data: { status: "CANCELED" } });
++    }
++
++    const company = await prisma.company.update({ where: { id: companyId }, data: { status: "CANCELLED" } });
++
++    await hardwareFinancingService.logNoEffectEvent(companyId, "SUBSCRIPTION_CANCELLED_NO_EFFECT", {
++      policyBlocked: settings.blockCancellationWithPendingFinancing,
++    });
++
++    return company;
++  },
+ };
+diff --git a/src/modules/hardwareFinancing/service.ts b/src/modules/hardwareFinancing/service.ts
+index b40b32b..d631916 100644
+--- a/src/modules/hardwareFinancing/service.ts
++++ b/src/modules/hardwareFinancing/service.ts
+@@ -384,6 +384,23 @@ export const hardwareFinancingService = {
+     });
+   },
+ 
++  /**
++   * Regla #10 de la spec (actualizada): una empresa NO puede cancelar TAPI
++   * mientras tenga saldo de hardware pendiente — a menos que la política
++   * comercial lo permita (PlatformSettings.blockCancellationWithPendingFinancing).
++   * Devuelve los financiamientos con saldo > 0, o [] si está todo liquidado.
++   */
++  async getPendingFinancings(companyId: string) {
++    return prisma.hardwareFinancing.findMany({
++      where: {
++        companyId,
++        status: { in: ["PENDING", "ACTIVE", "PARTIALLY_PAID", "OVERDUE"] },
++        remainingBalance: { gt: 0 },
++      },
++      select: { id: true, code: true, remainingBalance: true, totalInstallments: true, paymentsCompleted: true },
++    });
++  },
++
+   /**
+    * Llamar desde companiesService.changePlan / setStatus (cancelación de
+    * TAPI) cuando la empresa tiene financiamiento activo, únicamente para
+diff --git a/src/modules/platformSettings/service.ts b/src/modules/platformSettings/service.ts
+new file mode 100644
+index 0000000..b77b5c0
+--- /dev/null
++++ b/src/modules/platformSettings/service.ts
+@@ -0,0 +1,18 @@
++import { prisma } from "@/lib/prisma";
++
++/**
++ * Fila única de configuración de la plataforma. get() la crea con los
++ * valores por defecto si todavía no existe (primer arranque).
++ */
++export const platformSettingsService = {
++  async get() {
++    const existing = await prisma.platformSettings.findFirst();
++    if (existing) return existing;
++    return prisma.platformSettings.create({ data: {} });
++  },
++
++  async update(data: { blockCancellationWithPendingFinancing?: boolean }) {
++    const current = await platformSettingsService.get();
++    return prisma.platformSettings.update({ where: { id: current.id }, data });
++  },
++};

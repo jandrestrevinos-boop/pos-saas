@@ -1,0 +1,143 @@
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index ffcc2dc..d27833d 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -669,6 +669,7 @@ model HardwareFinancingPayment {
+   mercadoPagoPaymentId String? @unique
+   externalReference    String  @unique
+   webhookEventId       String?
++  paymentMethodNote    String? // ej. "Efectivo", "Transferencia SPEI" — solo cuando se registra manualmente, no vía MP
+ 
+   createdAt DateTime @default(now())
+   updatedAt DateTime @updatedAt
+diff --git a/src/app/api/hardware-financing/[id]/payments/[paymentNumber]/mark-paid/route.ts b/src/app/api/hardware-financing/[id]/payments/[paymentNumber]/mark-paid/route.ts
+new file mode 100644
+index 0000000..ac01db4
+--- /dev/null
++++ b/src/app/api/hardware-financing/[id]/payments/[paymentNumber]/mark-paid/route.ts
+@@ -0,0 +1,48 @@
++import { NextResponse } from "next/server";
++import { z } from "zod";
++import { getTenantContext } from "@/lib/tenant-context";
++import { hardwareFinancingService } from "@/modules/hardwareFinancing/service";
++
++const bodySchema = z.object({ note: z.string().max(200).optional() });
++
++/**
++ * POST /api/hardware-financing/[id]/payments/[paymentNumber]/mark-paid
++ *
++ * Registra manualmente una mensualidad normal como pagada (efectivo,
++ * transferencia, etc.) mientras Mercado Pago no esté conectado. Distinto
++ * de /payoff (liquidación total) y /abono (pago parcial extra) — esto es
++ * exactamente UNA de las mensualidades ya programadas en el calendario.
++ */
++export async function POST(
++  req: Request,
++  { params }: { params: { id: string; paymentNumber: string } }
++) {
++  const ctx = await getTenantContext();
++  if (!ctx.isSuperAdmin) {
++    return NextResponse.json({ error: "No autorizado" }, { status: 403 });
++  }
++
++  const paymentNumber = parseInt(params.paymentNumber, 10);
++  if (Number.isNaN(paymentNumber)) {
++    return NextResponse.json({ error: "Número de pago inválido" }, { status: 400 });
++  }
++
++  const body = await req.json().catch(() => ({}));
++  const parsed = bodySchema.safeParse(body);
++  if (!parsed.success) {
++    return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  }
++
++  try {
++    const financing = await hardwareFinancingService.markInstallmentPaid({
++      financingId: params.id,
++      paymentNumber,
++      performedById: ctx.userId,
++      note: parsed.data.note,
++    });
++    return NextResponse.json({ financing });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo registrar el pago";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/modules/hardwareFinancing/service.ts b/src/modules/hardwareFinancing/service.ts
+index b40b32b..ac45e21 100644
+--- a/src/modules/hardwareFinancing/service.ts
++++ b/src/modules/hardwareFinancing/service.ts
+@@ -259,6 +259,72 @@ export const hardwareFinancingService = {
+     });
+   },
+ 
++  /**
++   * Marca UNA mensualidad puntual del calendario original como pagada,
++   * fuera de Mercado Pago (efectivo, transferencia, etc.) — mientras esa
++   * integración no esté conectada, esta es la única forma de reflejar un
++   * pago normal. Misma regla fundamental que el webhook: si con este pago
++   * se completan todas las mensualidades, liquida automáticamente.
++   */
++  async markInstallmentPaid(params: { financingId: string; paymentNumber: number; performedById: string; note?: string }) {
++    return prisma.$transaction(async (tx) => {
++      const financing = await tx.hardwareFinancing.findUniqueOrThrow({
++        where: { id: params.financingId },
++        include: { payments: true },
++      });
++
++      if (financing.status === "LIQUIDATED" || financing.status === "CANCELLED") {
++        throw new Error(`No se puede registrar un pago: el financiamiento está ${financing.status}.`);
++      }
++
++      const payment = financing.payments.find((p) => p.paymentNumber === params.paymentNumber);
++      if (!payment) throw new Error(`No existe el pago ${params.paymentNumber} en este financiamiento.`);
++      if (payment.status === "PAID") throw new Error("Este pago ya estaba marcado como pagado.");
++      if (payment.status === "CANCELLED") throw new Error("Este pago fue cancelado (por un abono o reestructuración) y ya no aplica.");
++
++      await tx.hardwareFinancingPayment.update({
++        where: { id: payment.id },
++        data: { status: "PAID", paidAt: new Date(), paymentMethodNote: params.note ?? "Registrado manualmente" },
++      });
++
++      const paymentsCompleted = financing.payments.filter((p) => p.id === payment.id || p.status === "PAID").length;
++      const remainingBalance = Math.max(0, Math.round((Number(financing.remainingBalance) - Number(payment.amount)) * 100) / 100);
++      const isFullyPaid = paymentsCompleted >= financing.totalInstallments;
++
++      await tx.hardwareFinancing.update({
++        where: { id: financing.id },
++        data: {
++          paymentsCompleted,
++          remainingBalance: isFullyPaid ? 0 : remainingBalance,
++          status: isFullyPaid ? "LIQUIDATED" : "PARTIALLY_PAID",
++          liquidatedAt: isFullyPaid ? new Date() : undefined,
++        },
++      });
++
++      await tx.auditLog.create({
++        data: {
++          companyId: financing.companyId,
++          userId: params.performedById,
++          action: "PAYMENT_REGISTERED_MANUALLY",
++          entity: "HardwareFinancing",
++          entityId: financing.id,
++          newData: {
++            paymentNumber: params.paymentNumber,
++            amount: Number(payment.amount),
++            note: params.note ?? null,
++            paymentsCompleted,
++            resultingStatus: isFullyPaid ? "LIQUIDATED" : "PARTIALLY_PAID",
++          },
++        },
++      });
++
++      return tx.hardwareFinancing.findUniqueOrThrow({
++        where: { id: financing.id },
++        include: { payments: { orderBy: { paymentNumber: "asc" } } },
++      });
++    });
++  },
++
+   /** Reestructuración: crea un nuevo financiamiento sobre el saldo restante. */
+   async restructure(params: {
+     id: string;

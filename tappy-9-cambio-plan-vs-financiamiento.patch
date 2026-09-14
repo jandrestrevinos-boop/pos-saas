@@ -1,0 +1,48 @@
+diff --git a/src/app/plataforma/companies/companies-table.tsx b/src/app/plataforma/companies/companies-table.tsx
+index 3e3f053..df9eeb8 100644
+--- a/src/app/plataforma/companies/companies-table.tsx
++++ b/src/app/plataforma/companies/companies-table.tsx
+@@ -243,6 +243,21 @@ function ChangePlanModal({
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
+ 
++  type FinancingSummary = { code: string; remainingBalance: number; nextPaymentAmount: number | null };
++  const [activeFinancings, setActiveFinancings] = useState<FinancingSummary[] | null>(null);
++
++  useEffect(() => {
++    fetch(`/api/hardware-financing?companyId=${company.id}`)
++      .then((res) => (res.ok ? res.json() : { financings: [] }))
++      .then((data) => {
++        const active = (data.financings ?? []).filter((f: { status: string }) =>
++          ["ACTIVE", "PARTIALLY_PAID", "OVERDUE", "PENDING"].includes(f.status)
++        );
++        setActiveFinancings(active);
++      })
++      .catch(() => setActiveFinancings([]));
++  }, [company.id]);
++
+   async function handleSubmit(e: React.FormEvent) {
+     e.preventDefault();
+     setSaving(true);
+@@ -268,6 +283,21 @@ function ChangePlanModal({
+         <p className="text-sm text-muted mb-4">
+           Plan actual: <span className="font-medium text-ink">{currentPlanName ?? "Sin plan"}</span>
+         </p>
++
++        {activeFinancings && activeFinancings.length > 0 && (
++          <div className="text-xs bg-sage-light border border-sage/30 rounded-md px-3 py-2 mb-4">
++            <p className="font-medium text-ink mb-1">
++              Esta empresa tiene {activeFinancings.length === 1 ? "un financiamiento de hardware activo" : `${activeFinancings.length} financiamientos de hardware activos`}
++            </p>
++            {activeFinancings.map((f) => (
++              <p key={f.code} className="text-muted">
++                {f.code} — saldo pendiente {formatMxn(String(f.remainingBalance))}
++              </p>
++            ))}
++            <p className="text-muted mt-1">Cambiar el plan de software no lo afecta: sigue su calendario normal.</p>
++          </div>
++        )}
++
+         <Field label="Nuevo plan">
+           <select className={inputClass} value={planId} onChange={(e) => setPlanId(e.target.value)}>
+             {plans.map((p) => (

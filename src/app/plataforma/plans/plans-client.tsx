@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Button, Card } from "@/components/ui";
 import { Modal, Field, inputClass } from "@/components/ui/modal";
 import { formatMxn } from "@/lib/format";
+import { FEATURE_CATALOG } from "@/lib/plan-features";
 
 type Plan = {
   id: string;
@@ -89,13 +90,34 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () => 
   const [maxBranches, setMaxBranches] = useState(String(plan.maxBranches));
   const [maxUsers, setMaxUsers] = useState(String(plan.maxUsers));
   const [maxCashRegisters, setMaxCashRegisters] = useState(String(plan.maxCashRegisters));
+  const [checkedFeatures, setCheckedFeatures] = useState<Set<string>>(
+    new Set((plan.features ?? []).filter((f) => (FEATURE_CATALOG as readonly string[]).includes(f)))
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+
+  function toggleFeature(feature: string) {
+    setCheckedFeatures((prev) => {
+      const next = new Set(prev);
+      if (next.has(feature)) next.delete(feature);
+      else next.add(feature);
+      return next;
+    });
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
     setError("");
+
+    // Conserva cualquier feature que ya estuviera guardada y que no forme
+    // parte de este catálogo (por si hay algo custom cargado desde el
+    // seed), y sobreescribe únicamente las del catálogo con lo marcado.
+    const preservedNonCatalog = (plan.features ?? []).filter(
+      (f) => !(FEATURE_CATALOG as readonly string[]).includes(f)
+    );
+    const features = [...preservedNonCatalog, ...FEATURE_CATALOG.filter((f) => checkedFeatures.has(f))];
+
     const res = await fetch(`/api/plans/${plan.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -104,6 +126,7 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () => 
         maxBranches: parseInt(maxBranches, 10) || 1,
         maxUsers: parseInt(maxUsers, 10) || 1,
         maxCashRegisters: parseInt(maxCashRegisters, 10) || 1,
+        features,
       }),
     });
     const data = await res.json();
@@ -131,9 +154,21 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () => 
           <input required type="number" min="1" className={inputClass} value={maxCashRegisters} onChange={(e) => setMaxCashRegisters(e.target.value)} />
         </Field>
 
-        <p className="text-xs text-muted mb-4">
-          La lista de características se administra desde el código por ahora — este formulario solo ajusta precio y límites numéricos.
-        </p>
+        <Field label="Características incluidas">
+          <div className="grid grid-cols-1 gap-1.5 max-h-56 overflow-y-auto border border-line rounded-md p-3">
+            {FEATURE_CATALOG.map((feature) => (
+              <label key={feature} className="flex items-start gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={checkedFeatures.has(feature)}
+                  onChange={() => toggleFeature(feature)}
+                />
+                <span>{feature}</span>
+              </label>
+            ))}
+          </div>
+        </Field>
 
         {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
 

@@ -4,7 +4,12 @@ import { companiesService } from "@/modules/companies/service";
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
 
-const changePlanSchema = z.object({ planId: z.string().min(1) });
+const changePlanSchema = z.object({
+  planId: z.string().min(1),
+  useCustomPlan: z.boolean().optional(),
+  customPriceMxn: z.coerce.number().min(0).nullable().optional(),
+  customFeatures: z.array(z.string()).optional(),
+});
 
 export async function PATCH(req: Request, { params }: { params: { id: string } }) {
   const ctx = await getTenantContext();
@@ -19,10 +24,20 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
   }
 
   try {
-    const company = await companiesService.changePlan(params.id, parsed.data.planId);
+    const company = await companiesService.changePlan(params.id, parsed.data.planId, {
+      useCustomPlan: parsed.data.useCustomPlan ?? false,
+      customPriceMxn: parsed.data.customPriceMxn ?? null,
+      customFeatures: parsed.data.customFeatures ?? [],
+    });
 
     await prisma.auditLog.create({
-      data: { companyId: params.id, userId: ctx.userId, action: "UPDATE", entity: "Subscription", newData: { planId: parsed.data.planId } },
+      data: {
+        companyId: params.id,
+        userId: ctx.userId,
+        action: "UPDATE",
+        entity: "Subscription",
+        newData: { planId: parsed.data.planId, useCustomPlan: parsed.data.useCustomPlan ?? false },
+      },
     });
 
     return NextResponse.json({ company });

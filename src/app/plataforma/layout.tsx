@@ -7,6 +7,7 @@ const NAV_ITEMS = [
   { href: "/plataforma/dashboard", label: "Dashboard" },
   { href: "/plataforma/companies", label: "Empresas" },
   { href: "/plataforma/plans", label: "Planes" },
+  { href: "/plataforma/settings", label: "Configuración" },
 ];
 
 export default async function PlataformaLayout({ children }: { children: React.ReactNode }) {

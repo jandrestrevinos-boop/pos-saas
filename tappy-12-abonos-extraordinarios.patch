@@ -1,0 +1,238 @@
+diff --git a/src/app/api/hardware-financing/[id]/abono/route.ts b/src/app/api/hardware-financing/[id]/abono/route.ts
+new file mode 100644
+index 0000000..08a051c
+--- /dev/null
++++ b/src/app/api/hardware-financing/[id]/abono/route.ts
+@@ -0,0 +1,43 @@
++import { NextResponse } from "next/server";
++import { z } from "zod";
++import { getTenantContext } from "@/lib/tenant-context";
++import { hardwareFinancingService } from "@/modules/hardwareFinancing/service";
++
++const abonoSchema = z.object({
++  amount: z.coerce.number().positive(),
++  mercadoPagoPaymentId: z.string().optional(),
++});
++
++/**
++ * POST /api/hardware-financing/[id]/abono
++ *
++ * Registra un abono extraordinario (sección 12 de la spec). Si el monto
++ * cubre el saldo completo, el financiamiento queda LIQUIDATED igual que
++ * con /payoff. Si es parcial, recalcula automáticamente saldo, número de
++ * pagos, calendario y próximo vencimiento — sin tocar pagos ya registrados.
++ */
++export async function POST(req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  if (!ctx.isSuperAdmin) {
++    return NextResponse.json({ error: "No autorizado" }, { status: 403 });
++  }
++
++  const body = await req.json();
++  const parsed = abonoSchema.safeParse(body);
++  if (!parsed.success) {
++    return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  }
++
++  try {
++    const financing = await hardwareFinancingService.registerAbono({
++      id: params.id,
++      performedById: ctx.userId,
++      amount: parsed.data.amount,
++      mercadoPagoPaymentId: parsed.data.mercadoPagoPaymentId,
++    });
++    return NextResponse.json({ financing });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo registrar el abono";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/modules/hardwareFinancing/calculator.ts b/src/modules/hardwareFinancing/calculator.ts
+index 8605280..361145c 100644
+--- a/src/modules/hardwareFinancing/calculator.ts
++++ b/src/modules/hardwareFinancing/calculator.ts
+@@ -154,3 +154,35 @@ export function buildRestructuredSchedule(params: {
+     firstPaymentDueDate: params.firstPaymentDueDate,
+   });
+ }
++
++/**
++ * Recalcula el calendario restante después de un ABONO EXTRAORDINARIO
++ * (sección 12 de la spec): mantiene el MISMO monto de mensualidad que ya
++ * tenía el financiamiento (no lo cambia), y en vez de eso reduce el
++ * NÚMERO de pagos restantes necesarios para cubrir el nuevo saldo. El
++ * último pago absorbe el redondeo, igual que en el calendario original.
++ * Nunca toca pagos ya registrados — solo genera el calendario de lo que
++ * falta a partir de aquí.
++ */
++export function buildAbonoAdjustedSchedule(params: {
++  newRemainingBalance: number;
++  targetInstallmentAmount: number;
++  periodicity: Periodicity;
++  nextPaymentDueDate: Date;
++}): InstallmentSchedule {
++  const balanceCents = toCents(params.newRemainingBalance);
++  const targetCents = toCents(params.targetInstallmentAmount);
++
++  if (balanceCents <= 0) {
++    return { installmentAmount: 0, entries: [], totalScheduled: 0 };
++  }
++
++  const impliedInstallments = Math.max(1, Math.ceil(balanceCents / targetCents));
++
++  return buildInstallmentSchedule({
++    financedBalance: params.newRemainingBalance,
++    totalInstallments: impliedInstallments,
++    periodicity: params.periodicity,
++    firstPaymentDueDate: params.nextPaymentDueDate,
++  });
++}
+diff --git a/src/modules/hardwareFinancing/service.ts b/src/modules/hardwareFinancing/service.ts
+index b40b32b..a9c6972 100644
+--- a/src/modules/hardwareFinancing/service.ts
++++ b/src/modules/hardwareFinancing/service.ts
+@@ -5,6 +5,7 @@ import {
+   computeLineItemTotals,
+   buildInstallmentSchedule,
+   buildRestructuredSchedule,
++  buildAbonoAdjustedSchedule,
+ } from "./calculator";
+ import { encodeExternalReference } from "@/modules/mercadoPago/externalReference";
+ 
+@@ -259,6 +260,136 @@ export const hardwareFinancingService = {
+     });
+   },
+ 
++  /**
++   * Abono extraordinario (sección 12 de la spec): pago parcial que reduce
++   * el saldo sin liquidar todo. Si el abono cubre el saldo completo, se
++   * comporta igual que liquidateEarly. Si no, recalcula automáticamente
++   * saldo, número de pagos, calendario y próximo vencimiento — sin tocar
++   * los pagos ya registrados.
++   */
++  async registerAbono(params: { id: string; performedById: string; amount: number; mercadoPagoPaymentId?: string }) {
++    if (params.amount <= 0) throw new Error("El monto del abono debe ser mayor a cero.");
++
++    return prisma.$transaction(async (tx) => {
++      const financing = await tx.hardwareFinancing.findUniqueOrThrow({
++        where: { id: params.id },
++        include: { payments: true },
++      });
++
++      if (financing.status === "LIQUIDATED") throw new Error("Este financiamiento ya está liquidado.");
++      if (financing.status === "CANCELLED") throw new Error("No se puede abonar a un financiamiento cancelado.");
++
++      const currentRemaining = Number(financing.remainingBalance);
++      if (params.amount > currentRemaining + 0.01) {
++        throw new Error(
++          `El abono ($${params.amount.toFixed(2)}) es mayor al saldo pendiente ($${currentRemaining.toFixed(2)}). Usa "Liquidar financiamiento" si quiere cubrir todo.`
++        );
++      }
++
++      const pendingPayments = financing.payments.filter((p) => p.status === "PENDING" || p.status === "OVERDUE");
++      const lastPaymentNumber = Math.max(...financing.payments.map((p) => p.paymentNumber), 0);
++      const newRemainingBalance = Math.round((currentRemaining - params.amount) * 100) / 100;
++      const isFullyPaidOff = newRemainingBalance <= 0.01;
++
++      // El abono en sí queda registrado como un pago PAID más, para que el
++      // historial sea completo y trazable (nunca se borra ni se modifica
++      // un pago ya existente).
++      await tx.hardwareFinancingPayment.create({
++        data: {
++          financingId: financing.id,
++          paymentNumber: lastPaymentNumber + 1,
++          dueDate: new Date(),
++          amount: params.amount,
++          status: "PAID",
++          paidAt: new Date(),
++          mercadoPagoPaymentId: params.mercadoPagoPaymentId,
++          externalReference: encodeExternalReference({
++            kind: "hwfin",
++            companyId: financing.companyId,
++            financingId: financing.id,
++            paymentNumber: lastPaymentNumber + 1,
++          }),
++        },
++      });
++
++      // Cancela el calendario restante viejo — se reemplaza por el
++      // recalculado (o por nada, si quedó liquidado).
++      await tx.hardwareFinancingPayment.updateMany({
++        where: { financingId: financing.id, id: { in: pendingPayments.map((p) => p.id) } },
++        data: { status: "CANCELLED" },
++      });
++
++      let newSchedule: ReturnType<typeof buildAbonoAdjustedSchedule> | null = null;
++
++      if (!isFullyPaidOff) {
++        const nextDueDate = pendingPayments[0]?.dueDate ?? new Date();
++        newSchedule = buildAbonoAdjustedSchedule({
++          newRemainingBalance,
++          targetInstallmentAmount: Number(financing.installmentAmount),
++          periodicity: financing.periodicity,
++          nextPaymentDueDate: nextDueDate,
++        });
++
++        await tx.hardwareFinancingPayment.createMany({
++          data: newSchedule.entries.map((entry, idx) => ({
++            financingId: financing.id,
++            paymentNumber: lastPaymentNumber + 2 + idx, // +1 ya lo usó el pago del abono
++            dueDate: entry.dueDate,
++            amount: entry.amount,
++            status: "PENDING",
++            externalReference: encodeExternalReference({
++              kind: "hwfin",
++              companyId: financing.companyId,
++              financingId: financing.id,
++              paymentNumber: lastPaymentNumber + 2 + idx,
++            }),
++          })),
++        });
++      }
++
++      const paymentsCompletedNow = financing.paymentsCompleted + 1; // +1 por el pago del abono
++      const newTotalInstallments = isFullyPaidOff
++        ? paymentsCompletedNow
++        : paymentsCompletedNow + (newSchedule?.entries.length ?? 0);
++
++      await tx.hardwareFinancing.update({
++        where: { id: financing.id },
++        data: {
++          remainingBalance: isFullyPaidOff ? 0 : newRemainingBalance,
++          status: isFullyPaidOff ? "LIQUIDATED" : "PARTIALLY_PAID",
++          liquidatedAt: isFullyPaidOff ? new Date() : undefined,
++          paymentsCompleted: paymentsCompletedNow,
++          totalInstallments: newTotalInstallments,
++          finalPaymentDueDate: isFullyPaidOff
++            ? new Date()
++            : newSchedule?.entries[newSchedule.entries.length - 1]?.dueDate,
++        },
++      });
++
++      await tx.auditLog.create({
++        data: {
++          companyId: financing.companyId,
++          userId: params.performedById,
++          action: "PARTIAL_ABONO",
++          entity: "HardwareFinancing",
++          entityId: financing.id,
++          previousData: { remainingBalance: currentRemaining, totalInstallments: financing.totalInstallments },
++          newData: {
++            abonoAmount: params.amount,
++            remainingBalance: isFullyPaidOff ? 0 : newRemainingBalance,
++            totalInstallments: newTotalInstallments,
++            resultingStatus: isFullyPaidOff ? "LIQUIDATED" : "PARTIALLY_PAID",
++          },
++        },
++      });
++
++      return tx.hardwareFinancing.findUniqueOrThrow({
++        where: { id: financing.id },
++        include: { payments: { orderBy: { paymentNumber: "asc" } }, items: true },
++      });
++    });
++  },
++
+   /** Reestructuración: crea un nuevo financiamiento sobre el saldo restante. */
+   async restructure(params: {
+     id: string;

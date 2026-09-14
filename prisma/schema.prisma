@@ -34,6 +34,7 @@ model Company {
   orders        Order[]
   auditLogs     AuditLog[]
   subscription  Subscription?
+  hardwareFinancings HardwareFinancing[]
 
   @@map("companies")
 }
@@ -41,6 +42,25 @@ model Company {
 enum CompanyStatus {
   ACTIVE
   SUSPENDED
+  CANCELLED
+}
+
+/// Configuraci\u00f3n de la plataforma (fila \u00fanica / singleton). Empieza solo
+/// con la pol\u00edtica de cancelaci\u00f3n (secci\u00f3n 10 de la spec de
+/// financiamiento), pensada para crecer con m\u00e1s reglas comerciales.
+model PlatformSettings {
+  id String @id @default(uuid())
+
+  // true (default): una empresa con saldo de hardware pendiente NO puede
+  // cancelar su suscripci\u00f3n de TAPI hasta liquidarlo.
+  // false: se permite cancelar de todos modos (override de regla comercial),
+  // el saldo/calendario/historial de financiamiento se conserva intacto,
+  // solo deja de bloquear la cancelaci\u00f3n.
+  blockCancellationWithPendingFinancing Boolean @default(true)
+
+  updatedAt DateTime @updatedAt
+
+  @@map("platform_settings")
 }
 
 model Branch {
@@ -91,6 +111,9 @@ model Subscription {
   renewalDate   DateTime?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+  useCustomPlan Boolean @default(false) 
+  customPriceMxn Decimal? @db.Decimal(10, 2) 
+  customFeatures String[] @default([])
 
   license License?
 
@@ -140,6 +163,7 @@ model User {
   cashMovements       CashMovement[]
   inventoryMovements  InventoryMovement[]
   auditLogs           AuditLog[]
+  hardwareFinancingsCreated HardwareFinancing[]
 
   @@index([companyId])
   @@map("users")
@@ -220,6 +244,7 @@ model Product {
   modifierGroups     ProductModifierGroup[]
   orderItems         OrderItem[]
   inventoryMovements InventoryMovement[]
+  hardwareFinancingItems HardwareFinancingItem[]
 
   @@index([companyId])
   @@map("products")
@@ -550,4 +575,128 @@ model WhatsAppConversation {
   createdAt DateTime @default(now())
 
   @@index([sessionId])
+}
+
+// ------------------------------------------------------------
+// FINANCIAMIENTO DE HARDWARE
+// ------------------------------------------------------------
+
+enum HardwareFinancingStatus {
+  PENDING
+  ACTIVE
+  PARTIALLY_PAID
+  OVERDUE
+  LIQUIDATED
+  CANCELLED
+  RESTRUCTURED
+}
+
+enum HardwareFinancingPeriodicity {
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+}
+
+enum HardwarePaymentStatus {
+  PENDING
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+/// Financiamiento de hardware de una empresa. Independiente de
+/// Subscription: nunca representa un cobro recurrente de software.
+model HardwareFinancing {
+  id   String @id @default(uuid())
+  code String @unique // "HF-000125"
+
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  status      HardwareFinancingStatus       @default(PENDING)
+  periodicity HardwareFinancingPeriodicity  @default(MONTHLY)
+
+  // Montos congelados al crear el financiamiento — nunca se recalculan
+  // contra el catálogo aunque el precio del producto cambie después.
+  hardwareListValue Decimal @db.Decimal(12, 2)
+  negotiatedValue   Decimal @db.Decimal(12, 2)
+  discount          Decimal @default(0) @db.Decimal(12, 2)
+  downPayment       Decimal @default(0) @db.Decimal(12, 2)
+  financialCharge   Decimal @default(0) @db.Decimal(12, 2)
+  interestRate      Decimal @default(0) @db.Decimal(6, 4)
+  financedBalance   Decimal @db.Decimal(12, 2)
+
+  totalInstallments Int
+  installmentAmount Decimal @db.Decimal(12, 2)
+
+  firstPaymentDueDate DateTime
+  finalPaymentDueDate DateTime?
+
+  paymentsCompleted Int     @default(0)
+  remainingBalance  Decimal @db.Decimal(12, 2)
+
+  liquidatedAt DateTime?
+  cancelledAt  DateTime?
+
+  restructuredFromId String?
+  restructuredFrom   HardwareFinancing?  @relation("HwFinRestructure", fields: [restructuredFromId], references: [id])
+  restructuredInto   HardwareFinancing[] @relation("HwFinRestructure")
+
+  createdById String
+  createdBy   User   @relation(fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  items    HardwareFinancingItem[]
+  payments HardwareFinancingPayment[]
+
+  @@index([companyId, status])
+  @@map("hardware_financings")
+}
+
+/// Línea de hardware con precio NEGOCIADO congelado.
+model HardwareFinancingItem {
+  id String @id @default(uuid())
+
+  financingId String
+  financing   HardwareFinancing @relation(fields: [financingId], references: [id], onDelete: Cascade)
+
+  productId           String?
+  product              Product? @relation(fields: [productId], references: [id])
+  productName          String
+  catalogUnitPrice     Decimal @db.Decimal(12, 2)
+  negotiatedUnitPrice  Decimal @db.Decimal(12, 2)
+  quantity             Int
+  subtotal             Decimal @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+
+  @@map("hardware_financing_items")
+}
+
+/// Un pago dentro del calendario de un financiamiento.
+model HardwareFinancingPayment {
+  id String @id @default(uuid())
+
+  financingId String
+  financing   HardwareFinancing @relation(fields: [financingId], references: [id], onDelete: Cascade)
+
+  paymentNumber Int
+  dueDate       DateTime
+  amount        Decimal @db.Decimal(12, 2)
+
+  status HardwarePaymentStatus @default(PENDING)
+  paidAt DateTime?
+
+  mercadoPagoPaymentId String? @unique
+  externalReference    String  @unique
+  webhookEventId       String?
+  paymentMethodNote    String? // ej. "Efectivo", "Transferencia SPEI" — solo cuando se registra manualmente, no vía MP
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([financingId, paymentNumber])
+  @@index([status, dueDate])
+  @@map("hardware_financing_payments")
 }
