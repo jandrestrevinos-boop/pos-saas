@@ -77,11 +77,6 @@ export const companiesService = {
    * hardware quedan DEPENDIENTES — una empresa no puede cancelar mientras
    * tenga saldo de hardware pendiente, salvo que la política comercial
    * (PlatformSettings) lo permita explícitamente.
-   *
-   * En cualquier caso, si la cancelación procede, el saldo pendiente, el
-   * calendario de pagos, los pagos realizados y los pendientes de
-   * HardwareFinancing se conservan intactos — esto solo cancela
-   * Subscription/Company, nunca toca HardwareFinancing directamente.
    */
   async cancelSubscription(companyId: string) {
     const settings = await platformSettingsService.get();

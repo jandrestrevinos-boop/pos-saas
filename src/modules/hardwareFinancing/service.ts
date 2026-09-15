@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import {
   computeFinancedBalance,
@@ -617,7 +618,7 @@ export const hardwareFinancingService = {
         action,
         entity: "HardwareFinancing",
         entityId: f.id,
-        newData: metadata ?? {},
+        newData: (metadata ?? {}) as Prisma.InputJsonValue,
       })),
     });
   },
