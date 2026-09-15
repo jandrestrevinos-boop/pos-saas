@@ -14,16 +14,23 @@ export const authOptions: AuthOptions = {
         password: { label: "Contraseña", type: "password" },
       },
       async authorize(credentials) {
-        if (!credentials?.email || !credentials?.password) return null;
+        if (!credentials?.email || !credentials?.password) {
+          console.log("[AUTH DEBUG] Falta email o password en el request");
+          return null;
+        }
 
         const user = await prisma.user.findUnique({
           where: { email: credentials.email },
           include: { role: { include: { permissions: { include: { permission: true } } } } },
         });
 
+        console.log("[AUTH DEBUG] Buscando usuario:", credentials.email, "-> encontrado:", !!user, "isActive:", user?.isActive);
+
         if (!user || !user.isActive) return null;
 
         const validPassword = await bcrypt.compare(credentials.password, user.passwordHash);
+        console.log("[AUTH DEBUG] Password hash en BD (primeros 10 chars):", user.passwordHash?.slice(0, 10), "-> coincide:", validPassword);
+
         if (!validPassword) return null;
 
         return {
