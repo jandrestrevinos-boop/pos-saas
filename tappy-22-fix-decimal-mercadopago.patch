@@ -1,0 +1,38 @@
+From 14a40f671d81d90dc8612eb7d313a726179db143 Mon Sep 17 00:00:00 2001
+From: Claude <claude@tappy.local>
+Date: Sat, 19 Sep 2026 00:49:59 +0000
+Subject: [PATCH] =?UTF-8?q?Fix:=20tipos=20Decimal=20en=20createPreferenceF?=
+ =?UTF-8?q?orOrder=20romp=C3=ADan=20el=20build=20de=20Vercel?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+El sandbox donde armo los patches nunca pudo generar el Prisma Client
+completo (limitación de red), así que Decimal aparecía como 'any' y
+tsc no marcaba el error. El build real de Vercel sí lo generó y
+correctamente marcó la incompatibilidad: 'total' y 'unitPriceAtSale'
+estaban tipados como number|string pero llegan como Prisma.Decimal.
+Se quita 'total' (nunca se usaba dentro de la función) y se relaja
+unitPriceAtSale a 'unknown' (solo se usa dentro de un Number(), que
+acepta cualquier tipo).
+---
+ src/modules/mercadoPago/service.ts | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/src/modules/mercadoPago/service.ts b/src/modules/mercadoPago/service.ts
+index 327768b..adf34ba 100644
+--- a/src/modules/mercadoPago/service.ts
++++ b/src/modules/mercadoPago/service.ts
+@@ -136,8 +136,7 @@ export const mercadoPagoService = {
+    */
+   async createPreferenceForOrder(companyId: string, order: {
+     id: string;
+-    total: number | string;
+-    items: { product: { name: string }; quantity: number; unitPriceAtSale: number | string }[];
++    items: { product: { name: string }; quantity: number; unitPriceAtSale: unknown }[];
+   }) {
+     const accessToken = await this.getValidAccessToken(companyId);
+     const baseUrl = requireEnv("MERCADOPAGO_REDIRECT_URI").replace("/api/mercadopago/oauth/callback", "");
+-- 
+2.43.0
+

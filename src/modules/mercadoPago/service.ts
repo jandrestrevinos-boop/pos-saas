@@ -136,8 +136,7 @@ export const mercadoPagoService = {
    */
   async createPreferenceForOrder(companyId: string, order: {
     id: string;
-    total: number | string;
-    items: { product: { name: string }; quantity: number; unitPriceAtSale: number | string }[];
+    items: { product: { name: string }; quantity: number; unitPriceAtSale: unknown }[];
   }) {
     const accessToken = await this.getValidAccessToken(companyId);
     const baseUrl = requireEnv("MERCADOPAGO_REDIRECT_URI").replace("/api/mercadopago/oauth/callback", "");
