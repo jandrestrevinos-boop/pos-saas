@@ -1,0 +1,126 @@
+From fafe32e9c8f0a61ef383b1284aa752c5adec4c70 Mon Sep 17 00:00:00 2001
+From: Claude <claude@tappy.local>
+Date: Sat, 19 Sep 2026 00:59:56 +0000
+Subject: [PATCH] =?UTF-8?q?Fix:=20el=20ticket=20impreso=20no=20mostraba=20?=
+ =?UTF-8?q?tipo=20de=20pedido,=20direcci=C3=B3n=20ni=20comentarios?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Se guardaban correctamente en la venta pero nunca se pasaban al estado
+completedOrder que arma el ticket. Se agregan al ticket impreso (con
+escapeHtml para no romper el HTML si el comentario trae < o &) y a la
+pantalla de confirmación en el POS: PARA LLEVAR / A DOMICILIO se
+destacan en negritas arriba de los productos, seguidos de la
+dirección y los comentarios cuando aplican.
+---
+ src/app/pos/pos-client.tsx | 58 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 58 insertions(+)
+
+diff --git a/src/app/pos/pos-client.tsx b/src/app/pos/pos-client.tsx
+index 5d491f4..b25b5ef 100644
+--- a/src/app/pos/pos-client.tsx
++++ b/src/app/pos/pos-client.tsx
+@@ -346,6 +346,9 @@ function CheckoutModal({
+     paymentMethod: string;
+     cashReceived: number;
+     change: number;
++    orderType: string;
++    notes: string;
++    deliveryAddress: string;
+   } | null>(null);
+   const [pendingMpCheckout, setPendingMpCheckout] = useState<{
+     orderId: string;
+@@ -425,6 +428,9 @@ function CheckoutModal({
+         paymentMethod: method,
+         cashReceived: cashReceivedNum,
+         change: Math.max(change, 0),
++        orderType,
++        notes: notes.trim(),
++        deliveryAddress: orderType === "DOMICILIO" ? deliveryAddress.trim() : "",
+       });
+     } catch (err) {
+       setError("No se pudo conectar con el servidor.");
+@@ -452,6 +458,9 @@ function CheckoutModal({
+           paymentMethod: "MERCADOPAGO",
+           cashReceived: total,
+           change: 0,
++          orderType,
++          notes: notes.trim(),
++          deliveryAddress: orderType === "DOMICILIO" ? deliveryAddress.trim() : "",
+         });
+         setPendingMpCheckout(null);
+       } else if (payment?.status === "REJECTED" || payment?.status === "CANCELLED") {
+@@ -516,6 +525,15 @@ function CheckoutModal({
+ 
+       if (!win) return;
+ 
++      const escapeHtml = (s: string) =>
++        s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
++
++      const ORDER_TYPE_LABEL: Record<string, string> = {
++        COMER_AQUI: "COMER AQUÍ",
++        PARA_LLEVAR: "PARA LLEVAR",
++        DOMICILIO: "A DOMICILIO",
++      };
++
+       win.document.write(`
+         <!DOCTYPE html>
+         <html>
+@@ -595,6 +613,40 @@ function CheckoutModal({
+ 
+           <div class="divider"></div>
+ 
++          ${
++            completedOrder.orderType !== "COMER_AQUI"
++              ? `
++                <div class="row" style="font-weight:bold;font-size:13px;">
++                  <span>${ORDER_TYPE_LABEL[completedOrder.orderType] ?? completedOrder.orderType}</span>
++                </div>
++              `
++              : ""
++          }
++
++          ${
++            completedOrder.deliveryAddress
++              ? `
++                <div style="margin-top:2px;">
++                  <div style="font-weight:bold;">Dirección:</div>
++                  <div>${escapeHtml(completedOrder.deliveryAddress)}</div>
++                </div>
++              `
++              : ""
++          }
++
++          ${
++            completedOrder.notes
++              ? `
++                <div style="margin-top:4px;">
++                  <div style="font-weight:bold;">Comentarios:</div>
++                  <div>${escapeHtml(completedOrder.notes)}</div>
++                </div>
++              `
++              : ""
++          }
++
++          ${completedOrder.orderType !== "COMER_AQUI" || completedOrder.notes ? `<div class="divider"></div>` : ""}
++
+           ${completedOrder.items
+             .map(
+               (item) => `
+@@ -691,6 +743,12 @@ function CheckoutModal({
+             Folio #{completedOrder.orderNumber}
+           </p>
+ 
++          {completedOrder.orderType !== "COMER_AQUI" && (
++            <p className="text-ember-dark text-sm font-semibold mb-1">
++              {completedOrder.orderType === "PARA_LLEVAR" ? "Para llevar" : "A domicilio"}
++            </p>
++          )}
++
+           <p className="font-mono text-xl mb-6">
+             {formatMxn(completedOrder.total)}
+           </p>
+-- 
+2.43.0
+

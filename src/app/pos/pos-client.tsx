@@ -346,6 +346,9 @@ function CheckoutModal({
     paymentMethod: string;
     cashReceived: number;
     change: number;
+    orderType: string;
+    notes: string;
+    deliveryAddress: string;
   } | null>(null);
   const [pendingMpCheckout, setPendingMpCheckout] = useState<{
     orderId: string;
@@ -425,6 +428,9 @@ function CheckoutModal({
         paymentMethod: method,
         cashReceived: cashReceivedNum,
         change: Math.max(change, 0),
+        orderType,
+        notes: notes.trim(),
+        deliveryAddress: orderType === "DOMICILIO" ? deliveryAddress.trim() : "",
       });
     } catch (err) {
       setError("No se pudo conectar con el servidor.");
@@ -452,6 +458,9 @@ function CheckoutModal({
           paymentMethod: "MERCADOPAGO",
           cashReceived: total,
           change: 0,
+          orderType,
+          notes: notes.trim(),
+          deliveryAddress: orderType === "DOMICILIO" ? deliveryAddress.trim() : "",
         });
         setPendingMpCheckout(null);
       } else if (payment?.status === "REJECTED" || payment?.status === "CANCELLED") {
@@ -515,6 +524,15 @@ function CheckoutModal({
       const win = window.open("", "_blank", "width=302,height=600");
 
       if (!win) return;
+
+      const escapeHtml = (s: string) =>
+        s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+      const ORDER_TYPE_LABEL: Record<string, string> = {
+        COMER_AQUI: "COMER AQUÍ",
+        PARA_LLEVAR: "PARA LLEVAR",
+        DOMICILIO: "A DOMICILIO",
+      };
 
       win.document.write(`
         <!DOCTYPE html>
@@ -594,6 +612,40 @@ function CheckoutModal({
           </div>
 
           <div class="divider"></div>
+
+          ${
+            completedOrder.orderType !== "COMER_AQUI"
+              ? `
+                <div class="row" style="font-weight:bold;font-size:13px;">
+                  <span>${ORDER_TYPE_LABEL[completedOrder.orderType] ?? completedOrder.orderType}</span>
+                </div>
+              `
+              : ""
+          }
+
+          ${
+            completedOrder.deliveryAddress
+              ? `
+                <div style="margin-top:2px;">
+                  <div style="font-weight:bold;">Dirección:</div>
+                  <div>${escapeHtml(completedOrder.deliveryAddress)}</div>
+                </div>
+              `
+              : ""
+          }
+
+          ${
+            completedOrder.notes
+              ? `
+                <div style="margin-top:4px;">
+                  <div style="font-weight:bold;">Comentarios:</div>
+                  <div>${escapeHtml(completedOrder.notes)}</div>
+                </div>
+              `
+              : ""
+          }
+
+          ${completedOrder.orderType !== "COMER_AQUI" || completedOrder.notes ? `<div class="divider"></div>` : ""}
 
           ${completedOrder.items
             .map(
@@ -690,6 +742,12 @@ function CheckoutModal({
           <p className="text-muted text-sm mb-1">
             Folio #{completedOrder.orderNumber}
           </p>
+
+          {completedOrder.orderType !== "COMER_AQUI" && (
+            <p className="text-ember-dark text-sm font-semibold mb-1">
+              {completedOrder.orderType === "PARA_LLEVAR" ? "Para llevar" : "A domicilio"}
+            </p>
+          )}
 
           <p className="font-mono text-xl mb-6">
             {formatMxn(completedOrder.total)}
