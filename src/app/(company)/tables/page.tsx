@@ -6,6 +6,7 @@ import { hasPermission, PERMISSIONS } from "@/lib/permissions";
 import { hasFeature } from "@/lib/feature-gating";
 import { FEATURE_KEYS } from "@/lib/plan-features";
 import { tablesService } from "@/modules/tables/service";
+import { mercadoPagoService } from "@/modules/mercadoPago/service";
 import { TablesClient } from "./tables-client";
 import Link from "next/link";
 
@@ -39,5 +40,20 @@ export default async function TablesPage() {
   const branchId = await resolveBranchId(ctx, session.user.companyId);
   const tables = branchId ? await tablesService.list(session.user.companyId, branchId) : [];
 
-  return <TablesClient initialTables={JSON.parse(JSON.stringify(tables))} />;
+  const pagosIntegradosEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.PAGOS_INTEGRADOS);
+  const mpAccount = pagosIntegradosEnabled ? await mercadoPagoService.getAccount(session.user.companyId) : null;
+
+  const { prisma } = await import("@/lib/prisma");
+  const terminalLinked =
+    pagosIntegradosEnabled && branchId
+      ? !!(await prisma.mercadoPagoTerminal.findUnique({ where: { branchId } }))
+      : false;
+
+  return (
+    <TablesClient
+      initialTables={JSON.parse(JSON.stringify(tables))}
+      mercadoPagoEnabled={!!mpAccount}
+      terminalLinked={terminalLinked}
+    />
+  );
 }

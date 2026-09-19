@@ -230,4 +230,94 @@ export const mercadoPagoService = {
 
     return { handled: true as const, orderId: ref.orderId, status };
   },
+
+  // ---------------------------------------------------------------------
+  // MERCADO PAGO POINT — terminal física (Orders API, no la vieja Payment
+  // Intent API que Mercado Pago está retirando).
+  // ---------------------------------------------------------------------
+
+  /** Terminales Point disponibles en la cuenta conectada de la empresa (para elegir cuál vincular a cada sucursal). */
+  async listTerminals(companyId: string) {
+    const accessToken = await this.getValidAccessToken(companyId);
+    const res = await fetch(`${MP_API}/terminals/v1/list`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`No se pudo obtener la lista de terminales: ${body}`);
+    }
+    const data = await res.json();
+    return data.data?.terminals ?? [];
+  },
+
+  /** Una terminal debe estar en modo PDV para poder recibir cobros por API — se activa al vincularla. */
+  async setTerminalPdvMode(companyId: string, terminalId: string, posId: number) {
+    const accessToken = await this.getValidAccessToken(companyId);
+    const res = await fetch(`${MP_API}/terminals/v1/setup`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ terminal_id: terminalId, pos_id: posId, operating_mode: "PDV" }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`No se pudo activar el modo PDV en la terminal: ${body}`);
+    }
+  },
+
+  /** Manda un cobro a una terminal física para una orden ya existente. */
+  async createPointOrder(companyId: string, orderId: string, total: number, terminalId: string) {
+    const accessToken = await this.getValidAccessToken(companyId);
+    const externalReference = encodeExternalReference({ kind: "order", companyId, orderId });
+
+    const res = await fetch(`${MP_API}/v1/orders`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+        "X-Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        type: "point",
+        external_reference: externalReference,
+        transactions: { payments: [{ amount: total.toFixed(2) }] },
+        config: { point: { terminal_id: terminalId, print_on_terminal: "no_ticket" } },
+        description: `Tappy — orden ${orderId}`,
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`No se pudo mandar el cobro a la terminal: ${body}`);
+    }
+
+    const pointOrder = await res.json();
+
+    await prisma.payment.updateMany({
+      where: { orderId, method: "MERCADOPAGO_TERMINAL" },
+      data: { mpPointOrderId: pointOrder.id },
+    });
+
+    return pointOrder as { id: string; status: string };
+  },
+
+  /** Consulta el estatus de un cobro mandado a terminal (para el polling desde el POS). */
+  async getPointOrder(companyId: string, pointOrderId: string) {
+    const accessToken = await this.getValidAccessToken(companyId);
+    const res = await fetch(`${MP_API}/v1/orders/${pointOrderId}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`No se pudo consultar el cobro de la terminal: ${body}`);
+    }
+    return res.json();
+  },
+
+  async cancelPointOrder(companyId: string, pointOrderId: string) {
+    const accessToken = await this.getValidAccessToken(companyId);
+    await fetch(`${MP_API}/v1/orders/${pointOrderId}/cancel`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "X-Idempotency-Key": crypto.randomUUID() },
+    });
+  },
 };

@@ -22,6 +22,7 @@ export function PosClient(props: {
   products: Product[];
   tables: TableOption[];
   mercadoPagoEnabled: boolean;
+  terminalLinked: boolean;
   userName: string;
 }) {
   return (
@@ -36,12 +37,14 @@ function PosClientInner({
   products,
   tables,
   mercadoPagoEnabled,
+  terminalLinked,
   userName,
 }: {
   categories: Category[];
   products: Product[];
   tables: TableOption[];
   mercadoPagoEnabled: boolean;
+  terminalLinked: boolean;
   userName: string;
 }) {
   const [activeCategory, setActiveCategory] = useState<string>(categories[0]?.id ?? "");
@@ -304,6 +307,7 @@ function PosClientInner({
           subtotal={subtotal}
           cart={cart}
           mercadoPagoEnabled={mercadoPagoEnabled}
+          terminalLinked={terminalLinked}
           onClose={() => setCheckoutOpen(false)}
           onDone={resetSale}
         />
@@ -318,6 +322,7 @@ function CheckoutModal({
   subtotal,
   cart,
   mercadoPagoEnabled,
+  terminalLinked,
   onClose,
   onDone,
 }: {
@@ -326,10 +331,13 @@ function CheckoutModal({
   subtotal: number;
   cart: CartLine[];
   mercadoPagoEnabled: boolean;
+  terminalLinked: boolean;
   onClose: () => void;
   onDone: () => void;
 }) {
-  const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO">("CASH");
+  const [method, setMethod] = useState<
+    "CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO" | "MERCADOPAGO_TERMINAL"
+  >("CASH");
   const [cashReceived, setCashReceived] = useState("");
   const [orderType, setOrderType] = useState<"COMER_AQUI" | "PARA_LLEVAR" | "DOMICILIO">("COMER_AQUI");
   const [notes, setNotes] = useState("");
@@ -357,6 +365,14 @@ function CheckoutModal({
   } | null>(null);
   const [checkingMpStatus, setCheckingMpStatus] = useState(false);
   const [mpStatusMessage, setMpStatusMessage] = useState("");
+
+  const [pendingPointCharge, setPendingPointCharge] = useState<{
+    orderId: string;
+    orderNumber: number;
+    pointOrderId: string;
+  } | null>(null);
+  const [checkingPointStatus, setCheckingPointStatus] = useState(false);
+  const [pointStatusMessage, setPointStatusMessage] = useState("");
 
   const cashReceivedNum = parseFloat(cashReceived) || 0;
   const change = cashReceivedNum - total;
@@ -411,6 +427,21 @@ function CheckoutModal({
           orderId: data.order.id,
           orderNumber: data.order.orderNumber,
           checkoutUrl: prefData.checkoutUrl,
+        });
+        return;
+      }
+
+      if (method === "MERCADOPAGO_TERMINAL") {
+        const chargeRes = await fetch(`/api/orders/${data.order.id}/point-charge`, { method: "POST" });
+        const chargeData = await chargeRes.json();
+        if (!chargeRes.ok) {
+          setError(chargeData.error ?? "No se pudo mandar el cobro a la terminal");
+          return;
+        }
+        setPendingPointCharge({
+          orderId: data.order.id,
+          orderNumber: data.order.orderNumber,
+          pointOrderId: chargeData.pointOrder.id,
         });
         return;
       }
@@ -473,6 +504,75 @@ function CheckoutModal({
     } finally {
       setCheckingMpStatus(false);
     }
+  }
+
+  async function checkPointStatus() {
+    if (!pendingPointCharge) return;
+    setCheckingPointStatus(true);
+    setPointStatusMessage("");
+    try {
+      const res = await fetch(`/api/mercadopago/point-orders/${pendingPointCharge.pointOrderId}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "No se pudo verificar el estatus");
+
+      if (data.paymentStatus === "APPROVED" || data.status === "processed") {
+        setCompletedOrder({
+          orderNumber: pendingPointCharge.orderNumber,
+          items: cart.map((l) => ({ quantity: l.quantity, name: l.product.name, unitPrice: Number(l.product.price) })),
+          subtotal,
+          discount,
+          total,
+          paymentMethod: "MERCADOPAGO_TERMINAL",
+          cashReceived: total,
+          change: 0,
+          orderType,
+          notes: notes.trim(),
+          deliveryAddress: orderType === "DOMICILIO" ? deliveryAddress.trim() : "",
+        });
+        setPendingPointCharge(null);
+      } else if (data.status === "canceled" || data.status === "expired") {
+        setPointStatusMessage("El cobro se canceló o expiró en la terminal. Intenta de nuevo.");
+      } else {
+        setPointStatusMessage("Todavía no se detecta el pago en la terminal. Espera unos segundos y vuelve a verificar.");
+      }
+    } catch (err) {
+      setPointStatusMessage(err instanceof Error ? err.message : "No se pudo verificar el estatus.");
+    } finally {
+      setCheckingPointStatus(false);
+    }
+  }
+
+  // -----------------------------
+  // COBRO CON TERMINAL FÍSICA EN ESPERA
+  // -----------------------------
+  if (pendingPointCharge) {
+    return (
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="bg-white rounded-lg p-6 max-w-sm w-full text-center">
+          <p className="font-display text-xl font-semibold mb-2">Cobrando en la terminal</p>
+          <p className="text-muted text-sm mb-5">
+            El cobro ya se mandó a la terminal física. Pide al cliente que inserte, pase o acerque su tarjeta ahí.
+          </p>
+          <button
+            onClick={checkPointStatus}
+            disabled={checkingPointStatus}
+            className="w-full rounded-md border border-line px-4 py-3 text-sm font-medium mb-3 disabled:opacity-50"
+          >
+            {checkingPointStatus ? "Verificando..." : "Ya pagó — verificar"}
+          </button>
+          {pointStatusMessage && <p className="text-xs text-muted mb-3">{pointStatusMessage}</p>}
+          <button
+            onClick={() => {
+              setPendingPointCharge(null);
+              onClose();
+            }}
+            className="text-xs text-muted underline"
+          >
+            Cancelar y cerrar
+          </button>
+        </div>
+      </div>
+    );
   }
 
   // -----------------------------
@@ -901,6 +1001,20 @@ function CheckoutModal({
               }`}
             >
               Mercado Pago (link/QR)
+            </button>
+          )}
+
+          {terminalLinked && (
+            <button
+              type="button"
+              onClick={() => setMethod("MERCADOPAGO_TERMINAL")}
+              className={`col-span-2 rounded-md border py-3 text-sm font-medium ${
+                method === "MERCADOPAGO_TERMINAL"
+                  ? "bg-ember text-white border-ember"
+                  : "border-line"
+              }`}
+            >
+              Tarjeta (terminal física)
             </button>
           )}
         </div>

@@ -83,6 +83,108 @@ export function SettingsClient({
           </a>
         )}
       </div>
+
+      {connected && <TerminalsSection />}
+    </div>
+  );
+}
+
+function TerminalsSection() {
+  const [terminals, setTerminals] = useState<
+    { id: string; pos_id?: number; store_id?: string; operating_mode: string }[]
+  >([]);
+  const [linked, setLinked] = useState<{ id: string; terminalId: string; label: string }[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [labels, setLabels] = useState<Record<string, string>>({});
+
+  async function loadTerminals() {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/mercadopago/terminals");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "No se pudieron cargar las terminales");
+      setTerminals(data.terminals ?? []);
+      setLinked(data.linked ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudieron cargar las terminales");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function linkTerminal(t: { id: string; pos_id?: number; store_id?: string }) {
+    const label = labels[t.id]?.trim();
+    if (!label) return;
+    setError("");
+    try {
+      const res = await fetch("/api/mercadopago/terminals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ terminalId: t.id, label, posId: t.pos_id, storeId: t.store_id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "No se pudo vincular la terminal");
+      await loadTerminals();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo vincular la terminal");
+    }
+  }
+
+  async function unlink(id: string) {
+    await fetch(`/api/mercadopago/terminals/${id}`, { method: "DELETE" });
+    await loadTerminals();
+  }
+
+  return (
+    <div className="bg-white border border-line rounded-lg p-5 mt-4">
+      <h2 className="font-display text-lg font-semibold mb-1">Terminales físicas (Point)</h2>
+      <p className="text-muted text-sm mb-4">
+        Vincula cada terminal Point a la sucursal donde está — así el POS sabe a cuál mandar el cobro.
+      </p>
+
+      {linked.length > 0 && (
+        <div className="mb-4 space-y-2">
+          {linked.map((l) => (
+            <div key={l.id} className="flex items-center justify-between text-sm bg-sage/10 rounded-md px-3 py-2">
+              <span>
+                <strong>{l.label}</strong> — {l.terminalId}
+              </span>
+              <button onClick={() => unlink(l.id)} className="text-xs underline text-muted">
+                Desvincular
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <button onClick={loadTerminals} disabled={loading} className="text-sm underline text-ember-dark mb-4">
+        {loading ? "Buscando..." : "Buscar terminales disponibles"}
+      </button>
+
+      {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-3">{error}</p>}
+
+      {terminals
+        .filter((t) => !linked.some((l) => l.terminalId === t.id))
+        .map((t) => (
+          <div key={t.id} className="flex items-center gap-2 mb-2">
+            <span className="text-xs text-muted flex-1 truncate">{t.id}</span>
+            <input
+              className="w-32 rounded-md border border-line px-2 py-1 text-sm"
+              placeholder="Ej. Caja 1"
+              value={labels[t.id] ?? ""}
+              onChange={(e) => setLabels((prev) => ({ ...prev, [t.id]: e.target.value }))}
+            />
+            <button
+              onClick={() => linkTerminal(t)}
+              disabled={!labels[t.id]?.trim()}
+              className="rounded-md bg-ember text-white px-3 py-1 text-xs font-medium disabled:opacity-50"
+            >
+              Vincular a esta sucursal
+            </button>
+          </div>
+        ))}
     </div>
   );
 }

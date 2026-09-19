@@ -55,12 +55,21 @@ export default async function PosPage() {
   const pagosIntegradosEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.PAGOS_INTEGRADOS);
   const mpAccount = pagosIntegradosEnabled ? await mercadoPagoService.getAccount(session.user.companyId) : null;
 
+  // El botón de terminal física solo aparece si esta sucursal tiene una
+  // terminal Point vinculada (ver Configuración → Terminales).
+  const { prisma } = await import("@/lib/prisma");
+  const terminalLinked =
+    pagosIntegradosEnabled && branchId
+      ? !!(await prisma.mercadoPagoTerminal.findUnique({ where: { branchId } }))
+      : false;
+
   return (
     <PosClient
       categories={JSON.parse(JSON.stringify(categories.filter((c: (typeof categories)[number]) => c.isActive)))}
       products={JSON.parse(JSON.stringify(activeProducts))}
       tables={JSON.parse(JSON.stringify(tables))}
       mercadoPagoEnabled={!!mpAccount}
+      terminalLinked={terminalLinked}
       userName={session.user.name ?? ""}
     />
   );

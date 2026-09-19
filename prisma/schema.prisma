@@ -101,9 +101,30 @@ model Branch {
   cashRegisters      CashRegister[]
   inventoryMovements InventoryMovement[]
   tables             Table[]
+  mercadoPagoTerminal MercadoPagoTerminal?
 
   @@index([companyId])
   @@map("branches")
+}
+
+/// Una terminal física Point de Mercado Pago vinculada a una sucursal.
+/// Una sucursal, cuando mucho, una terminal (por ahora) — si algún
+/// restaurante necesita varias en la misma sucursal, esto habría que
+/// extenderlo a Terminal[] y elegir cuál usar en el POS.
+model MercadoPagoTerminal {
+  id         String   @id @default(uuid())
+  companyId  String
+  branchId   String   @unique
+  branch     Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  terminalId String // el "id" que regresa terminals/v1/list, ej. "NEWLAND_N950__XXXX"
+  label      String // nombre amigable que le puso el restaurante, ej. "Caja 1"
+  posId      Int?
+  storeId    String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("mercadopago_terminals")
 }
 
 enum TableStatus {
@@ -440,6 +461,7 @@ model Payment {
   change       Decimal? @db.Decimal(10, 2)
   mpPaymentId    String? @unique
   mpPreferenceId String?
+  mpPointOrderId String? @unique // id de la orden en la API de Point (Mercado Pago), para consultar/cancelar
   createdAt  DateTime @default(now())
 
   @@map("payments")
@@ -451,6 +473,7 @@ enum PaymentMethod {
   TRANSFER
   OTHER
   MERCADOPAGO
+  MERCADOPAGO_TERMINAL
 }
 
 // ------------------------------------------------------------

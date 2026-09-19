@@ -12,7 +12,7 @@ export const saleSchema = z
       )
       .min(1, "El carrito está vacío"),
     discount: z.coerce.number().min(0).default(0),
-    paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO"]),
+    paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO", "MERCADOPAGO_TERMINAL"]),
     cashReceived: z.coerce.number().min(0).optional(),
     tableId: z.string().optional(),
     orderType: z.enum(["COMER_AQUI", "PARA_LLEVAR", "DOMICILIO"]).default("COMER_AQUI"),
@@ -98,7 +98,10 @@ export const salesService = {
         payments: {
           create: {
             method: input.paymentMethod,
-            status: input.paymentMethod === "MERCADOPAGO" ? "PENDING" : "APPROVED",
+            status:
+              input.paymentMethod === "MERCADOPAGO" || input.paymentMethod === "MERCADOPAGO_TERMINAL"
+                ? "PENDING"
+                : "APPROVED",
             amount: total,
             cashReceived: input.cashReceived,
             change,
@@ -121,7 +124,7 @@ export const salesService = {
     // inventario se descuenta hasta que el webhook confirme el pago
     // (finalizeApprovedOrder), para no descontar stock de un cobro que
     // termine rechazado o abandonado.
-    if (input.paymentMethod !== "MERCADOPAGO") {
+    if (input.paymentMethod !== "MERCADOPAGO" && input.paymentMethod !== "MERCADOPAGO_TERMINAL") {
       const { inventoryService } = await import("@/modules/inventory/service");
       try {
         await inventoryService.deductForSale(branchId, userId, input.items);

@@ -18,7 +18,7 @@ export const kitchenService = {
         // se confirma — evita que se empiece a preparar algo que el cliente
         // podría no llegar a pagar. No afecta CASH/CARD/TRANSFER/OTHER,
         // que siempre nacen ya aprobados (ver Payment.status default).
-        payments: { none: { method: "MERCADOPAGO", status: "PENDING" } },
+        payments: { none: { method: { in: ["MERCADOPAGO", "MERCADOPAGO_TERMINAL"] }, status: "PENDING" } },
         // Una mesa recién abierta (Caja tipo Mesa) crea la orden antes de
         // tener productos — no debe aparecer en cocina hasta la primera ronda.
         items: { some: {} },

@@ -23,7 +23,15 @@ const STATUS_COLOR: Record<TableStatus, string> = {
   LIMPIEZA: "bg-ink-100 text-muted border-line",
 };
 
-export function TablesClient({ initialTables }: { initialTables: TableRow[] }) {
+export function TablesClient({
+  initialTables,
+  mercadoPagoEnabled,
+  terminalLinked,
+}: {
+  initialTables: TableRow[];
+  mercadoPagoEnabled: boolean;
+  terminalLinked: boolean;
+}) {
   const router = useRouter();
   const [tables, setTables] = useState<TableRow[]>(initialTables);
   const [newName, setNewName] = useState("");
@@ -235,6 +243,8 @@ export function TablesClient({ initialTables }: { initialTables: TableRow[] }) {
       {closeOpen && ticketOrder && ticketTable && (
         <CloseTabModal
           order={ticketOrder}
+          mercadoPagoEnabled={mercadoPagoEnabled}
+          terminalLinked={terminalLinked}
           onClose={() => setCloseOpen(false)}
           onDone={() => {
             setCloseOpen(false);
@@ -251,17 +261,26 @@ export function TablesClient({ initialTables }: { initialTables: TableRow[] }) {
 
 function CloseTabModal({
   order,
+  mercadoPagoEnabled,
+  terminalLinked,
   onClose,
   onDone,
 }: {
   order: OpenOrder;
+  mercadoPagoEnabled: boolean;
+  terminalLinked: boolean;
   onClose: () => void;
   onDone: () => void;
 }) {
-  const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO">("CASH");
+  const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO" | "MERCADOPAGO_TERMINAL">(
+    "CASH"
+  );
   const [cashReceived, setCashReceived] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [pendingPointOrderId, setPendingPointOrderId] = useState<string | null>(null);
+  const [checkingPoint, setCheckingPoint] = useState(false);
+  const [pointMessage, setPointMessage] = useState("");
 
   const total = Number(order.total);
   const cashReceivedNum = parseFloat(cashReceived || "0");
@@ -288,13 +307,68 @@ function CloseTabModal({
 
       if (method === "MERCADOPAGO" && data.mpCheckout?.checkoutUrl) {
         window.open(data.mpCheckout.checkoutUrl, "_blank");
+        onDone();
+        return;
       }
+
+      if (method === "MERCADOPAGO_TERMINAL" && data.pointOrder?.id) {
+        setPendingPointOrderId(data.pointOrder.id);
+        setSaving(false);
+        return;
+      }
+
       onDone();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo cobrar la mesa");
-    } finally {
       setSaving(false);
     }
+  }
+
+  async function checkPointStatus() {
+    if (!pendingPointOrderId) return;
+    setCheckingPoint(true);
+    setPointMessage("");
+    try {
+      const res = await fetch(`/api/mercadopago/point-orders/${pendingPointOrderId}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "No se pudo verificar el estatus");
+
+      if (data.paymentStatus === "APPROVED" || data.status === "processed") {
+        onDone();
+      } else if (data.status === "canceled" || data.status === "expired") {
+        setPointMessage("El cobro se canceló o expiró en la terminal.");
+      } else {
+        setPointMessage("Todavía no se detecta el pago en la terminal.");
+      }
+    } catch (err) {
+      setPointMessage(err instanceof Error ? err.message : "No se pudo verificar el estatus.");
+    } finally {
+      setCheckingPoint(false);
+    }
+  }
+
+  if (pendingPointOrderId) {
+    return (
+      <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4">
+        <div className="bg-white rounded-lg p-6 max-w-sm w-full text-center">
+          <p className="font-display text-xl font-semibold mb-2">Cobrando en la terminal</p>
+          <p className="text-muted text-sm mb-5">
+            El cobro ya se mandó a la terminal física. Pide al cliente que inserte, pase o acerque su tarjeta ahí.
+          </p>
+          <button
+            onClick={checkPointStatus}
+            disabled={checkingPoint}
+            className="w-full rounded-md border border-line px-4 py-3 text-sm font-medium mb-3 disabled:opacity-50"
+          >
+            {checkingPoint ? "Verificando..." : "Ya pagó — verificar"}
+          </button>
+          {pointMessage && <p className="text-xs text-muted mb-3">{pointMessage}</p>}
+          <button onClick={onClose} className="text-xs text-muted underline">
+            Cancelar y cerrar
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -314,13 +388,24 @@ function CloseTabModal({
               {m === "CASH" ? "Efectivo" : m === "CARD" ? "Tarjeta" : m === "TRANSFER" ? "Transferencia" : "Otro"}
             </button>
           ))}
-          <button
-            type="button"
-            onClick={() => setMethod("MERCADOPAGO")}
-            className={`col-span-2 rounded-md border py-3 text-sm font-medium ${method === "MERCADOPAGO" ? "bg-ember text-white border-ember" : "border-line"}`}
-          >
-            Mercado Pago (link/QR)
-          </button>
+          {mercadoPagoEnabled && (
+            <button
+              type="button"
+              onClick={() => setMethod("MERCADOPAGO")}
+              className={`col-span-2 rounded-md border py-3 text-sm font-medium ${method === "MERCADOPAGO" ? "bg-ember text-white border-ember" : "border-line"}`}
+            >
+              Mercado Pago (link/QR)
+            </button>
+          )}
+          {terminalLinked && (
+            <button
+              type="button"
+              onClick={() => setMethod("MERCADOPAGO_TERMINAL")}
+              className={`col-span-2 rounded-md border py-3 text-sm font-medium ${method === "MERCADOPAGO_TERMINAL" ? "bg-ember text-white border-ember" : "border-line"}`}
+            >
+              Tarjeta (terminal física)
+            </button>
+          )}
         </div>
 
         {method === "CASH" && (

@@ -13,7 +13,7 @@ export const addRoundSchema = z.object({
 });
 
 export const closeTabSchema = z.object({
-  paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO"]),
+  paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO", "MERCADOPAGO_TERMINAL"]),
   cashReceived: z.coerce.number().min(0).optional(),
   discount: z.coerce.number().min(0).default(0),
 });
@@ -157,7 +157,10 @@ export const tableTabsService = {
         payments: {
           create: {
             method: input.paymentMethod,
-            status: input.paymentMethod === "MERCADOPAGO" ? "PENDING" : "APPROVED",
+            status:
+              input.paymentMethod === "MERCADOPAGO" || input.paymentMethod === "MERCADOPAGO_TERMINAL"
+                ? "PENDING"
+                : "APPROVED",
             amount: total,
             cashReceived: input.cashReceived,
             change,

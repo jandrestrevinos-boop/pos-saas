@@ -26,13 +26,22 @@ export async function POST(req: Request, { params }: { params: { id: string } })
   try {
     const order = await tableTabsService.close(companyId, params.id, parsed.data);
     let mpCheckout: { preferenceId: string; checkoutUrl: string } | null = null;
+    let pointOrder: { id: string; status: string } | null = null;
+
+    const { mercadoPagoService } = await import("@/modules/mercadoPago/service");
 
     if (parsed.data.paymentMethod === "MERCADOPAGO") {
-      const { mercadoPagoService } = await import("@/modules/mercadoPago/service");
       mpCheckout = await mercadoPagoService.createPreferenceForOrder(companyId, order);
+    } else if (parsed.data.paymentMethod === "MERCADOPAGO_TERMINAL") {
+      const { prisma } = await import("@/lib/prisma");
+      const terminal = await prisma.mercadoPagoTerminal.findUnique({ where: { branchId: order.branchId } });
+      if (!terminal) {
+        return NextResponse.json({ error: "Esta sucursal no tiene una terminal vinculada" }, { status: 400 });
+      }
+      pointOrder = await mercadoPagoService.createPointOrder(companyId, order.id, Number(order.total), terminal.terminalId);
     }
 
-    return NextResponse.json({ order, mpCheckout });
+    return NextResponse.json({ order, mpCheckout, pointOrder });
   } catch (err) {
     const message = err instanceof Error ? err.message : "No se pudo cerrar la cuenta";
     return NextResponse.json({ error: message }, { status: 400 });

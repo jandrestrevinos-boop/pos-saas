@@ -1,0 +1,1083 @@
+From 61dd45b6dc59039a942b752f89cdc4c70f9077ae Mon Sep 17 00:00:00 2001
+From: Claude <claude@tappy.local>
+Date: Sat, 19 Sep 2026 18:44:48 +0000
+Subject: [PATCH] =?UTF-8?q?Mercado=20Pago=20Point=20(terminal=20f=C3=ADsic?=
+ =?UTF-8?q?a)=20=E2=80=94=20cobro=20con=20Orders=20API?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Retoma la prioridad de negocio: prospectos que ya tienen terminal
+Point y necesitan el POS conectado a ella, aparte de quienes prefieren
+link/QR sin terminal. Contra la API nueva de Orders (confirmada por
+documentación oficial actual, no memoria — Mercado Pago está
+retirando la vieja Payment Intent API).
+
+- prisma: MercadoPagoTerminal (una terminal vinculada a una sucursal),
+  Payment.mpPointOrderId, PaymentMethod += MERCADOPAGO_TERMINAL
+- mercadoPago/service.ts: listTerminals, setTerminalPdvMode,
+  createPointOrder (POST /v1/orders type=point), getPointOrder,
+  cancelPointOrder
+- Rutas: /api/mercadopago/terminals (listar/vincular/desvincular),
+  /api/orders/[id]/point-charge (mandar cobro a la terminal de la
+  sucursal), /api/mercadopago/point-orders/[id] (consultar estatus —
+  al confirmarse aprueba el Payment y dispara finalizeApprovedOrder;
+  al cancelarse/expirar marca REJECTED), /point-orders/[id]/cancel
+- Configuración: sección 'Terminales físicas (Point)' para buscar y
+  vincular cada terminal a una sucursal
+- POS y cierre de cuenta de mesa: método 'Tarjeta (terminal física)'
+  junto al de link/QR, con pantalla de espera y verificación manual
+  (polling, mismo patrón que Checkout Pro) — de paso se corrigió que
+  el botón de Mercado Pago en el modal de mesas se mostraba siempre
+  sin checar si de verdad estaba conectado
+- sales/service.ts, tableTabs/service.ts, kitchen/service.ts:
+  MERCADOPAGO_TERMINAL sigue el mismo patrón diferido que MERCADOPAGO
+  (pago PENDING, inventario diferido hasta confirmar, no se manda a
+  cocina hasta que se apruebe)
+- Verificado con tsc real, cero errores en todo lo nuevo/tocado
+---
+ prisma/schema.prisma                          |  25 ++++
+ .../(company)/settings/settings-client.tsx    | 102 +++++++++++++++
+ src/app/(company)/tables/page.tsx             |  18 ++-
+ src/app/(company)/tables/tables-client.tsx    | 105 ++++++++++++++--
+ .../point-orders/[id]/cancel/route.ts         |  27 ++++
+ .../mercadopago/point-orders/[id]/route.ts    |  48 ++++++++
+ .../api/mercadopago/terminals/[id]/route.ts   |  16 +++
+ src/app/api/mercadopago/terminals/route.ts    |  75 +++++++++++
+ src/app/api/orders/[id]/close/route.ts        |  13 +-
+ src/app/api/orders/[id]/point-charge/route.ts |  43 +++++++
+ src/app/pos/page.tsx                          |   9 ++
+ src/app/pos/pos-client.tsx                    | 116 +++++++++++++++++-
+ src/modules/kitchen/service.ts                |   2 +-
+ src/modules/mercadoPago/service.ts            |  90 ++++++++++++++
+ src/modules/sales/service.ts                  |   9 +-
+ src/modules/tableTabs/service.ts              |   7 +-
+ 16 files changed, 685 insertions(+), 20 deletions(-)
+ create mode 100644 src/app/api/mercadopago/point-orders/[id]/cancel/route.ts
+ create mode 100644 src/app/api/mercadopago/point-orders/[id]/route.ts
+ create mode 100644 src/app/api/mercadopago/terminals/[id]/route.ts
+ create mode 100644 src/app/api/mercadopago/terminals/route.ts
+ create mode 100644 src/app/api/orders/[id]/point-charge/route.ts
+
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 68be4ae..df37c1c 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -100,11 +102,32 @@ model Branch {
+   cashRegisters      CashRegister[]
+   inventoryMovements InventoryMovement[]
+   tables             Table[]
++  mercadoPagoTerminal MercadoPagoTerminal?
+ 
+   @@index([companyId])
+   @@map("branches")
+ }
+ 
++/// Una terminal física Point de Mercado Pago vinculada a una sucursal.
++/// Una sucursal, cuando mucho, una terminal (por ahora) — si algún
++/// restaurante necesita varias en la misma sucursal, esto habría que
++/// extenderlo a Terminal[] y elegir cuál usar en el POS.
++model MercadoPagoTerminal {
++  id         String   @id @default(uuid())
++  companyId  String
++  branchId   String   @unique
++  branch     Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
++
++  terminalId String // el "id" que regresa terminals/v1/list, ej. "NEWLAND_N950__XXXX"
++  label      String // nombre amigable que le puso el restaurante, ej. "Caja 1"
++  posId      Int?
++  storeId    String?
++  createdAt  DateTime @default(now())
++  updatedAt  DateTime @updatedAt
++
++  @@map("mercadopago_terminals")
++}
++
+ enum TableStatus {
+   LIBRE
+   OCUPADA
+@@ -439,6 +462,7 @@ model Payment {
+   change       Decimal? @db.Decimal(10, 2)
+   mpPaymentId    String? @unique
+   mpPreferenceId String?
++  mpPointOrderId String? @unique // id de la orden en la API de Point (Mercado Pago), para consultar/cancelar
+   createdAt  DateTime @default(now())
+ 
+   @@map("payments")
+@@ -450,6 +474,7 @@ enum PaymentMethod {
+   TRANSFER
+   OTHER
+   MERCADOPAGO
++  MERCADOPAGO_TERMINAL
+ }
+ 
+ // ------------------------------------------------------------
+diff --git a/src/app/(company)/settings/settings-client.tsx b/src/app/(company)/settings/settings-client.tsx
+index 47e7070..0e0d606 100644
+--- a/src/app/(company)/settings/settings-client.tsx
++++ b/src/app/(company)/settings/settings-client.tsx
+@@ -83,6 +83,108 @@ export function SettingsClient({
+           </a>
+         )}
+       </div>
++
++      {connected && <TerminalsSection />}
++    </div>
++  );
++}
++
++function TerminalsSection() {
++  const [terminals, setTerminals] = useState<
++    { id: string; pos_id?: number; store_id?: string; operating_mode: string }[]
++  >([]);
++  const [linked, setLinked] = useState<{ id: string; terminalId: string; label: string }[]>([]);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState("");
++  const [labels, setLabels] = useState<Record<string, string>>({});
++
++  async function loadTerminals() {
++    setLoading(true);
++    setError("");
++    try {
++      const res = await fetch("/api/mercadopago/terminals");
++      const data = await res.json();
++      if (!res.ok) throw new Error(data.error ?? "No se pudieron cargar las terminales");
++      setTerminals(data.terminals ?? []);
++      setLinked(data.linked ?? []);
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "No se pudieron cargar las terminales");
++    } finally {
++      setLoading(false);
++    }
++  }
++
++  async function linkTerminal(t: { id: string; pos_id?: number; store_id?: string }) {
++    const label = labels[t.id]?.trim();
++    if (!label) return;
++    setError("");
++    try {
++      const res = await fetch("/api/mercadopago/terminals", {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ terminalId: t.id, label, posId: t.pos_id, storeId: t.store_id }),
++      });
++      const data = await res.json();
++      if (!res.ok) throw new Error(data.error ?? "No se pudo vincular la terminal");
++      await loadTerminals();
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "No se pudo vincular la terminal");
++    }
++  }
++
++  async function unlink(id: string) {
++    await fetch(`/api/mercadopago/terminals/${id}`, { method: "DELETE" });
++    await loadTerminals();
++  }
++
++  return (
++    <div className="bg-white border border-line rounded-lg p-5 mt-4">
++      <h2 className="font-display text-lg font-semibold mb-1">Terminales físicas (Point)</h2>
++      <p className="text-muted text-sm mb-4">
++        Vincula cada terminal Point a la sucursal donde está — así el POS sabe a cuál mandar el cobro.
++      </p>
++
++      {linked.length > 0 && (
++        <div className="mb-4 space-y-2">
++          {linked.map((l) => (
++            <div key={l.id} className="flex items-center justify-between text-sm bg-sage/10 rounded-md px-3 py-2">
++              <span>
++                <strong>{l.label}</strong> — {l.terminalId}
++              </span>
++              <button onClick={() => unlink(l.id)} className="text-xs underline text-muted">
++                Desvincular
++              </button>
++            </div>
++          ))}
++        </div>
++      )}
++
++      <button onClick={loadTerminals} disabled={loading} className="text-sm underline text-ember-dark mb-4">
++        {loading ? "Buscando..." : "Buscar terminales disponibles"}
++      </button>
++
++      {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-3">{error}</p>}
++
++      {terminals
++        .filter((t) => !linked.some((l) => l.terminalId === t.id))
++        .map((t) => (
++          <div key={t.id} className="flex items-center gap-2 mb-2">
++            <span className="text-xs text-muted flex-1 truncate">{t.id}</span>
++            <input
++              className="w-32 rounded-md border border-line px-2 py-1 text-sm"
++              placeholder="Ej. Caja 1"
++              value={labels[t.id] ?? ""}
++              onChange={(e) => setLabels((prev) => ({ ...prev, [t.id]: e.target.value }))}
++            />
++            <button
++              onClick={() => linkTerminal(t)}
++              disabled={!labels[t.id]?.trim()}
++              className="rounded-md bg-ember text-white px-3 py-1 text-xs font-medium disabled:opacity-50"
++            >
++              Vincular a esta sucursal
++            </button>
++          </div>
++        ))}
+     </div>
+   );
+ }
+diff --git a/src/app/(company)/tables/page.tsx b/src/app/(company)/tables/page.tsx
+index 446ea01..5d20700 100644
+--- a/src/app/(company)/tables/page.tsx
++++ b/src/app/(company)/tables/page.tsx
+@@ -6,6 +6,7 @@ import { hasPermission, PERMISSIONS } from "@/lib/permissions";
+ import { hasFeature } from "@/lib/feature-gating";
+ import { FEATURE_KEYS } from "@/lib/plan-features";
+ import { tablesService } from "@/modules/tables/service";
++import { mercadoPagoService } from "@/modules/mercadoPago/service";
+ import { TablesClient } from "./tables-client";
+ import Link from "next/link";
+ 
+@@ -39,5 +40,20 @@ export default async function TablesPage() {
+   const branchId = await resolveBranchId(ctx, session.user.companyId);
+   const tables = branchId ? await tablesService.list(session.user.companyId, branchId) : [];
+ 
+-  return <TablesClient initialTables={JSON.parse(JSON.stringify(tables))} />;
++  const pagosIntegradosEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.PAGOS_INTEGRADOS);
++  const mpAccount = pagosIntegradosEnabled ? await mercadoPagoService.getAccount(session.user.companyId) : null;
++
++  const { prisma } = await import("@/lib/prisma");
++  const terminalLinked =
++    pagosIntegradosEnabled && branchId
++      ? !!(await prisma.mercadoPagoTerminal.findUnique({ where: { branchId } }))
++      : false;
++
++  return (
++    <TablesClient
++      initialTables={JSON.parse(JSON.stringify(tables))}
++      mercadoPagoEnabled={!!mpAccount}
++      terminalLinked={terminalLinked}
++    />
++  );
+ }
+diff --git a/src/app/(company)/tables/tables-client.tsx b/src/app/(company)/tables/tables-client.tsx
+index 702d9b4..e3597fd 100644
+--- a/src/app/(company)/tables/tables-client.tsx
++++ b/src/app/(company)/tables/tables-client.tsx
+@@ -23,7 +23,15 @@ const STATUS_COLOR: Record<TableStatus, string> = {
+   LIMPIEZA: "bg-ink-100 text-muted border-line",
+ };
+ 
+-export function TablesClient({ initialTables }: { initialTables: TableRow[] }) {
++export function TablesClient({
++  initialTables,
++  mercadoPagoEnabled,
++  terminalLinked,
++}: {
++  initialTables: TableRow[];
++  mercadoPagoEnabled: boolean;
++  terminalLinked: boolean;
++}) {
+   const router = useRouter();
+   const [tables, setTables] = useState<TableRow[]>(initialTables);
+   const [newName, setNewName] = useState("");
+@@ -235,6 +243,8 @@ export function TablesClient({ initialTables }: { initialTables: TableRow[] }) {
+       {closeOpen && ticketOrder && ticketTable && (
+         <CloseTabModal
+           order={ticketOrder}
++          mercadoPagoEnabled={mercadoPagoEnabled}
++          terminalLinked={terminalLinked}
+           onClose={() => setCloseOpen(false)}
+           onDone={() => {
+             setCloseOpen(false);
+@@ -251,17 +261,26 @@ export function TablesClient({ initialTables }: { initialTables: TableRow[] }) {
+ 
+ function CloseTabModal({
+   order,
++  mercadoPagoEnabled,
++  terminalLinked,
+   onClose,
+   onDone,
+ }: {
+   order: OpenOrder;
++  mercadoPagoEnabled: boolean;
++  terminalLinked: boolean;
+   onClose: () => void;
+   onDone: () => void;
+ }) {
+-  const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO">("CASH");
++  const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO" | "MERCADOPAGO_TERMINAL">(
++    "CASH"
++  );
+   const [cashReceived, setCashReceived] = useState("");
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
++  const [pendingPointOrderId, setPendingPointOrderId] = useState<string | null>(null);
++  const [checkingPoint, setCheckingPoint] = useState(false);
++  const [pointMessage, setPointMessage] = useState("");
+ 
+   const total = Number(order.total);
+   const cashReceivedNum = parseFloat(cashReceived || "0");
+@@ -288,15 +307,70 @@ function CloseTabModal({
+ 
+       if (method === "MERCADOPAGO" && data.mpCheckout?.checkoutUrl) {
+         window.open(data.mpCheckout.checkoutUrl, "_blank");
++        onDone();
++        return;
++      }
++
++      if (method === "MERCADOPAGO_TERMINAL" && data.pointOrder?.id) {
++        setPendingPointOrderId(data.pointOrder.id);
++        setSaving(false);
++        return;
+       }
++
+       onDone();
+     } catch (err) {
+       setError(err instanceof Error ? err.message : "No se pudo cobrar la mesa");
+-    } finally {
+       setSaving(false);
+     }
+   }
+ 
++  async function checkPointStatus() {
++    if (!pendingPointOrderId) return;
++    setCheckingPoint(true);
++    setPointMessage("");
++    try {
++      const res = await fetch(`/api/mercadopago/point-orders/${pendingPointOrderId}`);
++      const data = await res.json();
++      if (!res.ok) throw new Error(data.error ?? "No se pudo verificar el estatus");
++
++      if (data.paymentStatus === "APPROVED" || data.status === "processed") {
++        onDone();
++      } else if (data.status === "canceled" || data.status === "expired") {
++        setPointMessage("El cobro se canceló o expiró en la terminal.");
++      } else {
++        setPointMessage("Todavía no se detecta el pago en la terminal.");
++      }
++    } catch (err) {
++      setPointMessage(err instanceof Error ? err.message : "No se pudo verificar el estatus.");
++    } finally {
++      setCheckingPoint(false);
++    }
++  }
++
++  if (pendingPointOrderId) {
++    return (
++      <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4">
++        <div className="bg-white rounded-lg p-6 max-w-sm w-full text-center">
++          <p className="font-display text-xl font-semibold mb-2">Cobrando en la terminal</p>
++          <p className="text-muted text-sm mb-5">
++            El cobro ya se mandó a la terminal física. Pide al cliente que inserte, pase o acerque su tarjeta ahí.
++          </p>
++          <button
++            onClick={checkPointStatus}
++            disabled={checkingPoint}
++            className="w-full rounded-md border border-line px-4 py-3 text-sm font-medium mb-3 disabled:opacity-50"
++          >
++            {checkingPoint ? "Verificando..." : "Ya pagó — verificar"}
++          </button>
++          {pointMessage && <p className="text-xs text-muted mb-3">{pointMessage}</p>}
++          <button onClick={onClose} className="text-xs text-muted underline">
++            Cancelar y cerrar
++          </button>
++        </div>
++      </div>
++    );
++  }
++
+   return (
+     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4">
+       <div className="bg-white rounded-lg p-6 max-w-sm w-full">
+@@ -314,13 +388,24 @@ function CloseTabModal({
+               {m === "CASH" ? "Efectivo" : m === "CARD" ? "Tarjeta" : m === "TRANSFER" ? "Transferencia" : "Otro"}
+             </button>
+           ))}
+-          <button
+-            type="button"
+-            onClick={() => setMethod("MERCADOPAGO")}
+-            className={`col-span-2 rounded-md border py-3 text-sm font-medium ${method === "MERCADOPAGO" ? "bg-ember text-white border-ember" : "border-line"}`}
+-          >
+-            Mercado Pago (link/QR)
+-          </button>
++          {mercadoPagoEnabled && (
++            <button
++              type="button"
++              onClick={() => setMethod("MERCADOPAGO")}
++              className={`col-span-2 rounded-md border py-3 text-sm font-medium ${method === "MERCADOPAGO" ? "bg-ember text-white border-ember" : "border-line"}`}
++            >
++              Mercado Pago (link/QR)
++            </button>
++          )}
++          {terminalLinked && (
++            <button
++              type="button"
++              onClick={() => setMethod("MERCADOPAGO_TERMINAL")}
++              className={`col-span-2 rounded-md border py-3 text-sm font-medium ${method === "MERCADOPAGO_TERMINAL" ? "bg-ember text-white border-ember" : "border-line"}`}
++            >
++              Tarjeta (terminal física)
++            </button>
++          )}
+         </div>
+ 
+         {method === "CASH" && (
+diff --git a/src/app/api/mercadopago/point-orders/[id]/cancel/route.ts b/src/app/api/mercadopago/point-orders/[id]/cancel/route.ts
+new file mode 100644
+index 0000000..9b9c6a6
+--- /dev/null
++++ b/src/app/api/mercadopago/point-orders/[id]/cancel/route.ts
+@@ -0,0 +1,27 @@
++import { NextResponse } from "next/server";
++import { prisma } from "@/lib/prisma";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { mercadoPagoService } from "@/modules/mercadoPago/service";
++
++export async function POST(_req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  const payment = await prisma.payment.findFirst({
++    where: { mpPointOrderId: params.id },
++    include: { order: true },
++  });
++  if (!payment || payment.order.companyId !== companyId) {
++    return NextResponse.json({ error: "Cobro no encontrado" }, { status: 404 });
++  }
++
++  try {
++    await mercadoPagoService.cancelPointOrder(companyId, params.id);
++    await prisma.payment.update({ where: { id: payment.id }, data: { status: "CANCELLED" } });
++    await prisma.order.update({ where: { id: payment.orderId }, data: { status: "CANCELED" } });
++    return NextResponse.json({ ok: true });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo cancelar. Si ya llegó a la terminal, cancélalo desde ahí.";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/mercadopago/point-orders/[id]/route.ts b/src/app/api/mercadopago/point-orders/[id]/route.ts
+new file mode 100644
+index 0000000..dbac437
+--- /dev/null
++++ b/src/app/api/mercadopago/point-orders/[id]/route.ts
+@@ -0,0 +1,48 @@
++import { NextResponse } from "next/server";
++import { prisma } from "@/lib/prisma";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { mercadoPagoService } from "@/modules/mercadoPago/service";
++
++const APPROVED_STATUSES = ["processed"];
++const FAILED_STATUSES = ["canceled", "expired"];
++
++/**
++ * Consulta el estatus de un cobro mandado a una terminal física (polling
++ * manual desde el POS, igual que con el link/QR). id = el id de la ORDEN
++ * de Point en Mercado Pago (Payment.mpPointOrderId), no el id de la venta.
++ */
++export async function GET(_req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  const payment = await prisma.payment.findFirst({
++    where: { mpPointOrderId: params.id },
++    include: { order: true },
++  });
++  if (!payment || payment.order.companyId !== companyId) {
++    return NextResponse.json({ error: "Cobro no encontrado" }, { status: 404 });
++  }
++
++  try {
++    const pointOrder = await mercadoPagoService.getPointOrder(companyId, params.id);
++    const mpStatus: string = pointOrder.status;
++
++    if (APPROVED_STATUSES.includes(mpStatus) && payment.status === "PENDING") {
++      const paymentId = pointOrder.transactions?.payments?.[0]?.id ?? null;
++      await prisma.payment.update({
++        where: { id: payment.id },
++        data: { status: "APPROVED", mpPaymentId: paymentId ? String(paymentId) : undefined },
++      });
++      const { salesService } = await import("@/modules/sales/service");
++      await salesService.finalizeApprovedOrder(payment.orderId);
++    } else if (FAILED_STATUSES.includes(mpStatus) && payment.status === "PENDING") {
++      await prisma.payment.update({ where: { id: payment.id }, data: { status: "REJECTED" } });
++      await prisma.order.update({ where: { id: payment.orderId }, data: { status: "CANCELED" } });
++    }
++
++    return NextResponse.json({ status: mpStatus, paymentStatus: payment.status });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo consultar el cobro";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/mercadopago/terminals/[id]/route.ts b/src/app/api/mercadopago/terminals/[id]/route.ts
+new file mode 100644
+index 0000000..b1b9449
+--- /dev/null
++++ b/src/app/api/mercadopago/terminals/[id]/route.ts
+@@ -0,0 +1,16 @@
++import { NextResponse } from "next/server";
++import { prisma } from "@/lib/prisma";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++
++export async function DELETE(_req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!hasPermission(ctx.permissions, PERMISSIONS.SETTINGS_MANAGE)) {
++    return NextResponse.json({ error: "No tienes permiso para desvincular terminales" }, { status: 403 });
++  }
++
++  await prisma.mercadoPagoTerminal.deleteMany({ where: { id: params.id, companyId } });
++  return NextResponse.json({ ok: true });
++}
+diff --git a/src/app/api/mercadopago/terminals/route.ts b/src/app/api/mercadopago/terminals/route.ts
+new file mode 100644
+index 0000000..8705414
+--- /dev/null
++++ b/src/app/api/mercadopago/terminals/route.ts
+@@ -0,0 +1,75 @@
++import { NextResponse } from "next/server";
++import { prisma } from "@/lib/prisma";
++import { getTenantContext, requireCompanyId, resolveBranchId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { mercadoPagoService } from "@/modules/mercadoPago/service";
++
++/** Terminales Point disponibles en la cuenta de Mercado Pago conectada, para elegir cuál vincular. */
++export async function GET() {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.PAGOS_INTEGRADOS))) {
++    return NextResponse.json({ error: "Tu plan no incluye Pagos integrados" }, { status: 403 });
++  }
++  if (!hasPermission(ctx.permissions, PERMISSIONS.SETTINGS_MANAGE)) {
++    return NextResponse.json({ error: "No tienes permiso para ver terminales" }, { status: 403 });
++  }
++
++  try {
++    const terminals = await mercadoPagoService.listTerminals(companyId);
++    const linked = await prisma.mercadoPagoTerminal.findMany({ where: { companyId } });
++    return NextResponse.json({ terminals, linked });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo obtener la lista de terminales";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
++
++/** Vincula una terminal a la sucursal del usuario actual y la deja en modo PDV. */
++export async function POST(req: Request) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.PAGOS_INTEGRADOS))) {
++    return NextResponse.json({ error: "Tu plan no incluye Pagos integrados" }, { status: 403 });
++  }
++  if (!hasPermission(ctx.permissions, PERMISSIONS.SETTINGS_MANAGE)) {
++    return NextResponse.json({ error: "No tienes permiso para vincular terminales" }, { status: 403 });
++  }
++
++  const branchId = await resolveBranchId(ctx, companyId);
++  if (!branchId) {
++    return NextResponse.json({ error: "La empresa no tiene sucursales configuradas" }, { status: 400 });
++  }
++
++  const body = await req.json();
++  const { terminalId, label, posId, storeId } = body as {
++    terminalId?: string;
++    label?: string;
++    posId?: number;
++    storeId?: string;
++  };
++  if (!terminalId || !label) {
++    return NextResponse.json({ error: "Falta el id de la terminal o el nombre" }, { status: 400 });
++  }
++
++  try {
++    if (posId) {
++      await mercadoPagoService.setTerminalPdvMode(companyId, terminalId, posId);
++    }
++
++    const linked = await prisma.mercadoPagoTerminal.upsert({
++      where: { branchId },
++      update: { terminalId, label, posId, storeId },
++      create: { companyId, branchId, terminalId, label, posId, storeId },
++    });
++
++    return NextResponse.json({ linked });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo vincular la terminal";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/orders/[id]/close/route.ts b/src/app/api/orders/[id]/close/route.ts
+index 7e5ed91..716d503 100644
+--- a/src/app/api/orders/[id]/close/route.ts
++++ b/src/app/api/orders/[id]/close/route.ts
+@@ -26,13 +26,22 @@ export async function POST(req: Request, { params }: { params: { id: string } })
+   try {
+     const order = await tableTabsService.close(companyId, params.id, parsed.data);
+     let mpCheckout: { preferenceId: string; checkoutUrl: string } | null = null;
++    let pointOrder: { id: string; status: string } | null = null;
++
++    const { mercadoPagoService } = await import("@/modules/mercadoPago/service");
+ 
+     if (parsed.data.paymentMethod === "MERCADOPAGO") {
+-      const { mercadoPagoService } = await import("@/modules/mercadoPago/service");
+       mpCheckout = await mercadoPagoService.createPreferenceForOrder(companyId, order);
++    } else if (parsed.data.paymentMethod === "MERCADOPAGO_TERMINAL") {
++      const { prisma } = await import("@/lib/prisma");
++      const terminal = await prisma.mercadoPagoTerminal.findUnique({ where: { branchId: order.branchId } });
++      if (!terminal) {
++        return NextResponse.json({ error: "Esta sucursal no tiene una terminal vinculada" }, { status: 400 });
++      }
++      pointOrder = await mercadoPagoService.createPointOrder(companyId, order.id, Number(order.total), terminal.terminalId);
+     }
+ 
+-    return NextResponse.json({ order, mpCheckout });
++    return NextResponse.json({ order, mpCheckout, pointOrder });
+   } catch (err) {
+     const message = err instanceof Error ? err.message : "No se pudo cerrar la cuenta";
+     return NextResponse.json({ error: message }, { status: 400 });
+diff --git a/src/app/api/orders/[id]/point-charge/route.ts b/src/app/api/orders/[id]/point-charge/route.ts
+new file mode 100644
+index 0000000..33c75b0
+--- /dev/null
++++ b/src/app/api/orders/[id]/point-charge/route.ts
+@@ -0,0 +1,43 @@
++import { NextResponse } from "next/server";
++import { prisma } from "@/lib/prisma";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { mercadoPagoService } from "@/modules/mercadoPago/service";
++
++/** Manda el cobro de una orden ya creada (Mostrador o cuenta de mesa) a la terminal física vinculada a la sucursal. */
++export async function POST(_req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.PAGOS_INTEGRADOS))) {
++    return NextResponse.json({ error: "Tu plan no incluye Pagos integrados" }, { status: 403 });
++  }
++  if (!hasPermission(ctx.permissions, PERMISSIONS.SALES_CREATE)) {
++    return NextResponse.json({ error: "No tienes permiso para cobrar" }, { status: 403 });
++  }
++
++  const order = await prisma.order.findFirst({ where: { id: params.id, companyId } });
++  if (!order) {
++    return NextResponse.json({ error: "Orden no encontrada" }, { status: 404 });
++  }
++
++  const terminal = await prisma.mercadoPagoTerminal.findUnique({ where: { branchId: order.branchId } });
++  if (!terminal) {
++    return NextResponse.json({ error: "Esta sucursal no tiene una terminal vinculada" }, { status: 400 });
++  }
++
++  try {
++    const pointOrder = await mercadoPagoService.createPointOrder(
++      companyId,
++      order.id,
++      Number(order.total),
++      terminal.terminalId
++    );
++    return NextResponse.json({ pointOrder });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo mandar el cobro a la terminal";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/pos/page.tsx b/src/app/pos/page.tsx
+index 49019b3..9d0d3d5 100644
+--- a/src/app/pos/page.tsx
++++ b/src/app/pos/page.tsx
+@@ -55,12 +55,21 @@ export default async function PosPage() {
+   const pagosIntegradosEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.PAGOS_INTEGRADOS);
+   const mpAccount = pagosIntegradosEnabled ? await mercadoPagoService.getAccount(session.user.companyId) : null;
+ 
++  // El botón de terminal física solo aparece si esta sucursal tiene una
++  // terminal Point vinculada (ver Configuración → Terminales).
++  const { prisma } = await import("@/lib/prisma");
++  const terminalLinked =
++    pagosIntegradosEnabled && branchId
++      ? !!(await prisma.mercadoPagoTerminal.findUnique({ where: { branchId } }))
++      : false;
++
+   return (
+     <PosClient
+       categories={JSON.parse(JSON.stringify(categories.filter((c: (typeof categories)[number]) => c.isActive)))}
+       products={JSON.parse(JSON.stringify(activeProducts))}
+       tables={JSON.parse(JSON.stringify(tables))}
+       mercadoPagoEnabled={!!mpAccount}
++      terminalLinked={terminalLinked}
+       userName={session.user.name ?? ""}
+     />
+   );
+diff --git a/src/app/pos/pos-client.tsx b/src/app/pos/pos-client.tsx
+index b25b5ef..77bd482 100644
+--- a/src/app/pos/pos-client.tsx
++++ b/src/app/pos/pos-client.tsx
+@@ -22,6 +22,7 @@ export function PosClient(props: {
+   products: Product[];
+   tables: TableOption[];
+   mercadoPagoEnabled: boolean;
++  terminalLinked: boolean;
+   userName: string;
+ }) {
+   return (
+@@ -36,12 +37,14 @@ function PosClientInner({
+   products,
+   tables,
+   mercadoPagoEnabled,
++  terminalLinked,
+   userName,
+ }: {
+   categories: Category[];
+   products: Product[];
+   tables: TableOption[];
+   mercadoPagoEnabled: boolean;
++  terminalLinked: boolean;
+   userName: string;
+ }) {
+   const [activeCategory, setActiveCategory] = useState<string>(categories[0]?.id ?? "");
+@@ -304,6 +307,7 @@ function PosClientInner({
+           subtotal={subtotal}
+           cart={cart}
+           mercadoPagoEnabled={mercadoPagoEnabled}
++          terminalLinked={terminalLinked}
+           onClose={() => setCheckoutOpen(false)}
+           onDone={resetSale}
+         />
+@@ -318,6 +322,7 @@ function CheckoutModal({
+   subtotal,
+   cart,
+   mercadoPagoEnabled,
++  terminalLinked,
+   onClose,
+   onDone,
+ }: {
+@@ -326,10 +331,13 @@ function CheckoutModal({
+   subtotal: number;
+   cart: CartLine[];
+   mercadoPagoEnabled: boolean;
++  terminalLinked: boolean;
+   onClose: () => void;
+   onDone: () => void;
+ }) {
+-  const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO">("CASH");
++  const [method, setMethod] = useState<
++    "CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO" | "MERCADOPAGO_TERMINAL"
++  >("CASH");
+   const [cashReceived, setCashReceived] = useState("");
+   const [orderType, setOrderType] = useState<"COMER_AQUI" | "PARA_LLEVAR" | "DOMICILIO">("COMER_AQUI");
+   const [notes, setNotes] = useState("");
+@@ -358,6 +366,14 @@ function CheckoutModal({
+   const [checkingMpStatus, setCheckingMpStatus] = useState(false);
+   const [mpStatusMessage, setMpStatusMessage] = useState("");
+ 
++  const [pendingPointCharge, setPendingPointCharge] = useState<{
++    orderId: string;
++    orderNumber: number;
++    pointOrderId: string;
++  } | null>(null);
++  const [checkingPointStatus, setCheckingPointStatus] = useState(false);
++  const [pointStatusMessage, setPointStatusMessage] = useState("");
++
+   const cashReceivedNum = parseFloat(cashReceived) || 0;
+   const change = cashReceivedNum - total;
+ 
+@@ -415,6 +431,21 @@ function CheckoutModal({
+         return;
+       }
+ 
++      if (method === "MERCADOPAGO_TERMINAL") {
++        const chargeRes = await fetch(`/api/orders/${data.order.id}/point-charge`, { method: "POST" });
++        const chargeData = await chargeRes.json();
++        if (!chargeRes.ok) {
++          setError(chargeData.error ?? "No se pudo mandar el cobro a la terminal");
++          return;
++        }
++        setPendingPointCharge({
++          orderId: data.order.id,
++          orderNumber: data.order.orderNumber,
++          pointOrderId: chargeData.pointOrder.id,
++        });
++        return;
++      }
++
+       setCompletedOrder({
+         orderNumber: data.order.orderNumber,
+         items: cart.map((l) => ({
+@@ -475,6 +506,75 @@ function CheckoutModal({
+     }
+   }
+ 
++  async function checkPointStatus() {
++    if (!pendingPointCharge) return;
++    setCheckingPointStatus(true);
++    setPointStatusMessage("");
++    try {
++      const res = await fetch(`/api/mercadopago/point-orders/${pendingPointCharge.pointOrderId}`);
++      const data = await res.json();
++      if (!res.ok) throw new Error(data.error ?? "No se pudo verificar el estatus");
++
++      if (data.paymentStatus === "APPROVED" || data.status === "processed") {
++        setCompletedOrder({
++          orderNumber: pendingPointCharge.orderNumber,
++          items: cart.map((l) => ({ quantity: l.quantity, name: l.product.name, unitPrice: Number(l.product.price) })),
++          subtotal,
++          discount,
++          total,
++          paymentMethod: "MERCADOPAGO_TERMINAL",
++          cashReceived: total,
++          change: 0,
++          orderType,
++          notes: notes.trim(),
++          deliveryAddress: orderType === "DOMICILIO" ? deliveryAddress.trim() : "",
++        });
++        setPendingPointCharge(null);
++      } else if (data.status === "canceled" || data.status === "expired") {
++        setPointStatusMessage("El cobro se canceló o expiró en la terminal. Intenta de nuevo.");
++      } else {
++        setPointStatusMessage("Todavía no se detecta el pago en la terminal. Espera unos segundos y vuelve a verificar.");
++      }
++    } catch (err) {
++      setPointStatusMessage(err instanceof Error ? err.message : "No se pudo verificar el estatus.");
++    } finally {
++      setCheckingPointStatus(false);
++    }
++  }
++
++  // -----------------------------
++  // COBRO CON TERMINAL FÍSICA EN ESPERA
++  // -----------------------------
++  if (pendingPointCharge) {
++    return (
++      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
++        <div className="bg-white rounded-lg p-6 max-w-sm w-full text-center">
++          <p className="font-display text-xl font-semibold mb-2">Cobrando en la terminal</p>
++          <p className="text-muted text-sm mb-5">
++            El cobro ya se mandó a la terminal física. Pide al cliente que inserte, pase o acerque su tarjeta ahí.
++          </p>
++          <button
++            onClick={checkPointStatus}
++            disabled={checkingPointStatus}
++            className="w-full rounded-md border border-line px-4 py-3 text-sm font-medium mb-3 disabled:opacity-50"
++          >
++            {checkingPointStatus ? "Verificando..." : "Ya pagó — verificar"}
++          </button>
++          {pointStatusMessage && <p className="text-xs text-muted mb-3">{pointStatusMessage}</p>}
++          <button
++            onClick={() => {
++              setPendingPointCharge(null);
++              onClose();
++            }}
++            className="text-xs text-muted underline"
++          >
++            Cancelar y cerrar
++          </button>
++        </div>
++      </div>
++    );
++  }
++
+   // -----------------------------
+   // COBRO DE MERCADO PAGO EN ESPERA
+   // -----------------------------
+@@ -903,6 +1003,20 @@ function CheckoutModal({
+               Mercado Pago (link/QR)
+             </button>
+           )}
++
++          {terminalLinked && (
++            <button
++              type="button"
++              onClick={() => setMethod("MERCADOPAGO_TERMINAL")}
++              className={`col-span-2 rounded-md border py-3 text-sm font-medium ${
++                method === "MERCADOPAGO_TERMINAL"
++                  ? "bg-ember text-white border-ember"
++                  : "border-line"
++              }`}
++            >
++              Tarjeta (terminal física)
++            </button>
++          )}
+         </div>
+ 
+         {method === "CASH" && (
+diff --git a/src/modules/kitchen/service.ts b/src/modules/kitchen/service.ts
+index b07a866..95ae29f 100644
+--- a/src/modules/kitchen/service.ts
++++ b/src/modules/kitchen/service.ts
+@@ -18,7 +18,7 @@ export const kitchenService = {
+         // se confirma — evita que se empiece a preparar algo que el cliente
+         // podría no llegar a pagar. No afecta CASH/CARD/TRANSFER/OTHER,
+         // que siempre nacen ya aprobados (ver Payment.status default).
+-        payments: { none: { method: "MERCADOPAGO", status: "PENDING" } },
++        payments: { none: { method: { in: ["MERCADOPAGO", "MERCADOPAGO_TERMINAL"] }, status: "PENDING" } },
+         // Una mesa recién abierta (Caja tipo Mesa) crea la orden antes de
+         // tener productos — no debe aparecer en cocina hasta la primera ronda.
+         items: { some: {} },
+diff --git a/src/modules/mercadoPago/service.ts b/src/modules/mercadoPago/service.ts
+index adf34ba..f6c5378 100644
+--- a/src/modules/mercadoPago/service.ts
++++ b/src/modules/mercadoPago/service.ts
+@@ -230,4 +230,94 @@ export const mercadoPagoService = {
+ 
+     return { handled: true as const, orderId: ref.orderId, status };
+   },
++
++  // ---------------------------------------------------------------------
++  // MERCADO PAGO POINT — terminal física (Orders API, no la vieja Payment
++  // Intent API que Mercado Pago está retirando).
++  // ---------------------------------------------------------------------
++
++  /** Terminales Point disponibles en la cuenta conectada de la empresa (para elegir cuál vincular a cada sucursal). */
++  async listTerminals(companyId: string) {
++    const accessToken = await this.getValidAccessToken(companyId);
++    const res = await fetch(`${MP_API}/terminals/v1/list`, {
++      headers: { Authorization: `Bearer ${accessToken}` },
++    });
++    if (!res.ok) {
++      const body = await res.text();
++      throw new Error(`No se pudo obtener la lista de terminales: ${body}`);
++    }
++    const data = await res.json();
++    return data.data?.terminals ?? [];
++  },
++
++  /** Una terminal debe estar en modo PDV para poder recibir cobros por API — se activa al vincularla. */
++  async setTerminalPdvMode(companyId: string, terminalId: string, posId: number) {
++    const accessToken = await this.getValidAccessToken(companyId);
++    const res = await fetch(`${MP_API}/terminals/v1/setup`, {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
++      body: JSON.stringify({ terminal_id: terminalId, pos_id: posId, operating_mode: "PDV" }),
++    });
++    if (!res.ok) {
++      const body = await res.text();
++      throw new Error(`No se pudo activar el modo PDV en la terminal: ${body}`);
++    }
++  },
++
++  /** Manda un cobro a una terminal física para una orden ya existente. */
++  async createPointOrder(companyId: string, orderId: string, total: number, terminalId: string) {
++    const accessToken = await this.getValidAccessToken(companyId);
++    const externalReference = encodeExternalReference({ kind: "order", companyId, orderId });
++
++    const res = await fetch(`${MP_API}/v1/orders`, {
++      method: "POST",
++      headers: {
++        "Content-Type": "application/json",
++        Authorization: `Bearer ${accessToken}`,
++        "X-Idempotency-Key": crypto.randomUUID(),
++      },
++      body: JSON.stringify({
++        type: "point",
++        external_reference: externalReference,
++        transactions: { payments: [{ amount: total.toFixed(2) }] },
++        config: { point: { terminal_id: terminalId, print_on_terminal: "no_ticket" } },
++        description: `Tappy — orden ${orderId}`,
++      }),
++    });
++
++    if (!res.ok) {
++      const body = await res.text();
++      throw new Error(`No se pudo mandar el cobro a la terminal: ${body}`);
++    }
++
++    const pointOrder = await res.json();
++
++    await prisma.payment.updateMany({
++      where: { orderId, method: "MERCADOPAGO_TERMINAL" },
++      data: { mpPointOrderId: pointOrder.id },
++    });
++
++    return pointOrder as { id: string; status: string };
++  },
++
++  /** Consulta el estatus de un cobro mandado a terminal (para el polling desde el POS). */
++  async getPointOrder(companyId: string, pointOrderId: string) {
++    const accessToken = await this.getValidAccessToken(companyId);
++    const res = await fetch(`${MP_API}/v1/orders/${pointOrderId}`, {
++      headers: { Authorization: `Bearer ${accessToken}` },
++    });
++    if (!res.ok) {
++      const body = await res.text();
++      throw new Error(`No se pudo consultar el cobro de la terminal: ${body}`);
++    }
++    return res.json();
++  },
++
++  async cancelPointOrder(companyId: string, pointOrderId: string) {
++    const accessToken = await this.getValidAccessToken(companyId);
++    await fetch(`${MP_API}/v1/orders/${pointOrderId}/cancel`, {
++      method: "POST",
++      headers: { Authorization: `Bearer ${accessToken}`, "X-Idempotency-Key": crypto.randomUUID() },
++    });
++  },
+ };
+diff --git a/src/modules/sales/service.ts b/src/modules/sales/service.ts
+index 94eb555..f29fe38 100644
+--- a/src/modules/sales/service.ts
++++ b/src/modules/sales/service.ts
+@@ -12,7 +12,7 @@ export const saleSchema = z
+       )
+       .min(1, "El carrito está vacío"),
+     discount: z.coerce.number().min(0).default(0),
+-    paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO"]),
++    paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO", "MERCADOPAGO_TERMINAL"]),
+     cashReceived: z.coerce.number().min(0).optional(),
+     tableId: z.string().optional(),
+     orderType: z.enum(["COMER_AQUI", "PARA_LLEVAR", "DOMICILIO"]).default("COMER_AQUI"),
+@@ -98,7 +98,10 @@ export const salesService = {
+         payments: {
+           create: {
+             method: input.paymentMethod,
+-            status: input.paymentMethod === "MERCADOPAGO" ? "PENDING" : "APPROVED",
++            status:
++              input.paymentMethod === "MERCADOPAGO" || input.paymentMethod === "MERCADOPAGO_TERMINAL"
++                ? "PENDING"
++                : "APPROVED",
+             amount: total,
+             cashReceived: input.cashReceived,
+             change,
+@@ -121,7 +124,7 @@ export const salesService = {
+     // inventario se descuenta hasta que el webhook confirme el pago
+     // (finalizeApprovedOrder), para no descontar stock de un cobro que
+     // termine rechazado o abandonado.
+-    if (input.paymentMethod !== "MERCADOPAGO") {
++    if (input.paymentMethod !== "MERCADOPAGO" && input.paymentMethod !== "MERCADOPAGO_TERMINAL") {
+       const { inventoryService } = await import("@/modules/inventory/service");
+       try {
+         await inventoryService.deductForSale(branchId, userId, input.items);
+diff --git a/src/modules/tableTabs/service.ts b/src/modules/tableTabs/service.ts
+index 07bcf54..2c2e727 100644
+--- a/src/modules/tableTabs/service.ts
++++ b/src/modules/tableTabs/service.ts
+@@ -13,7 +13,7 @@ export const addRoundSchema = z.object({
+ });
+ 
+ export const closeTabSchema = z.object({
+-  paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO"]),
++  paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO", "MERCADOPAGO_TERMINAL"]),
+   cashReceived: z.coerce.number().min(0).optional(),
+   discount: z.coerce.number().min(0).default(0),
+ });
+@@ -157,7 +157,10 @@ export const tableTabsService = {
+         payments: {
+           create: {
+             method: input.paymentMethod,
+-            status: input.paymentMethod === "MERCADOPAGO" ? "PENDING" : "APPROVED",
++            status:
++              input.paymentMethod === "MERCADOPAGO" || input.paymentMethod === "MERCADOPAGO_TERMINAL"
++                ? "PENDING"
++                : "APPROVED",
+             amount: total,
+             cashReceived: input.cashReceived,
+             change,
+-- 
+2.43.0
+
