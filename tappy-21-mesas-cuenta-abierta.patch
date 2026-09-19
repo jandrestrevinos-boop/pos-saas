@@ -1,0 +1,1200 @@
+From 4d2f669fefae64c8d6a72221deb215b0cb5dab4c Mon Sep 17 00:00:00 2001
+From: Claude <claude@tappy.local>
+Date: Sat, 19 Sep 2026 00:20:18 +0000
+Subject: [PATCH] Caja tipo Mesa (cuenta abierta) + tipo de pedido/comentarios
+ en Mostrador
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Dos features en este patch (quedaron entrelazadas en la misma sesión de
+trabajo, comparten CheckoutModal):
+
+CAJA TIPO MESA — cuenta abierta real, no solo etiquetar una mesa al cobrar:
+- prisma: Table.currentOrderId (puntero a la cuenta abierta actual),
+  Order.isOpenTab. Dos relaciones nombradas entre Table y Order
+  (TableOrders = historial completo, TableCurrentOrder = la abierta ahora)
+- src/modules/tableTabs/service.ts: open() abre/reutiliza la cuenta de una
+  mesa, addRound() manda una ronda de productos a cocina y descuenta
+  inventario DE INMEDIATO (decisión de Jose — igual que Mostrador, no
+  se difiere a cuando se cierra la cuenta), close() cobra el total
+  acumulado de todas las rondas y libera la mesa (Ocupada → Cuenta)
+- Rutas: POST /api/tables/[id]/open, GET /api/tables/[id]/order,
+  POST /api/orders/[id]/items (ronda), POST /api/orders/[id]/close
+  (cierre con cobro, soporta Mercado Pago también)
+- kitchen/service.ts: no muestra una mesa recién abierta sin productos
+  todavía (items: { some: {} })
+- /tables rediseñada: Libre abre la cuenta y manda al POS; Ocupada
+  muestra el ticket acumulado con 'Agregar productos' / 'Cobrar mesa'
+  (modal de cobro propio, reutilizable); Cuenta/Limpieza siguen el
+  ciclo manual de antes
+- POS: modo mesa vía ?tableId=X — banner con el total acumulado de la
+  mesa, botón 'Enviar a cocina' en vez de 'Cobrar' (manda la ronda,
+  limpia el carrito, se queda en el POS para seguir agregando)
+- Se quitó el selector 'Mesa (opcional)' del checkout de Mostrador — ya
+  no aplica, las mesas de verdad usan el flujo de cuenta abierta
+
+TIPO DE PEDIDO Y COMENTARIOS (Mostrador):
+- Order: orderType (Comer aquí / Para llevar / A domicilio), notes,
+  deliveryAddress (requerida solo si es a domicilio, validado con
+  superRefine)
+- Checkout de Mostrador: selector de tipo de pedido + textarea de
+  comentarios + campo de dirección condicional
+
+Verificado con tsc real contra el repo, cero errores en todo lo
+nuevo/tocado. También se incluye prisma/add-missing-permissions.ts
+(script quirúrgico ya entregado por separado para sincronizar el
+permiso TABLES_MANAGE sin re-correr el seed completo).
+---
+ prisma/add-missing-permissions.ts          |  54 +++++
+ prisma/schema.prisma                       |  25 +-
+ src/app/(company)/tables/tables-client.tsx | 259 +++++++++++++++++++--
+ src/app/api/orders/[id]/close/route.ts     |  40 ++++
+ src/app/api/orders/[id]/items/route.ts     |  38 +++
+ src/app/api/tables/[id]/open/route.ts      |  31 +++
+ src/app/api/tables/[id]/order/route.ts     |  18 ++
+ src/app/pos/pos-client.tsx                 | 182 ++++++++++++---
+ src/modules/kitchen/service.ts             |   3 +
+ src/modules/sales/service.ts               |  44 ++--
+ src/modules/tableTabs/service.ts           | 183 +++++++++++++++
+ 11 files changed, 813 insertions(+), 64 deletions(-)
+ create mode 100644 prisma/add-missing-permissions.ts
+ create mode 100644 src/app/api/orders/[id]/close/route.ts
+ create mode 100644 src/app/api/orders/[id]/items/route.ts
+ create mode 100644 src/app/api/tables/[id]/open/route.ts
+ create mode 100644 src/app/api/tables/[id]/order/route.ts
+ create mode 100644 src/modules/tableTabs/service.ts
+
+diff --git a/prisma/add-missing-permissions.ts b/prisma/add-missing-permissions.ts
+new file mode 100644
+index 0000000..fe694d9
+--- /dev/null
++++ b/prisma/add-missing-permissions.ts
+@@ -0,0 +1,54 @@
++/**
++ * Script de una sola vez: sincroniza Permission + RolePermission en la
++ * base de datos contra DEFAULT_ROLE_PERMISSIONS del código, SIN tocar
++ * planes, empresas, categorías ni productos (a diferencia de seed.ts
++ * completo). Seguro de correr las veces que haga falta — todo es upsert.
++ *
++ * Uso: npx tsx prisma/add-missing-permissions.ts
++ */
++import { PrismaClient } from "@prisma/client";
++import { DEFAULT_ROLE_PERMISSIONS } from "../src/lib/permissions";
++
++const prisma = new PrismaClient();
++
++async function main() {
++  const allPermissionKeys = new Set(Object.values(DEFAULT_ROLE_PERMISSIONS).flat());
++
++  const permissionRecords = await Promise.all(
++    Array.from(allPermissionKeys).map((key) =>
++      prisma.permission.upsert({
++        where: { key },
++        update: {},
++        create: { key, label: key },
++      })
++    )
++  );
++  const permissionByKey = new Map(permissionRecords.map((p) => [p.key, p]));
++
++  for (const roleName of Object.keys(DEFAULT_ROLE_PERMISSIONS)) {
++    const role = await prisma.role.upsert({
++      where: { name: roleName },
++      update: {},
++      create: { name: roleName },
++    });
++
++    for (const key of DEFAULT_ROLE_PERMISSIONS[roleName as keyof typeof DEFAULT_ROLE_PERMISSIONS]) {
++      const permission = permissionByKey.get(key)!;
++      await prisma.rolePermission.upsert({
++        where: { roleId_permissionId: { roleId: role.id, permissionId: permission.id } },
++        update: {},
++        create: { roleId: role.id, permissionId: permission.id },
++      });
++      console.log(`✓ ${roleName} → ${key}`);
++    }
++  }
++
++  console.log("Permisos sincronizados.");
++}
++
++main()
++  .catch((e) => {
++    console.error(e);
++    process.exit(1);
++  })
++  .finally(() => prisma.$disconnect());
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index d162952..68be4ae 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -125,7 +125,14 @@ model Table {
+   createdAt DateTime @default(now())
+   updatedAt DateTime @updatedAt
+ 
+-  orders Order[]
++  // Puntero a la cuenta abierta actual de la mesa (si hay una). Es una
++  // relación aparte de `orders` (que es el historial completo): una mesa
++  // tiene MUCHAS orders a lo largo del tiempo, pero cuando mucho UNA
++  // cuenta abierta a la vez.
++  currentOrderId String? @unique
++  currentOrder   Order?  @relation("TableCurrentOrder", fields: [currentOrderId], references: [id])
++
++  orders Order[] @relation("TableOrders")
+ 
+   @@index([companyId, branchId])
+   @@map("tables")
+@@ -341,10 +348,18 @@ model Order {
+   customer  Customer? @relation(fields: [customerId], references: [id])
+   whatsAppCart WhatsAppCart?
+   tableId   String?
+-  table     Table?   @relation(fields: [tableId], references: [id])
++  table     Table?   @relation("TableOrders", fields: [tableId], references: [id])
++  currentForTable Table? @relation("TableCurrentOrder")
+ 
+   orderNumber Int      @default(autoincrement())
+   status      OrderStatus @default(PENDING)
++  // true mientras la mesa sigue "consumiendo" (Caja tipo Mesa): se le
++  // pueden seguir mandando rondas de productos y todavía no se cobra.
++  // false = orden de Mostrador normal, o una mesa ya cerrada/cobrada.
++  isOpenTab   Boolean  @default(false)
++  orderType   OrderType @default(COMER_AQUI)
++  notes       String?  @db.Text // comentarios del cajero: alergias, "sin cebolla", instrucciones, etc.
++  deliveryAddress String? @db.Text // solo aplica si orderType = DOMICILIO
+   subtotal    Decimal  @db.Decimal(10, 2)
+   discount    Decimal  @default(0) @db.Decimal(10, 2)
+   tax         Decimal  @default(0) @db.Decimal(10, 2)
+@@ -360,6 +375,12 @@ model Order {
+   @@map("orders")
+ }
+ 
++enum OrderType {
++  COMER_AQUI
++  PARA_LLEVAR
++  DOMICILIO
++}
++
+ enum OrderStatus {
+   PENDING
+   IN_PREPARATION
+diff --git a/src/app/(company)/tables/tables-client.tsx b/src/app/(company)/tables/tables-client.tsx
+index 4390b8d..702d9b4 100644
+--- a/src/app/(company)/tables/tables-client.tsx
++++ b/src/app/(company)/tables/tables-client.tsx
+@@ -1,10 +1,13 @@
+ "use client";
+ 
+ import { useState } from "react";
++import { useRouter } from "next/navigation";
+ import { clsx } from "clsx";
+ 
+ type TableStatus = "LIBRE" | "OCUPADA" | "CUENTA" | "LIMPIEZA";
+ type TableRow = { id: string; name: string; capacity: number | null; status: TableStatus };
++type OrderItemRow = { id: string; quantity: number; lineTotal: string; product: { name: string } };
++type OpenOrder = { id: string; subtotal: string; total: string; items: OrderItemRow[] };
+ 
+ const STATUS_LABEL: Record<TableStatus, string> = {
+   LIBRE: "Libre",
+@@ -21,11 +24,16 @@ const STATUS_COLOR: Record<TableStatus, string> = {
+ };
+ 
+ export function TablesClient({ initialTables }: { initialTables: TableRow[] }) {
++  const router = useRouter();
+   const [tables, setTables] = useState<TableRow[]>(initialTables);
+   const [newName, setNewName] = useState("");
+   const [newCapacity, setNewCapacity] = useState("");
+   const [error, setError] = useState<string | null>(null);
+   const [busy, setBusy] = useState(false);
++  const [ticketTable, setTicketTable] = useState<TableRow | null>(null);
++  const [ticketOrder, setTicketOrder] = useState<OpenOrder | null>(null);
++  const [loadingTicket, setLoadingTicket] = useState(false);
++  const [closeOpen, setCloseOpen] = useState(false);
+ 
+   async function createTable() {
+     if (!newName.trim()) return;
+@@ -49,24 +57,55 @@ export function TablesClient({ initialTables }: { initialTables: TableRow[] }) {
+     }
+   }
+ 
+-  async function advanceStatus(tableId: string) {
++  async function removeTable(tableId: string) {
++    if (!confirm("¿Eliminar esta mesa?")) return;
++    const res = await fetch(`/api/tables/${tableId}`, { method: "DELETE" });
++    if (res.ok) setTables((prev) => prev.filter((t) => t.id !== tableId));
++  }
++
++  async function advanceBussing(tableId: string) {
++    // Solo para el ciclo post-cobro: Cuenta → Limpieza → Libre. Ocupada ya
++    // no avanza así — se cierra desde el ticket (ver openTicket/closeTab).
+     const res = await fetch(`/api/tables/${tableId}`, {
+       method: "PATCH",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify({ action: "advance" }),
+     });
+     const data = await res.json();
+-    if (res.ok) {
+-      setTables((prev) => prev.map((t) => (t.id === tableId ? data.table : t)));
+-    }
++    if (res.ok) setTables((prev) => prev.map((t) => (t.id === tableId ? data.table : t)));
+   }
+ 
+-  async function removeTable(tableId: string) {
+-    if (!confirm("¿Eliminar esta mesa?")) return;
+-    const res = await fetch(`/api/tables/${tableId}`, { method: "DELETE" });
+-    if (res.ok) {
+-      setTables((prev) => prev.filter((t) => t.id !== tableId));
++  async function handleTableClick(table: TableRow) {
++    if (table.status === "LIBRE") {
++      setBusy(true);
++      setError(null);
++      try {
++        const res = await fetch(`/api/tables/${table.id}/open`, { method: "POST" });
++        const data = await res.json();
++        if (!res.ok) throw new Error(data.error ?? "No se pudo abrir la mesa");
++        router.push(`/pos?tableId=${table.id}`);
++      } catch (err) {
++        setError(err instanceof Error ? err.message : "No se pudo abrir la mesa");
++        setBusy(false);
++      }
++      return;
++    }
++
++    if (table.status === "OCUPADA") {
++      setTicketTable(table);
++      setLoadingTicket(true);
++      try {
++        const res = await fetch(`/api/tables/${table.id}/order`);
++        const data = await res.json();
++        setTicketOrder(data.order);
++      } finally {
++        setLoadingTicket(false);
++      }
++      return;
+     }
++
++    // CUENTA / LIMPIEZA: sigue siendo el ciclo manual de antes.
++    advanceBussing(table.id);
+   }
+ 
+   return (
+@@ -74,7 +113,9 @@ export function TablesClient({ initialTables }: { initialTables: TableRow[] }) {
+       <div className="flex items-center justify-between mb-6">
+         <div>
+           <h1 className="font-display text-2xl font-semibold">Mesas</h1>
+-          <p className="text-muted text-sm">Toca una mesa para avanzar su estado: Libre → Ocupada → Cuenta → Limpieza.</p>
++          <p className="text-muted text-sm">
++            Libre: toca para abrir la cuenta. Ocupada: toca para ver el ticket y cobrar. Cuenta/Limpieza: toca para avanzar.
++          </p>
+         </div>
+       </div>
+ 
+@@ -114,23 +155,203 @@ export function TablesClient({ initialTables }: { initialTables: TableRow[] }) {
+           <div
+             key={table.id}
+             className={clsx("border rounded-lg p-4 text-center cursor-pointer transition-colors", STATUS_COLOR[table.status])}
+-            onClick={() => advanceStatus(table.id)}
++            onClick={() => handleTableClick(table)}
+           >
+             <p className="font-display text-lg font-semibold">{table.name}</p>
+             {table.capacity && <p className="text-xs opacity-70">{table.capacity} personas</p>}
+             <p className="text-xs font-medium mt-2">{STATUS_LABEL[table.status]}</p>
++            {table.status === "LIBRE" && (
++              <button
++                onClick={(e) => {
++                  e.stopPropagation();
++                  removeTable(table.id);
++                }}
++                className="text-xs underline opacity-60 hover:opacity-100 mt-2"
++              >
++                Eliminar
++              </button>
++            )}
++          </div>
++        ))}
++        {tables.length === 0 && <p className="text-muted text-sm col-span-full">Aún no hay mesas registradas.</p>}
++      </div>
++
++      {ticketTable && (
++        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
++          <div className="bg-white rounded-lg p-6 max-w-sm w-full">
++            <div className="flex items-center justify-between mb-4">
++              <p className="font-display text-xl font-semibold">{ticketTable.name}</p>
++              <button
++                onClick={() => {
++                  setTicketTable(null);
++                  setTicketOrder(null);
++                }}
++                className="text-muted text-sm"
++              >
++                Cerrar
++              </button>
++            </div>
++
++            {loadingTicket ? (
++              <p className="text-muted text-sm">Cargando...</p>
++            ) : !ticketOrder || ticketOrder.items.length === 0 ? (
++              <p className="text-muted text-sm mb-4">Todavía no se ha mandado ningún producto a esta mesa.</p>
++            ) : (
++              <div className="mb-4 max-h-64 overflow-y-auto">
++                {ticketOrder.items.map((item) => (
++                  <div key={item.id} className="flex justify-between text-sm py-1 border-b border-line last:border-0">
++                    <span>
++                      {item.quantity}x {item.product.name}
++                    </span>
++                    <span>${Number(item.lineTotal).toFixed(2)}</span>
++                  </div>
++                ))}
++                <div className="flex justify-between text-sm font-semibold pt-2">
++                  <span>Total</span>
++                  <span>${Number(ticketOrder.total).toFixed(2)}</span>
++                </div>
++              </div>
++            )}
++
++            <div className="flex flex-col gap-2">
++              <button
++                onClick={() => router.push(`/pos?tableId=${ticketTable.id}`)}
++                className="w-full rounded-md border border-line px-4 py-3 text-sm font-medium"
++              >
++                Agregar productos
++              </button>
++              <button
++                onClick={() => setCloseOpen(true)}
++                disabled={!ticketOrder || ticketOrder.items.length === 0}
++                className="w-full rounded-md bg-ember text-white px-4 py-3 text-sm font-medium disabled:opacity-50"
++              >
++                Cobrar mesa
++              </button>
++            </div>
++          </div>
++        </div>
++      )}
++
++      {closeOpen && ticketOrder && ticketTable && (
++        <CloseTabModal
++          order={ticketOrder}
++          onClose={() => setCloseOpen(false)}
++          onDone={() => {
++            setCloseOpen(false);
++            setTicketTable(null);
++            setTicketOrder(null);
++            router.refresh();
++            setTables((prev) => prev.map((t) => (t.id === ticketTable.id ? { ...t, status: "CUENTA" } : t)));
++          }}
++        />
++      )}
++    </div>
++  );
++}
++
++function CloseTabModal({
++  order,
++  onClose,
++  onDone,
++}: {
++  order: OpenOrder;
++  onClose: () => void;
++  onDone: () => void;
++}) {
++  const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO">("CASH");
++  const [cashReceived, setCashReceived] = useState("");
++  const [saving, setSaving] = useState(false);
++  const [error, setError] = useState("");
++
++  const total = Number(order.total);
++  const cashReceivedNum = parseFloat(cashReceived || "0");
++  const change = method === "CASH" ? cashReceivedNum - total : 0;
++
++  async function confirm() {
++    if (method === "CASH" && cashReceivedNum < total) {
++      setError("El efectivo recibido no puede ser menor al total");
++      return;
++    }
++    setSaving(true);
++    setError("");
++    try {
++      const res = await fetch(`/api/orders/${order.id}/close`, {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({
++          paymentMethod: method,
++          cashReceived: method === "CASH" ? cashReceivedNum : undefined,
++        }),
++      });
++      const data = await res.json();
++      if (!res.ok) throw new Error(data.error ?? "No se pudo cobrar la mesa");
++
++      if (method === "MERCADOPAGO" && data.mpCheckout?.checkoutUrl) {
++        window.open(data.mpCheckout.checkoutUrl, "_blank");
++      }
++      onDone();
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "No se pudo cobrar la mesa");
++    } finally {
++      setSaving(false);
++    }
++  }
++
++  return (
++    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4">
++      <div className="bg-white rounded-lg p-6 max-w-sm w-full">
++        <p className="font-display text-xl font-semibold mb-1">Cobrar mesa</p>
++        <p className="text-3xl font-display font-semibold mb-5">${total.toFixed(2)} MXN</p>
++
++        <div className="grid grid-cols-2 gap-2 mb-4">
++          {(["CASH", "CARD", "TRANSFER", "OTHER"] as const).map((m) => (
+             <button
+-              onClick={(e) => {
+-                e.stopPropagation();
+-                removeTable(table.id);
+-              }}
+-              className="text-xs underline opacity-60 hover:opacity-100 mt-2"
++              key={m}
++              type="button"
++              onClick={() => setMethod(m)}
++              className={`rounded-md border py-3 text-sm font-medium ${method === m ? "bg-ember text-white border-ember" : "border-line"}`}
+             >
+-              Eliminar
++              {m === "CASH" ? "Efectivo" : m === "CARD" ? "Tarjeta" : m === "TRANSFER" ? "Transferencia" : "Otro"}
+             </button>
++          ))}
++          <button
++            type="button"
++            onClick={() => setMethod("MERCADOPAGO")}
++            className={`col-span-2 rounded-md border py-3 text-sm font-medium ${method === "MERCADOPAGO" ? "bg-ember text-white border-ember" : "border-line"}`}
++          >
++            Mercado Pago (link/QR)
++          </button>
++        </div>
++
++        {method === "CASH" && (
++          <div className="mb-4">
++            <label className="block text-xs text-muted mb-1">Efectivo recibido</label>
++            <input
++              type="number"
++              className="w-full rounded-md border border-line px-3 py-2 text-sm"
++              value={cashReceived}
++              onChange={(e) => setCashReceived(e.target.value)}
++            />
++            {cashReceivedNum >= total && cashReceivedNum > 0 && (
++              <p className="text-xs text-muted mt-1">Cambio: ${change.toFixed(2)}</p>
++            )}
+           </div>
+-        ))}
+-        {tables.length === 0 && <p className="text-muted text-sm col-span-full">Aún no hay mesas registradas.</p>}
++        )}
++
++        {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
++
++        <div className="flex gap-2">
++          <button onClick={onClose} className="flex-1 rounded-md border border-line px-4 py-3 text-sm font-medium">
++            Cancelar
++          </button>
++          <button
++            onClick={confirm}
++            disabled={saving}
++            className="flex-1 rounded-md bg-ember text-white px-4 py-3 text-sm font-medium disabled:opacity-50"
++          >
++            {saving ? "Cobrando..." : "Confirmar cobro"}
++          </button>
++        </div>
+       </div>
+     </div>
+   );
+diff --git a/src/app/api/orders/[id]/close/route.ts b/src/app/api/orders/[id]/close/route.ts
+new file mode 100644
+index 0000000..7e5ed91
+--- /dev/null
++++ b/src/app/api/orders/[id]/close/route.ts
+@@ -0,0 +1,40 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { tableTabsService, closeTabSchema } from "@/modules/tableTabs/service";
++
++/** Cierra la cuenta de una mesa: cobra el total acumulado de todas las rondas y libera la mesa. */
++export async function POST(req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.GESTION_MESAS))) {
++    return NextResponse.json({ error: "Tu plan no incluye Gestión de mesas" }, { status: 403 });
++  }
++  if (!hasPermission(ctx.permissions, PERMISSIONS.SALES_CREATE)) {
++    return NextResponse.json({ error: "No tienes permiso para cobrar" }, { status: 403 });
++  }
++
++  const body = await req.json();
++  const parsed = closeTabSchema.safeParse(body);
++  if (!parsed.success) {
++    return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  }
++
++  try {
++    const order = await tableTabsService.close(companyId, params.id, parsed.data);
++    let mpCheckout: { preferenceId: string; checkoutUrl: string } | null = null;
++
++    if (parsed.data.paymentMethod === "MERCADOPAGO") {
++      const { mercadoPagoService } = await import("@/modules/mercadoPago/service");
++      mpCheckout = await mercadoPagoService.createPreferenceForOrder(companyId, order);
++    }
++
++    return NextResponse.json({ order, mpCheckout });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo cerrar la cuenta";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/orders/[id]/items/route.ts b/src/app/api/orders/[id]/items/route.ts
+new file mode 100644
+index 0000000..cc04f90
+--- /dev/null
++++ b/src/app/api/orders/[id]/items/route.ts
+@@ -0,0 +1,38 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId, resolveBranchId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { tableTabsService, addRoundSchema } from "@/modules/tableTabs/service";
++
++/** Manda una ronda nueva de productos a una cuenta de mesa ya abierta (no cobra, solo manda a cocina). */
++export async function POST(req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.GESTION_MESAS))) {
++    return NextResponse.json({ error: "Tu plan no incluye Gestión de mesas" }, { status: 403 });
++  }
++  if (!hasPermission(ctx.permissions, PERMISSIONS.SALES_CREATE)) {
++    return NextResponse.json({ error: "No tienes permiso para agregar productos" }, { status: 403 });
++  }
++
++  const branchId = await resolveBranchId(ctx, companyId);
++  if (!branchId) {
++    return NextResponse.json({ error: "La empresa no tiene sucursales configuradas" }, { status: 400 });
++  }
++
++  const body = await req.json();
++  const parsed = addRoundSchema.safeParse(body);
++  if (!parsed.success) {
++    return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  }
++
++  try {
++    const order = await tableTabsService.addRound(companyId, branchId, ctx.userId, params.id, parsed.data);
++    return NextResponse.json({ order });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo mandar la ronda a cocina";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/tables/[id]/open/route.ts b/src/app/api/tables/[id]/open/route.ts
+new file mode 100644
+index 0000000..fd9406f
+--- /dev/null
++++ b/src/app/api/tables/[id]/open/route.ts
+@@ -0,0 +1,31 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId, resolveBranchId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { tableTabsService } from "@/modules/tableTabs/service";
++
++export async function POST(_req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.GESTION_MESAS))) {
++    return NextResponse.json({ error: "Tu plan no incluye Gestión de mesas" }, { status: 403 });
++  }
++  if (!hasPermission(ctx.permissions, PERMISSIONS.TABLES_MANAGE)) {
++    return NextResponse.json({ error: "No tienes permiso para abrir mesas" }, { status: 403 });
++  }
++
++  const branchId = await resolveBranchId(ctx, companyId);
++  if (!branchId) {
++    return NextResponse.json({ error: "La empresa no tiene sucursales configuradas" }, { status: 400 });
++  }
++
++  try {
++    const order = await tableTabsService.open(companyId, branchId, ctx.userId, params.id);
++    return NextResponse.json({ order });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo abrir la mesa";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/tables/[id]/order/route.ts b/src/app/api/tables/[id]/order/route.ts
+new file mode 100644
+index 0000000..eb424ea
+--- /dev/null
++++ b/src/app/api/tables/[id]/order/route.ts
+@@ -0,0 +1,18 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { tableTabsService } from "@/modules/tableTabs/service";
++
++/** El ticket abierto actual de una mesa — usado por /tables y por el POS en modo mesa para pintar la cuenta corriente. */
++export async function GET(_req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.GESTION_MESAS))) {
++    return NextResponse.json({ error: "Tu plan no incluye Gestión de mesas" }, { status: 403 });
++  }
++
++  const order = await tableTabsService.getOpenOrder(companyId, params.id);
++  return NextResponse.json({ order });
++}
+diff --git a/src/app/pos/pos-client.tsx b/src/app/pos/pos-client.tsx
+index 859bce2..5d491f4 100644
+--- a/src/app/pos/pos-client.tsx
++++ b/src/app/pos/pos-client.tsx
+@@ -1,6 +1,7 @@
+ "use client";
+ 
+-import { useMemo, useState } from "react";
++import { useEffect, useMemo, useState, Suspense } from "react";
++import { useSearchParams } from "next/navigation";
+ import Link from "next/link";
+ import { formatMxn } from "@/lib/format";
+ 
+@@ -16,7 +17,21 @@ const PAYMENT_METHODS: { value: "CASH" | "CARD" | "TRANSFER" | "OTHER"; label: s
+   { value: "OTHER", label: "Otro" },
+ ];
+ 
+-export function PosClient({
++export function PosClient(props: {
++  categories: Category[];
++  products: Product[];
++  tables: TableOption[];
++  mercadoPagoEnabled: boolean;
++  userName: string;
++}) {
++  return (
++    <Suspense fallback={<div className="h-screen flex items-center justify-center text-muted text-sm">Cargando...</div>}>
++      <PosClientInner {...props} />
++    </Suspense>
++  );
++}
++
++function PosClientInner({
+   categories,
+   products,
+   tables,
+@@ -34,6 +49,60 @@ export function PosClient({
+   const [discount, setDiscount] = useState(0);
+   const [checkoutOpen, setCheckoutOpen] = useState(false);
+ 
++  // -----------------------------
++  // MODO MESA (Caja tipo Mesa): llegamos aquí desde /tables con
++  // ?tableId=X — en vez de cobrar de una vez, cada "Enviar a cocina" manda
++  // una ronda a la cuenta abierta de esa mesa, sin pedir pago todavía.
++  // -----------------------------
++  const searchParams = useSearchParams();
++  const tableIdParam = searchParams.get("tableId");
++  const tableInfo = tableIdParam ? tables.find((t) => t.id === tableIdParam) : undefined;
++  const [openOrderId, setOpenOrderId] = useState<string | null>(null);
++  const [tableRunningTotal, setTableRunningTotal] = useState(0);
++  const [sendingRound, setSendingRound] = useState(false);
++  const [roundError, setRoundError] = useState("");
++  const [roundSent, setRoundSent] = useState(false);
++
++  useEffect(() => {
++    if (!tableIdParam) return;
++    (async () => {
++      let res = await fetch(`/api/tables/${tableIdParam}/order`);
++      let data = await res.json();
++      if (!data.order) {
++        res = await fetch(`/api/tables/${tableIdParam}/open`, { method: "POST" });
++        data = await res.json();
++      }
++      if (data.order) {
++        setOpenOrderId(data.order.id);
++        setTableRunningTotal(Number(data.order.total));
++      }
++    })();
++  }, [tableIdParam]);
++
++  async function sendRound() {
++    if (!openOrderId || cart.length === 0) return;
++    setSendingRound(true);
++    setRoundError("");
++    try {
++      const res = await fetch(`/api/orders/${openOrderId}/items`, {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ items: cart.map((l) => ({ productId: l.product.id, quantity: l.quantity })) }),
++      });
++      const data = await res.json();
++      if (!res.ok) throw new Error(data.error ?? "No se pudo mandar la ronda a cocina");
++      setTableRunningTotal(Number(data.order.total));
++      setCart([]);
++      setDiscount(0);
++      setRoundSent(true);
++      setTimeout(() => setRoundSent(false), 2500);
++    } catch (err) {
++      setRoundError(err instanceof Error ? err.message : "No se pudo mandar la ronda a cocina");
++    } finally {
++      setSendingRound(false);
++    }
++  }
++
+   const visibleProducts = useMemo(
+     () => products.filter((p) => p.categoryId === activeCategory),
+     [products, activeCategory]
+@@ -76,8 +145,20 @@ export function PosClient({
+             ← Salir
+           </Link>
+           <p className="font-display text-lg font-semibold">Punto de Venta</p>
++          {tableInfo && (
++            <span className="text-xs bg-ember/15 text-ember-dark px-2 py-1 rounded-full font-medium">
++              Mesa {tableInfo.name} · cuenta abierta: {formatMxn(tableRunningTotal)}
++            </span>
++          )}
++        </div>
++        <div className="flex items-center gap-3">
++          {tableInfo && (
++            <Link href="/tables" className="text-sm text-muted hover:text-ink underline">
++              Volver a Mesas
++            </Link>
++          )}
++          <p className="text-sm text-muted">{userName}</p>
+         </div>
+-        <p className="text-sm text-muted">{userName}</p>
+       </header>
+ 
+       <div className="flex-1 flex overflow-hidden">
+@@ -184,6 +265,8 @@ export function PosClient({
+               <span className="font-display text-xl font-semibold">Total</span>
+               <span className="font-display text-2xl font-semibold">{formatMxn(total)}</span>
+             </div>
++            {roundError && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-3">{roundError}</p>}
++            {roundSent && <p className="text-sm text-sage bg-sage/10 rounded-md px-3 py-2 mb-3">Ronda mandada a cocina.</p>}
+             <div className="grid grid-cols-2 gap-2">
+               <button
+                 onClick={resetSale}
+@@ -192,25 +275,34 @@ export function PosClient({
+               >
+                 Cancelar
+               </button>
+-              <button
+-                onClick={() => setCheckoutOpen(true)}
+-                disabled={cart.length === 0}
+-                className="rounded-md bg-ember text-white py-3 text-sm font-medium disabled:opacity-40"
+-              >
+-                Cobrar
+-              </button>
++              {tableInfo ? (
++                <button
++                  onClick={sendRound}
++                  disabled={cart.length === 0 || sendingRound || !openOrderId}
++                  className="rounded-md bg-ember text-white py-3 text-sm font-medium disabled:opacity-40"
++                >
++                  {sendingRound ? "Mandando..." : "Enviar a cocina"}
++                </button>
++              ) : (
++                <button
++                  onClick={() => setCheckoutOpen(true)}
++                  disabled={cart.length === 0}
++                  className="rounded-md bg-ember text-white py-3 text-sm font-medium disabled:opacity-40"
++                >
++                  Cobrar
++                </button>
++              )}
+             </div>
+           </div>
+         </aside>
+       </div>
+ 
+-      {checkoutOpen && (
++      {checkoutOpen && !tableInfo && (
+         <CheckoutModal
+           total={total}
+           discount={safeDiscount}
+           subtotal={subtotal}
+           cart={cart}
+-          tables={tables}
+           mercadoPagoEnabled={mercadoPagoEnabled}
+           onClose={() => setCheckoutOpen(false)}
+           onDone={resetSale}
+@@ -225,7 +317,6 @@ function CheckoutModal({
+   discount,
+   subtotal,
+   cart,
+-  tables,
+   mercadoPagoEnabled,
+   onClose,
+   onDone,
+@@ -234,14 +325,15 @@ function CheckoutModal({
+   discount: number;
+   subtotal: number;
+   cart: CartLine[];
+-  tables: TableOption[];
+   mercadoPagoEnabled: boolean;
+   onClose: () => void;
+   onDone: () => void;
+ }) {
+   const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO">("CASH");
+   const [cashReceived, setCashReceived] = useState("");
+-  const [tableId, setTableId] = useState("");
++  const [orderType, setOrderType] = useState<"COMER_AQUI" | "PARA_LLEVAR" | "DOMICILIO">("COMER_AQUI");
++  const [notes, setNotes] = useState("");
++  const [deliveryAddress, setDeliveryAddress] = useState("");
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
+ 
+@@ -288,7 +380,9 @@ function CheckoutModal({
+           discount,
+           paymentMethod: method,
+           cashReceived: method === "CASH" ? cashReceivedNum : undefined,
+-          tableId: tableId || undefined,
++          orderType,
++          notes: notes.trim() || undefined,
++          deliveryAddress: orderType === "DOMICILIO" ? deliveryAddress.trim() : undefined,
+         }),
+       });
+ 
+@@ -641,24 +735,54 @@ function CheckoutModal({
+           </span>
+         </p>
+ 
+-        {tables.length > 0 && (
++        <div className="mb-5">
++          <label className="block text-xs text-muted mb-1">Tipo de pedido</label>
++          <div className="grid grid-cols-3 gap-2">
++            {(
++              [
++                { value: "COMER_AQUI", label: "Comer aquí" },
++                { value: "PARA_LLEVAR", label: "Para llevar" },
++                { value: "DOMICILIO", label: "A domicilio" },
++              ] as const
++            ).map((opt) => (
++              <button
++                key={opt.value}
++                type="button"
++                onClick={() => setOrderType(opt.value)}
++                className={`rounded-md border py-2 text-xs font-medium ${
++                  orderType === opt.value ? "bg-ember text-white border-ember" : "border-line"
++                }`}
++              >
++                {opt.label}
++              </button>
++            ))}
++          </div>
++        </div>
++
++        {orderType === "DOMICILIO" && (
+           <div className="mb-5">
+-            <label className="block text-xs text-muted mb-1">Mesa (opcional)</label>
+-            <select
++            <label className="block text-xs text-muted mb-1">Dirección de envío</label>
++            <textarea
+               className="w-full rounded-md border border-line px-3 py-2 text-sm"
+-              value={tableId}
+-              onChange={(e) => setTableId(e.target.value)}
+-            >
+-              <option value="">Sin mesa (para llevar / mostrador)</option>
+-              {tables.map((t) => (
+-                <option key={t.id} value={t.id}>
+-                  {t.name}
+-                </option>
+-              ))}
+-            </select>
++              rows={2}
++              placeholder="Calle, número, colonia, referencias..."
++              value={deliveryAddress}
++              onChange={(e) => setDeliveryAddress(e.target.value)}
++            />
+           </div>
+         )}
+ 
++        <div className="mb-5">
++          <label className="block text-xs text-muted mb-1">Comentarios (opcional)</label>
++          <textarea
++            className="w-full rounded-md border border-line px-3 py-2 text-sm"
++            rows={2}
++            placeholder="Sin cebolla, alergia a mariscos, etc."
++            value={notes}
++            onChange={(e) => setNotes(e.target.value)}
++          />
++        </div>
++
+         <div className="grid grid-cols-2 gap-2 mb-5">
+           <button
+             type="button"
+diff --git a/src/modules/kitchen/service.ts b/src/modules/kitchen/service.ts
+index 6bf79ef..b07a866 100644
+--- a/src/modules/kitchen/service.ts
++++ b/src/modules/kitchen/service.ts
+@@ -19,6 +19,9 @@ export const kitchenService = {
+         // podría no llegar a pagar. No afecta CASH/CARD/TRANSFER/OTHER,
+         // que siempre nacen ya aprobados (ver Payment.status default).
+         payments: { none: { method: "MERCADOPAGO", status: "PENDING" } },
++        // Una mesa recién abierta (Caja tipo Mesa) crea la orden antes de
++        // tener productos — no debe aparecer en cocina hasta la primera ronda.
++        items: { some: {} },
+       },
+       include: {
+         items: { include: { product: true } },
+diff --git a/src/modules/sales/service.ts b/src/modules/sales/service.ts
+index a882941..94eb555 100644
+--- a/src/modules/sales/service.ts
++++ b/src/modules/sales/service.ts
+@@ -1,20 +1,33 @@
+ import { prisma } from "@/lib/prisma";
+ import { z } from "zod";
+ 
+-export const saleSchema = z.object({
+-  items: z
+-    .array(
+-      z.object({
+-        productId: z.string().min(1),
+-        quantity: z.coerce.number().int().positive(),
+-      })
+-    )
+-    .min(1, "El carrito está vacío"),
+-  discount: z.coerce.number().min(0).default(0),
+-  paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO"]),
+-  cashReceived: z.coerce.number().min(0).optional(),
+-  tableId: z.string().optional(),
+-});
++export const saleSchema = z
++  .object({
++    items: z
++      .array(
++        z.object({
++          productId: z.string().min(1),
++          quantity: z.coerce.number().int().positive(),
++        })
++      )
++      .min(1, "El carrito está vacío"),
++    discount: z.coerce.number().min(0).default(0),
++    paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO"]),
++    cashReceived: z.coerce.number().min(0).optional(),
++    tableId: z.string().optional(),
++    orderType: z.enum(["COMER_AQUI", "PARA_LLEVAR", "DOMICILIO"]).default("COMER_AQUI"),
++    notes: z.string().max(500).optional(),
++    deliveryAddress: z.string().max(500).optional(),
++  })
++  .superRefine((data, ctx) => {
++    if (data.orderType === "DOMICILIO" && !data.deliveryAddress?.trim()) {
++      ctx.addIssue({
++        code: z.ZodIssueCode.custom,
++        message: "La dirección es requerida para pedidos a domicilio",
++        path: ["deliveryAddress"],
++      });
++    }
++  });
+ 
+ export type SaleInput = z.infer<typeof saleSchema>;
+ 
+@@ -74,6 +87,9 @@ export const salesService = {
+         userId,
+         tableId: input.tableId ?? null,
+         status: "PENDING",
++        orderType: input.orderType,
++        notes: input.notes?.trim() || null,
++        deliveryAddress: input.orderType === "DOMICILIO" ? input.deliveryAddress?.trim() : null,
+         subtotal,
+         discount,
+         tax: 0,
+diff --git a/src/modules/tableTabs/service.ts b/src/modules/tableTabs/service.ts
+new file mode 100644
+index 0000000..07bcf54
+--- /dev/null
++++ b/src/modules/tableTabs/service.ts
+@@ -0,0 +1,183 @@
++import { prisma } from "@/lib/prisma";
++import { z } from "zod";
++
++export const addRoundSchema = z.object({
++  items: z
++    .array(
++      z.object({
++        productId: z.string().min(1),
++        quantity: z.coerce.number().int().positive(),
++      })
++    )
++    .min(1, "El carrito está vacío"),
++});
++
++export const closeTabSchema = z.object({
++  paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO"]),
++  cashReceived: z.coerce.number().min(0).optional(),
++  discount: z.coerce.number().min(0).default(0),
++});
++
++/**
++ * Caja tipo Mesa: a diferencia de Mostrador (una sola orden, se cobra de
++ * inmediato), aquí una mesa abre UNA orden que va acumulando rondas de
++ * productos — cada ronda se manda a cocina y se descuenta inventario en el
++ * momento (igual que Mostrador), pero el pago se difiere hasta que alguien
++ * cierra la cuenta. Table.currentOrderId apunta a esa orden mientras sigue
++ * abierta; se limpia al cerrar.
++ */
++export const tableTabsService = {
++  /** Abre la cuenta de una mesa, o regresa la que ya estaba abierta (idempotente — evita dos tabs abiertos a la vez en la misma mesa). */
++  async open(companyId: string, branchId: string, userId: string, tableId: string) {
++    const table = await prisma.table.findFirst({ where: { id: tableId, companyId, branchId } });
++    if (!table) throw new Error("Mesa no encontrada");
++
++    if (table.currentOrderId) {
++      const existing = await prisma.order.findUnique({
++        where: { id: table.currentOrderId },
++        include: { items: { include: { product: true } } },
++      });
++      if (existing) return existing;
++    }
++
++    const order = await prisma.order.create({
++      data: {
++        localId: crypto.randomUUID(),
++        companyId,
++        branchId,
++        userId,
++        tableId,
++        status: "PENDING",
++        isOpenTab: true,
++        orderType: "COMER_AQUI",
++        subtotal: 0,
++        discount: 0,
++        tax: 0,
++        total: 0,
++      },
++      include: { items: { include: { product: true } } },
++    });
++
++    await prisma.table.update({
++      where: { id: tableId },
++      data: { currentOrderId: order.id, status: "OCUPADA" },
++    });
++
++    return order;
++  },
++
++  /** El ticket abierto actual de una mesa (o null si está Libre). Usado por /tables y por el POS en modo mesa. */
++  async getOpenOrder(companyId: string, tableId: string) {
++    const table = await prisma.table.findFirst({ where: { id: tableId, companyId } });
++    if (!table?.currentOrderId) return null;
++
++    return prisma.order.findUnique({
++      where: { id: table.currentOrderId },
++      include: { items: { include: { product: true } } },
++    });
++  },
++
++  /** Agrega una ronda de productos a una cuenta ya abierta. Manda a cocina y descuenta inventario de inmediato, igual que Mostrador — el pago sigue pendiente. */
++  async addRound(companyId: string, branchId: string, userId: string, orderId: string, input: z.infer<typeof addRoundSchema>) {
++    const order = await prisma.order.findFirst({ where: { id: orderId, companyId, isOpenTab: true } });
++    if (!order) throw new Error("Esta mesa no tiene una cuenta abierta");
++
++    const productIds = input.items.map((i) => i.productId);
++    const products = await prisma.product.findMany({
++      where: { id: { in: productIds }, companyId, isActive: true },
++    });
++    if (products.length !== new Set(productIds).size) {
++      throw new Error("Uno o más productos ya no están disponibles");
++    }
++
++    type MinimalProduct = { id: string; price: number | string };
++    const productMap = new Map((products as unknown as MinimalProduct[]).map((p) => [p.id, p]));
++
++    let roundSubtotal = 0;
++    const orderItemsData = input.items.map((item) => {
++      const product = productMap.get(item.productId)!;
++      const unitPrice = Number(product.price);
++      const lineTotal = unitPrice * item.quantity;
++      roundSubtotal += lineTotal;
++      return { productId: product.id, quantity: item.quantity, unitPriceAtSale: unitPrice, lineTotal };
++    });
++
++    const newSubtotal = Number(order.subtotal) + roundSubtotal;
++
++    const updated = await prisma.order.update({
++      where: { id: orderId },
++      data: {
++        items: { create: orderItemsData },
++        subtotal: newSubtotal,
++        total: newSubtotal - Number(order.discount),
++        // Llegó comida nueva a la mesa: reabre el status para que cocina la
++        // vea de nuevo, aunque ya hubiera entregado rondas anteriores.
++        status: "PENDING",
++      },
++      include: { items: { include: { product: true } } },
++    });
++
++    const { inventoryService } = await import("@/modules/inventory/service");
++    try {
++      await inventoryService.deductForSale(branchId, userId, input.items);
++    } catch {
++      // El inventario es informativo; no debe bloquear que la ronda ya se mandó a cocina.
++    }
++
++    return updated;
++  },
++
++  /** Cierra la cuenta: cobra el total acumulado de todas las rondas y libera la mesa. */
++  async close(companyId: string, orderId: string, input: z.infer<typeof closeTabSchema>) {
++    const order = await prisma.order.findFirst({
++      where: { id: orderId, companyId, isOpenTab: true },
++      include: { items: true },
++    });
++    if (!order) throw new Error("Esta mesa no tiene una cuenta abierta");
++    if (order.items.length === 0) throw new Error("La cuenta no tiene productos todavía");
++
++    const subtotal = Number(order.subtotal);
++    const discount = Math.min(input.discount, subtotal);
++    const total = subtotal - discount;
++
++    if (input.paymentMethod === "CASH") {
++      if (input.cashReceived === undefined || input.cashReceived < total) {
++        throw new Error("El efectivo recibido no puede ser menor al total");
++      }
++    }
++    const change =
++      input.paymentMethod === "CASH" && input.cashReceived !== undefined ? input.cashReceived - total : undefined;
++
++    const updated = await prisma.order.update({
++      where: { id: orderId },
++      data: {
++        isOpenTab: false,
++        discount,
++        total,
++        payments: {
++          create: {
++            method: input.paymentMethod,
++            status: input.paymentMethod === "MERCADOPAGO" ? "PENDING" : "APPROVED",
++            amount: total,
++            cashReceived: input.cashReceived,
++            change,
++          },
++        },
++      },
++      include: { items: { include: { product: true } }, payments: true },
++    });
++
++    // La mesa ya se desocupa al cerrar la cuenta — los clientes ya
++    // terminaron y se van, independientemente de si un cobro de Mercado
++    // Pago sigue pendiente de confirmar (el inventario ya se descontó por
++    // ronda, así que no hay nada que revertir si ese pago llegara a fallar).
++    if (order.tableId) {
++      await prisma.table.update({
++        where: { id: order.tableId },
++        data: { currentOrderId: null, status: "CUENTA" },
++      });
++    }
++
++    return updated;
++  },
++};
+-- 
+2.43.0
+

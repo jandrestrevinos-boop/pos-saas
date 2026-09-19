@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Button, Card } from "@/components/ui";
 import { Modal, Field, inputClass } from "@/components/ui/modal";
 import { formatMxn } from "@/lib/format";
-import { FEATURE_CATALOG } from "@/lib/plan-features";
+import { FEATURE_CATALOG, featureLabel, VALID_FEATURE_KEYS } from "@/lib/plan-features";
 
 type Plan = {
   id: string;
@@ -28,7 +28,11 @@ export function PlansClient({ initialPlans }: { initialPlans: Plan[] }) {
   const [editing, setEditing] = useState<Plan | null>(null);
 
 function buildDisplayFeatures(plan: Plan): string[] {
-  const nonCapacity = (plan.features ?? []).filter((f) => !/sucursal|caja|usuario/i.test(f));
+  // No tocar lo que ya funciona: cualquier string guardado que no sea una
+  // key del catálogo nuevo (ej. las labels viejas de prisma/seed.ts como
+  // "Auditoría" o "Pantalla de cocina (sin impresora)") se muestra tal cual,
+  // sin filtrarlo. Solo las keys nuevas del catálogo se traducen a su label.
+  const nonCapacity = (plan.features ?? []).map((f) => (VALID_FEATURE_KEYS.has(f) ? featureLabel(f) : f));
 
   if (plan.name === "Empresarial") {
     return ["Multi-sucursal", `Hasta ${plan.maxCashRegisters} cajas`, `Hasta ${plan.maxUsers} usuarios`, ...nonCapacity];
@@ -91,7 +95,7 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () => 
   const [maxUsers, setMaxUsers] = useState(String(plan.maxUsers));
   const [maxCashRegisters, setMaxCashRegisters] = useState(String(plan.maxCashRegisters));
   const [checkedFeatures, setCheckedFeatures] = useState<Set<string>>(
-    new Set((plan.features ?? []).filter((f) => (FEATURE_CATALOG as readonly string[]).includes(f)))
+    new Set((plan.features ?? []).filter((f) => VALID_FEATURE_KEYS.has(f)))
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -113,10 +117,11 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () => 
     // Conserva cualquier feature que ya estuviera guardada y que no forme
     // parte de este catálogo (por si hay algo custom cargado desde el
     // seed), y sobreescribe únicamente las del catálogo con lo marcado.
-    const preservedNonCatalog = (plan.features ?? []).filter(
-      (f) => !(FEATURE_CATALOG as readonly string[]).includes(f)
-    );
-    const features = [...preservedNonCatalog, ...FEATURE_CATALOG.filter((f) => checkedFeatures.has(f))];
+    const preservedNonCatalog = (plan.features ?? []).filter((f) => !VALID_FEATURE_KEYS.has(f));
+    const features = [
+      ...preservedNonCatalog,
+      ...FEATURE_CATALOG.filter((f) => checkedFeatures.has(f.key)).map((f) => f.key),
+    ];
 
     const res = await fetch(`/api/plans/${plan.id}`, {
       method: "PATCH",
@@ -157,14 +162,23 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () => 
         <Field label="Características incluidas">
           <div className="grid grid-cols-1 gap-1.5 max-h-56 overflow-y-auto border border-line rounded-md p-3">
             {FEATURE_CATALOG.map((feature) => (
-              <label key={feature} className="flex items-start gap-2 text-sm cursor-pointer">
+              <label key={feature.key} className="flex items-start gap-2 text-sm cursor-pointer">
                 <input
                   type="checkbox"
                   className="mt-0.5"
-                  checked={checkedFeatures.has(feature)}
-                  onChange={() => toggleFeature(feature)}
+                  checked={checkedFeatures.has(feature.key)}
+                  onChange={() => toggleFeature(feature.key)}
                 />
-                <span>{feature}</span>
+                <span className="flex-1">{feature.label}</span>
+                {feature.status !== "live" && (
+                  <span
+                    className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${
+                      feature.status === "partial" ? "bg-marigold/20 text-marigold-dark" : "bg-ink-100 text-muted"
+                    }`}
+                  >
+                    {feature.status === "partial" ? "parcial" : "sin construir"}
+                  </span>
+                )}
               </label>
             ))}
           </div>

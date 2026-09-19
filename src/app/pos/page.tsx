@@ -6,6 +6,10 @@ import { productsService } from "@/modules/products/service";
 import { hasPermission, PERMISSIONS } from "@/lib/permissions";
 import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
 import { cashService } from "@/modules/cash/service";
+import { hasFeature } from "@/lib/feature-gating";
+import { FEATURE_KEYS } from "@/lib/plan-features";
+import { tablesService } from "@/modules/tables/service";
+import { mercadoPagoService } from "@/modules/mercadoPago/service";
 import { PosClient } from "./pos-client";
 import Link from "next/link";
 
@@ -42,10 +46,21 @@ export default async function PosPage() {
 
   const activeProducts = products.filter((p: (typeof products)[number]) => p.isActive);
 
+  const tablesEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.GESTION_MESAS);
+  const tables = tablesEnabled && branchId ? await tablesService.list(session.user.companyId, branchId) : [];
+
+  // El botón de Mercado Pago en el checkout solo aparece si la empresa
+  // tiene la feature de plan Y ya conectó su propia cuenta — de nada sirve
+  // mostrarlo si todavía no hay a dónde mandar el cobro.
+  const pagosIntegradosEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.PAGOS_INTEGRADOS);
+  const mpAccount = pagosIntegradosEnabled ? await mercadoPagoService.getAccount(session.user.companyId) : null;
+
   return (
     <PosClient
       categories={JSON.parse(JSON.stringify(categories.filter((c: (typeof categories)[number]) => c.isActive)))}
       products={JSON.parse(JSON.stringify(activeProducts))}
+      tables={JSON.parse(JSON.stringify(tables))}
+      mercadoPagoEnabled={!!mpAccount}
       userName={session.user.name ?? ""}
     />
   );

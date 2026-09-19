@@ -35,10 +35,31 @@ model Company {
   auditLogs     AuditLog[]
   subscription  Subscription?
   hardwareFinancings HardwareFinancing[]
+  mercadoPagoAccount MercadoPagoAccount?
 
   @@map("companies")
 }
 
+/// Credenciales OAuth Connect de la cuenta de Mercado Pago de CADA
+/// restaurante (no la de Jose). El dinero de las ventas del restaurante
+/// entra directo a esta cuenta — Tappy nunca es intermediario del dinero,
+/// solo genera el cobro usando este token. Ver src/modules/mercadoPago/.
+model MercadoPagoAccount {
+  id           String   @id @default(uuid())
+  companyId    String   @unique
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  mpUserId     String // collector id del vendedor en Mercado Pago
+  accessToken  String   @db.Text
+  refreshToken String   @db.Text
+  publicKey    String?
+  liveMode     Boolean  @default(true)
+  expiresAt    DateTime // access_token vence (~180 días); se refresca sola en getValidAccessToken()
+  connectedAt  DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("mercadopago_accounts")
+}
 enum CompanyStatus {
   ACTIVE
   SUSPENDED
@@ -79,9 +100,43 @@ model Branch {
   orders             Order[]
   cashRegisters      CashRegister[]
   inventoryMovements InventoryMovement[]
+  tables             Table[]
 
   @@index([companyId])
   @@map("branches")
+}
+
+enum TableStatus {
+  LIBRE
+  OCUPADA
+  CUENTA
+  LIMPIEZA
+}
+
+model Table {
+  id        String   @id @default(uuid())
+  companyId String
+  branchId  String
+  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  name      String // "Mesa 1", "Terraza 3", etc. — texto libre, no solo número
+  capacity  Int?
+  status    TableStatus @default(LIBRE)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Puntero a la cuenta abierta actual de la mesa (si hay una). Es una
+  // relación aparte de `orders` (que es el historial completo): una mesa
+  // tiene MUCHAS orders a lo largo del tiempo, pero cuando mucho UNA
+  // cuenta abierta a la vez.
+  currentOrderId String? @unique
+  currentOrder   Order?  @relation("TableCurrentOrder", fields: [currentOrderId], references: [id])
+
+  orders Order[] @relation("TableOrders")
+
+  @@index([companyId, branchId])
+  @@map("tables")
 }
 
 model Plan {
@@ -293,9 +348,19 @@ model Order {
   customerId String?
   customer  Customer? @relation(fields: [customerId], references: [id])
   whatsAppCart WhatsAppCart?
+  tableId   String?
+  table     Table?   @relation("TableOrders", fields: [tableId], references: [id])
+  currentForTable Table? @relation("TableCurrentOrder")
 
   orderNumber Int      @default(autoincrement())
   status      OrderStatus @default(PENDING)
+  // true mientras la mesa sigue "consumiendo" (Caja tipo Mesa): se le
+  // pueden seguir mandando rondas de productos y todavía no se cobra.
+  // false = orden de Mostrador normal, o una mesa ya cerrada/cobrada.
+  isOpenTab   Boolean  @default(false)
+  orderType   OrderType @default(COMER_AQUI)
+  notes       String?  @db.Text // comentarios del cajero: alergias, "sin cebolla", instrucciones, etc.
+  deliveryAddress String? @db.Text // solo aplica si orderType = DOMICILIO
   subtotal    Decimal  @db.Decimal(10, 2)
   discount    Decimal  @default(0) @db.Decimal(10, 2)
   tax         Decimal  @default(0) @db.Decimal(10, 2)
@@ -309,6 +374,12 @@ model Order {
   @@index([companyId, branchId])
   @@index([createdAt])
   @@map("orders")
+}
+
+enum OrderType {
+  COMER_AQUI
+  PARA_LLEVAR
+  DOMICILIO
 }
 
 enum OrderStatus {
@@ -346,15 +417,29 @@ model OrderItemModifier {
   @@map("order_item_modifiers")
 }
 
+enum PaymentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
 model Payment {
   id      String  @id @default(uuid())
   orderId String
   order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   method     PaymentMethod
+  // Los métodos existentes (CASH/CARD/TRANSFER/OTHER) siempre fueron
+  // instantáneos, por eso el default es APPROVED — no cambia nada de su
+  // comportamiento actual. Solo MERCADOPAGO nace en PENDING y se confirma
+  // (o rechaza) después, vía webhook.
+  status     PaymentStatus @default(APPROVED)
   amount     Decimal @db.Decimal(10, 2)
   cashReceived Decimal? @db.Decimal(10, 2)
   change       Decimal? @db.Decimal(10, 2)
+  mpPaymentId    String? @unique
+  mpPreferenceId String?
   createdAt  DateTime @default(now())
 
   @@map("payments")
@@ -365,6 +450,7 @@ enum PaymentMethod {
   CARD
   TRANSFER
   OTHER
+  MERCADOPAGO
 }
 
 // ------------------------------------------------------------

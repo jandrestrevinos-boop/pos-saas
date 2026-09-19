@@ -5,6 +5,8 @@ import { Button, Card, StatusBadge } from "@/components/ui";
 import { Modal, Field, inputClass } from "@/components/ui/modal";
 import { formatMxn } from "@/lib/format";
 import { FEATURE_CATALOG } from "@/lib/plan-features";
+// FEATURE_CATALOG ahora es [{ key, label, status }] — customFeatures y
+// plan.features guardan `key`, la UI muestra `label`.
 
 type Plan = { id: string; name: string; priceMxn: string; features: string[] | null };
 type Role = { id: string; name: string };
@@ -416,14 +418,23 @@ function ChangePlanModal({
             <Field label="Features personalizadas para esta empresa">
               <div className="grid grid-cols-1 gap-1.5 max-h-56 overflow-y-auto border border-line rounded-md p-3">
                 {FEATURE_CATALOG.map((feature) => (
-                  <label key={feature} className="flex items-start gap-2 text-sm cursor-pointer">
+                  <label key={feature.key} className="flex items-start gap-2 text-sm cursor-pointer">
                     <input
                       type="checkbox"
                       className="mt-0.5"
-                      checked={customFeatures.has(feature)}
-                      onChange={() => toggleFeature(feature)}
+                      checked={customFeatures.has(feature.key)}
+                      onChange={() => toggleFeature(feature.key)}
                     />
-                    <span>{feature}</span>
+                    <span className="flex-1">{feature.label}</span>
+                    {feature.status !== "live" && (
+                      <span
+                        className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${
+                          feature.status === "partial" ? "bg-marigold/20 text-marigold-dark" : "bg-ink-100 text-muted"
+                        }`}
+                      >
+                        {feature.status === "partial" ? "parcial" : "sin construir"}
+                      </span>
+                    )}
                   </label>
                 ))}
               </div>
@@ -436,11 +447,11 @@ function ChangePlanModal({
                 {FEATURE_CATALOG.map((feature) => {
                   const included = new Set(selectedPlan.features ?? []);
                   return (
-                    <div key={feature} className="flex items-start gap-2">
-                      <span className={included.has(feature) ? "text-sage" : "text-muted"}>
-                        {included.has(feature) ? "✓" : "—"}
+                    <div key={feature.key} className="flex items-start gap-2">
+                      <span className={included.has(feature.key) ? "text-sage" : "text-muted"}>
+                        {included.has(feature.key) ? "✓" : "—"}
                       </span>
-                      <span className={included.has(feature) ? "text-ink" : "text-muted"}>{feature}</span>
+                      <span className={included.has(feature.key) ? "text-ink" : "text-muted"}>{feature.label}</span>
                     </div>
                   );
                 })}

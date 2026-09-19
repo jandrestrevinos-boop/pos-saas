@@ -1,0 +1,1083 @@
+From 906064459872c422cdb2af82c3d1a890b020aa53 Mon Sep 17 00:00:00 2001
+From: Claude <claude@tappy.local>
+Date: Fri, 18 Sep 2026 08:21:14 +0000
+Subject: [PATCH] Pagos integrados: Mercado Pago OAuth Connect + Checkout Pro
+ (paso 7 retomado)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Cada restaurante conecta SU PROPIA cuenta de Mercado Pago (OAuth Connect,
+  no Point/comisión de Tappy) desde la nueva pantalla Configuración
+- prisma: MercadoPagoAccount (tokens por empresa, refresh automático),
+  Payment.status (PENDING/APPROVED/REJECTED/CANCELLED, default APPROVED
+  así que CASH/CARD/TRANSFER/OTHER no cambian de comportamiento),
+  PaymentMethod += MERCADOPAGO
+- src/modules/mercadoPago/service.ts: authorize URL, exchange/refresh de
+  token, creación de preferencia de Checkout Pro, y handleWebhook() que
+  usa el companyId embebido en notification_url (no en el body) para
+  saber con qué token consultar el pago antes de poder leer su
+  external_reference
+- sales/service.ts: venta con MERCADOPAGO nace con el pago en PENDING y
+  difiere el descuento de inventario a finalizeApprovedOrder(), que se
+  llama desde el webhook solo si el pago queda aprobado
+- kitchen/service.ts: una orden de Mercado Pago no se manda a cocina
+  hasta que el pago esté aprobado
+- Rutas: /api/mercadopago/oauth/{authorize,callback}, /account,
+  /preference, /webhook (público), /api/orders/[id] (polling desde POS)
+- Nueva pantalla (company)/settings — primera pantalla de configuración
+  del lado del tenant que existe en el proyecto — con conectar/
+  desconectar Mercado Pago, gateada por hasFeature('pagos_integrados')
+  + permiso SETTINGS_MANAGE
+- POS: método de pago 'Mercado Pago (link/QR)' condicionado a que la
+  empresa tenga la feature Y ya haya conectado su cuenta; pantalla de
+  espera con link de cobro + botón de verificar estatus (polling manual)
+- Verificado con tsc real contra el repo, cero errores en todo lo
+  nuevo/tocado (ruido conocido de Prisma sin generar en este sandbox
+  aparte, igual que en patches anteriores)
+---
+ .env.example                                  |  10 +
+ prisma/schema.prisma                          |  37 ++-
+ src/app/(company)/layout.tsx                  |   1 +
+ src/app/(company)/settings/page.tsx           |  31 +++
+ .../(company)/settings/settings-client.tsx    |  88 +++++++
+ src/app/api/mercadopago/account/route.ts      |  28 +++
+ .../api/mercadopago/oauth/authorize/route.ts  |  25 ++
+ .../api/mercadopago/oauth/callback/route.ts   |  30 +++
+ src/app/api/mercadopago/preference/route.ts   |  41 +++
+ src/app/api/mercadopago/webhook/route.ts      |  51 ++++
+ src/app/api/orders/[id]/route.ts              |  19 ++
+ src/app/pos/page.tsx                          |   8 +
+ src/app/pos/pos-client.tsx                    | 121 ++++++++-
+ src/modules/kitchen/service.ts                |  10 +-
+ src/modules/mercadoPago/service.ts            | 234 ++++++++++++++++++
+ src/modules/sales/service.ts                  |  39 ++-
+ 16 files changed, 762 insertions(+), 11 deletions(-)
+ create mode 100644 src/app/(company)/settings/page.tsx
+ create mode 100644 src/app/(company)/settings/settings-client.tsx
+ create mode 100644 src/app/api/mercadopago/account/route.ts
+ create mode 100644 src/app/api/mercadopago/oauth/authorize/route.ts
+ create mode 100644 src/app/api/mercadopago/oauth/callback/route.ts
+ create mode 100644 src/app/api/mercadopago/preference/route.ts
+ create mode 100644 src/app/api/mercadopago/webhook/route.ts
+ create mode 100644 src/app/api/orders/[id]/route.ts
+ create mode 100644 src/modules/mercadoPago/service.ts
+
+diff --git a/.env.example b/.env.example
+index a59389f..c9d9d87 100644
+--- a/.env.example
++++ b/.env.example
+@@ -4,3 +4,13 @@ DATABASE_URL="postgresql://usuario:password@localhost:5432/pos_saas?schema=publi
+ # NextAuth
+ NEXTAUTH_SECRET="genera-un-secreto-largo-aqui"
+ NEXTAUTH_URL="http://localhost:3000"
++
++# Mercado Pago — credenciales de la APLICACIÓN de Tappy (la que Jose ya
++# registró en su cuenta de developers.mercadopago.com), NO las de cada
++# restaurante. Cada restaurante conecta SU PROPIA cuenta vía OAuth Connect
++# desde Configuración → Integraciones; su dinero va directo a ellos.
++MERCADOPAGO_CLIENT_ID=""
++MERCADOPAGO_CLIENT_SECRET=""
++# Debe coincidir EXACTO con la "Redirect URI" configurada en la app de
++# Mercado Pago. En producción: https://www.tappysoftware.com/api/mercadopago/oauth/callback
++MERCADOPAGO_REDIRECT_URI="http://localhost:3000/api/mercadopago/oauth/callback"
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index db67436..d162952 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -35,11 +35,31 @@ model Company {
+   auditLogs     AuditLog[]
+   subscription  Subscription?
+   hardwareFinancings HardwareFinancing[]
++  mercadoPagoAccount MercadoPagoAccount?
+ 
+   @@map("companies")
+ }
+ 
+-enum CompanyStatus {
++/// Credenciales OAuth Connect de la cuenta de Mercado Pago de CADA
++/// restaurante (no la de Jose). El dinero de las ventas del restaurante
++/// entra directo a esta cuenta — Tappy nunca es intermediario del dinero,
++/// solo genera el cobro usando este token. Ver src/modules/mercadoPago/.
++model MercadoPagoAccount {
++  id           String   @id @default(uuid())
++  companyId    String   @unique
++  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
++
++  mpUserId     String // collector id del vendedor en Mercado Pago
++  accessToken  String   @db.Text
++  refreshToken String   @db.Text
++  publicKey    String?
++  liveMode     Boolean  @default(true)
++  expiresAt    DateTime // access_token vence (~180 días); se refresca sola en getValidAccessToken()
++  connectedAt  DateTime @default(now())
++  updatedAt    DateTime @updatedAt
++
++  @@map("mercadopago_accounts")
++}
+   ACTIVE
+   SUSPENDED
+   CANCELLED
+@@ -375,15 +395,29 @@ model OrderItemModifier {
+   @@map("order_item_modifiers")
+ }
+ 
++enum PaymentStatus {
++  PENDING
++  APPROVED
++  REJECTED
++  CANCELLED
++}
++
+ model Payment {
+   id      String  @id @default(uuid())
+   orderId String
+   order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+ 
+   method     PaymentMethod
++  // Los métodos existentes (CASH/CARD/TRANSFER/OTHER) siempre fueron
++  // instantáneos, por eso el default es APPROVED — no cambia nada de su
++  // comportamiento actual. Solo MERCADOPAGO nace en PENDING y se confirma
++  // (o rechaza) después, vía webhook.
++  status     PaymentStatus @default(APPROVED)
+   amount     Decimal @db.Decimal(10, 2)
+   cashReceived Decimal? @db.Decimal(10, 2)
+   change       Decimal? @db.Decimal(10, 2)
++  mpPaymentId    String? @unique
++  mpPreferenceId String?
+   createdAt  DateTime @default(now())
+ 
+   @@map("payments")
+@@ -394,6 +428,7 @@ enum PaymentMethod {
+   CARD
+   TRANSFER
+   OTHER
++  MERCADOPAGO
+ }
+ 
+ // ------------------------------------------------------------
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index 123d04c..f016c99 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -16,6 +16,7 @@ const BASE_NAV_ITEMS = [
+   { href: "/categories", label: "Categorías" },
+   { href: "/branches", label: "Sucursales" },
+   { href: "/users", label: "Usuarios" },
++  { href: "/settings", label: "Configuración" },
+ ];
+ 
+ export default async function CompanyLayout({ children }: { children: React.ReactNode }) {
+diff --git a/src/app/(company)/settings/page.tsx b/src/app/(company)/settings/page.tsx
+new file mode 100644
+index 0000000..820863c
+--- /dev/null
++++ b/src/app/(company)/settings/page.tsx
+@@ -0,0 +1,31 @@
++import { redirect } from "next/navigation";
++import { Suspense } from "react";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { mercadoPagoService } from "@/modules/mercadoPago/service";
++import { SettingsClient } from "./settings-client";
++
++export default async function SettingsPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.SETTINGS_MANAGE)) {
++    redirect("/dashboard");
++  }
++
++  const pagosIntegradosEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.PAGOS_INTEGRADOS);
++  const mpAccount = pagosIntegradosEnabled ? await mercadoPagoService.getAccount(session.user.companyId) : null;
++
++  return (
++    <Suspense fallback={<div className="p-8 text-muted text-sm">Cargando...</div>}>
++      <SettingsClient
++        pagosIntegradosEnabled={pagosIntegradosEnabled}
++        mercadoPagoConnected={!!mpAccount}
++        mercadoPagoLiveMode={mpAccount?.liveMode ?? null}
++      />
++    </Suspense>
++  );
++}
+diff --git a/src/app/(company)/settings/settings-client.tsx b/src/app/(company)/settings/settings-client.tsx
+new file mode 100644
+index 0000000..47e7070
+--- /dev/null
++++ b/src/app/(company)/settings/settings-client.tsx
+@@ -0,0 +1,88 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import { useSearchParams } from "next/navigation";
++
++export function SettingsClient({
++  pagosIntegradosEnabled,
++  mercadoPagoConnected,
++  mercadoPagoLiveMode,
++}: {
++  pagosIntegradosEnabled: boolean;
++  mercadoPagoConnected: boolean;
++  mercadoPagoLiveMode: boolean | null;
++}) {
++  const searchParams = useSearchParams();
++  const [connected, setConnected] = useState(mercadoPagoConnected);
++  const [liveMode, setLiveMode] = useState(mercadoPagoLiveMode);
++  const [disconnecting, setDisconnecting] = useState(false);
++  const mpResult = searchParams.get("mp");
++
++  useEffect(() => {
++    if (mpResult === "conectado") {
++      fetch("/api/mercadopago/account")
++        .then((res) => res.json())
++        .then((data) => {
++          setConnected(data.connected);
++          setLiveMode(data.liveMode);
++        });
++    }
++  }, [mpResult]);
++
++  async function disconnect() {
++    if (!confirm("¿Desconectar tu cuenta de Mercado Pago? Los cobros integrados dejarán de funcionar hasta que la vuelvas a conectar.")) return;
++    setDisconnecting(true);
++    const res = await fetch("/api/mercadopago/account", { method: "DELETE" });
++    setDisconnecting(false);
++    if (res.ok) setConnected(false);
++  }
++
++  return (
++    <div className="max-w-2xl">
++      <h1 className="font-display text-2xl font-semibold mb-1">Configuración</h1>
++      <p className="text-muted text-sm mb-8">Integraciones y ajustes de tu cuenta.</p>
++
++      <div className="bg-white border border-line rounded-lg p-5">
++        <div className="flex items-center justify-between mb-1">
++          <h2 className="font-display text-lg font-semibold">Mercado Pago</h2>
++          {connected && (
++            <span className="text-xs bg-sage/15 text-sage px-2 py-0.5 rounded-full font-medium">
++              Conectado{liveMode === false ? " (modo prueba)" : ""}
++            </span>
++          )}
++        </div>
++        <p className="text-muted text-sm mb-4">
++          Conecta tu propia cuenta de Mercado Pago para cobrar con tarjeta directo desde el Punto de Venta. El
++          dinero de tus ventas entra directo a tu cuenta — Tappy no cobra comisión adicional.
++        </p>
++
++        {mpResult === "error" && (
++          <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">
++            No se pudo completar la conexión con Mercado Pago. Intenta de nuevo.
++          </p>
++        )}
++
++        {!pagosIntegradosEnabled ? (
++          <p className="text-sm text-muted bg-ink-100 rounded-md px-3 py-2">
++            Pagos integrados no está incluido en tu plan actual. Contacta a soporte para agregarlo.
++          </p>
++        ) : connected ? (
++          <button
++            onClick={disconnect}
++            disabled={disconnecting}
++            className="rounded-md border border-line px-4 py-2 text-sm font-medium disabled:opacity-50"
++          >
++            Desconectar cuenta
++          </button>
++        ) : (
++          <a
++            href="/api/mercadopago/oauth/authorize"
++            className="inline-block rounded-md bg-ember text-white px-4 py-2 text-sm font-medium"
++          >
++            Conectar con Mercado Pago
++          </a>
++        )}
++      </div>
++    </div>
++  );
++}
+diff --git a/src/app/api/mercadopago/account/route.ts b/src/app/api/mercadopago/account/route.ts
+new file mode 100644
+index 0000000..190c082
+--- /dev/null
++++ b/src/app/api/mercadopago/account/route.ts
+@@ -0,0 +1,28 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { mercadoPagoService } from "@/modules/mercadoPago/service";
++
++export async function GET() {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  const account = await mercadoPagoService.getAccount(companyId);
++  return NextResponse.json({
++    connected: !!account,
++    liveMode: account?.liveMode ?? null,
++    connectedAt: account?.connectedAt ?? null,
++  });
++}
++
++export async function DELETE() {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!hasPermission(ctx.permissions, PERMISSIONS.SETTINGS_MANAGE)) {
++    return NextResponse.json({ error: "No tienes permiso para desconectar Mercado Pago" }, { status: 403 });
++  }
++
++  await mercadoPagoService.disconnect(companyId);
++  return NextResponse.json({ ok: true });
++}
+diff --git a/src/app/api/mercadopago/oauth/authorize/route.ts b/src/app/api/mercadopago/oauth/authorize/route.ts
+new file mode 100644
+index 0000000..3298cd2
+--- /dev/null
++++ b/src/app/api/mercadopago/oauth/authorize/route.ts
+@@ -0,0 +1,25 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { getAuthorizeUrl } from "@/modules/mercadoPago/service";
++
++export async function GET() {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.PAGOS_INTEGRADOS))) {
++    return NextResponse.json({ error: "Tu plan no incluye Pagos integrados" }, { status: 403 });
++  }
++  if (!hasPermission(ctx.permissions, PERMISSIONS.SETTINGS_MANAGE)) {
++    return NextResponse.json({ error: "No tienes permiso para conectar Mercado Pago" }, { status: 403 });
++  }
++
++  try {
++    return NextResponse.redirect(getAuthorizeUrl(companyId));
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo iniciar la conexión con Mercado Pago";
++    return NextResponse.json({ error: message }, { status: 500 });
++  }
++}
+diff --git a/src/app/api/mercadopago/oauth/callback/route.ts b/src/app/api/mercadopago/oauth/callback/route.ts
+new file mode 100644
+index 0000000..4d1333b
+--- /dev/null
++++ b/src/app/api/mercadopago/oauth/callback/route.ts
+@@ -0,0 +1,30 @@
++import { NextResponse } from "next/server";
++import { mercadoPagoService } from "@/modules/mercadoPago/service";
++
++/**
++ * Mercado Pago redirige aquí después de que el dueño del restaurante
++ * autoriza la conexión. `state` es el companyId que mandamos nosotros en
++ * getAuthorizeUrl() — solo alguien con el link que nosotros generamos (ya
++ * autenticado como ADMIN_EMPRESA de esa empresa) pudo haber llegado aquí
++ * con ese state, así que no requiere sesión activa para completarse.
++ */
++export async function GET(req: Request) {
++  const url = new URL(req.url);
++  const code = url.searchParams.get("code");
++  const companyId = url.searchParams.get("state");
++  const errorParam = url.searchParams.get("error");
++
++  const redirectBase = "/settings?tab=integraciones";
++
++  if (errorParam || !code || !companyId) {
++    return NextResponse.redirect(new URL(`${redirectBase}&mp=error`, url.origin));
++  }
++
++  try {
++    const token = await mercadoPagoService.exchangeCodeForToken(code);
++    await mercadoPagoService.saveAccount(companyId, token);
++    return NextResponse.redirect(new URL(`${redirectBase}&mp=conectado`, url.origin));
++  } catch {
++    return NextResponse.redirect(new URL(`${redirectBase}&mp=error`, url.origin));
++  }
++}
+diff --git a/src/app/api/mercadopago/preference/route.ts b/src/app/api/mercadopago/preference/route.ts
+new file mode 100644
+index 0000000..3076016
+--- /dev/null
++++ b/src/app/api/mercadopago/preference/route.ts
+@@ -0,0 +1,41 @@
++import { NextResponse } from "next/server";
++import { prisma } from "@/lib/prisma";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { mercadoPagoService } from "@/modules/mercadoPago/service";
++
++export async function POST(req: Request) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.PAGOS_INTEGRADOS))) {
++    return NextResponse.json({ error: "Tu plan no incluye Pagos integrados" }, { status: 403 });
++  }
++  if (!hasPermission(ctx.permissions, PERMISSIONS.SALES_CREATE)) {
++    return NextResponse.json({ error: "No tienes permiso para cobrar" }, { status: 403 });
++  }
++
++  const body = await req.json();
++  const orderId = body?.orderId as string | undefined;
++  if (!orderId) {
++    return NextResponse.json({ error: "Falta el orderId" }, { status: 400 });
++  }
++
++  const order = await prisma.order.findFirst({
++    where: { id: orderId, companyId },
++    include: { items: { include: { product: true } } },
++  });
++  if (!order) {
++    return NextResponse.json({ error: "Orden no encontrada" }, { status: 404 });
++  }
++
++  try {
++    const preference = await mercadoPagoService.createPreferenceForOrder(companyId, order);
++    return NextResponse.json(preference);
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo generar el cobro";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/mercadopago/webhook/route.ts b/src/app/api/mercadopago/webhook/route.ts
+new file mode 100644
+index 0000000..2ec5efe
+--- /dev/null
++++ b/src/app/api/mercadopago/webhook/route.ts
+@@ -0,0 +1,51 @@
++import { NextResponse } from "next/server";
++import { mercadoPagoService } from "@/modules/mercadoPago/service";
++
++/**
++ * Mercado Pago llama aquí sin sesión (no es un usuario de Tappy). El
++ * companyId viene en la query porque nosotros mismos lo pusimos ahí al
++ * generar la preferencia (ver notification_url en createPreferenceForOrder)
++ * — es la única forma de saber de qué restaurante es el aviso ANTES de
++ * poder consultar el pago (para consultarlo ya se necesita el token de
++ * ESE restaurante).
++ *
++ * Mercado Pago reintenta si no respondemos 200, así que cualquier cosa
++ * que no podamos procesar responde 200 igual (después de loguearla) para
++ * no generar reintentos infinitos por una notificación que nunca vamos a
++ * poder resolver (ej. companyId inválido, o el tipo de evento no es "payment").
++ */
++export async function POST(req: Request) {
++  const url = new URL(req.url);
++  const companyId = url.searchParams.get("companyId");
++
++  let body: Record<string, unknown> = {};
++  try {
++    body = await req.json();
++  } catch {
++    // Mercado Pago a veces manda la notificación por querystring en vez de body
++  }
++
++  const type = (body.type as string) ?? url.searchParams.get("type") ?? url.searchParams.get("topic");
++  const paymentId =
++    ((body.data as { id?: string })?.id as string | undefined) ?? url.searchParams.get("data.id") ?? undefined;
++
++  if (!companyId || type !== "payment" || !paymentId) {
++    return NextResponse.json({ ok: true, skipped: true });
++  }
++
++  try {
++    const result = await mercadoPagoService.handleWebhook(companyId, paymentId);
++    return NextResponse.json({ ok: true, ...result });
++  } catch (err) {
++    console.error("Error procesando webhook de Mercado Pago:", err);
++    // 200 de todos modos: si el error es nuestro (ej. token vencido y el
++    // refresh también falló), reintentar con el mismo request no lo va a
++    // arreglar solo; que quede en logs para revisarlo a mano.
++    return NextResponse.json({ ok: true, error: "internal" });
++  }
++}
++
++// Mercado Pago también puede notificar por GET en integraciones viejas
++export async function GET(req: Request) {
++  return POST(req);
++}
+diff --git a/src/app/api/orders/[id]/route.ts b/src/app/api/orders/[id]/route.ts
+new file mode 100644
+index 0000000..a699c7a
+--- /dev/null
++++ b/src/app/api/orders/[id]/route.ts
+@@ -0,0 +1,19 @@
++import { NextResponse } from "next/server";
++import { prisma } from "@/lib/prisma";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++
++/** Usado por el POS para hacer polling manual del estatus de un cobro de Mercado Pago pendiente. */
++export async function GET(_req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  const order = await prisma.order.findFirst({
++    where: { id: params.id, companyId },
++    include: { payments: true },
++  });
++  if (!order) {
++    return NextResponse.json({ error: "Orden no encontrada" }, { status: 404 });
++  }
++
++  return NextResponse.json({ order });
++}
+diff --git a/src/app/pos/page.tsx b/src/app/pos/page.tsx
+index 668db17..49019b3 100644
+--- a/src/app/pos/page.tsx
++++ b/src/app/pos/page.tsx
+@@ -9,6 +9,7 @@ import { cashService } from "@/modules/cash/service";
+ import { hasFeature } from "@/lib/feature-gating";
+ import { FEATURE_KEYS } from "@/lib/plan-features";
+ import { tablesService } from "@/modules/tables/service";
++import { mercadoPagoService } from "@/modules/mercadoPago/service";
+ import { PosClient } from "./pos-client";
+ import Link from "next/link";
+ 
+@@ -48,11 +49,18 @@ export default async function PosPage() {
+   const tablesEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.GESTION_MESAS);
+   const tables = tablesEnabled && branchId ? await tablesService.list(session.user.companyId, branchId) : [];
+ 
++  // El botón de Mercado Pago en el checkout solo aparece si la empresa
++  // tiene la feature de plan Y ya conectó su propia cuenta — de nada sirve
++  // mostrarlo si todavía no hay a dónde mandar el cobro.
++  const pagosIntegradosEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.PAGOS_INTEGRADOS);
++  const mpAccount = pagosIntegradosEnabled ? await mercadoPagoService.getAccount(session.user.companyId) : null;
++
+   return (
+     <PosClient
+       categories={JSON.parse(JSON.stringify(categories.filter((c: (typeof categories)[number]) => c.isActive)))}
+       products={JSON.parse(JSON.stringify(activeProducts))}
+       tables={JSON.parse(JSON.stringify(tables))}
++      mercadoPagoEnabled={!!mpAccount}
+       userName={session.user.name ?? ""}
+     />
+   );
+diff --git a/src/app/pos/pos-client.tsx b/src/app/pos/pos-client.tsx
+index f42fe40..859bce2 100644
+--- a/src/app/pos/pos-client.tsx
++++ b/src/app/pos/pos-client.tsx
+@@ -20,11 +20,13 @@ export function PosClient({
+   categories,
+   products,
+   tables,
++  mercadoPagoEnabled,
+   userName,
+ }: {
+   categories: Category[];
+   products: Product[];
+   tables: TableOption[];
++  mercadoPagoEnabled: boolean;
+   userName: string;
+ }) {
+   const [activeCategory, setActiveCategory] = useState<string>(categories[0]?.id ?? "");
+@@ -209,6 +211,7 @@ export function PosClient({
+           subtotal={subtotal}
+           cart={cart}
+           tables={tables}
++          mercadoPagoEnabled={mercadoPagoEnabled}
+           onClose={() => setCheckoutOpen(false)}
+           onDone={resetSale}
+         />
+@@ -223,6 +226,7 @@ function CheckoutModal({
+   subtotal,
+   cart,
+   tables,
++  mercadoPagoEnabled,
+   onClose,
+   onDone,
+ }: {
+@@ -231,10 +235,11 @@ function CheckoutModal({
+   subtotal: number;
+   cart: CartLine[];
+   tables: TableOption[];
++  mercadoPagoEnabled: boolean;
+   onClose: () => void;
+   onDone: () => void;
+ }) {
+-  const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER">("CASH");
++  const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO">("CASH");
+   const [cashReceived, setCashReceived] = useState("");
+   const [tableId, setTableId] = useState("");
+   const [saving, setSaving] = useState(false);
+@@ -250,6 +255,13 @@ function CheckoutModal({
+     cashReceived: number;
+     change: number;
+   } | null>(null);
++  const [pendingMpCheckout, setPendingMpCheckout] = useState<{
++    orderId: string;
++    orderNumber: number;
++    checkoutUrl: string;
++  } | null>(null);
++  const [checkingMpStatus, setCheckingMpStatus] = useState(false);
++  const [mpStatusMessage, setMpStatusMessage] = useState("");
+ 
+   const cashReceivedNum = parseFloat(cashReceived) || 0;
+   const change = cashReceivedNum - total;
+@@ -287,6 +299,25 @@ function CheckoutModal({
+         return;
+       }
+ 
++      if (method === "MERCADOPAGO") {
++        const prefRes = await fetch("/api/mercadopago/preference", {
++          method: "POST",
++          headers: { "Content-Type": "application/json" },
++          body: JSON.stringify({ orderId: data.order.id }),
++        });
++        const prefData = await prefRes.json();
++        if (!prefRes.ok) {
++          setError(prefData.error ?? "No se pudo generar el cobro de Mercado Pago");
++          return;
++        }
++        setPendingMpCheckout({
++          orderId: data.order.id,
++          orderNumber: data.order.orderNumber,
++          checkoutUrl: prefData.checkoutUrl,
++        });
++        return;
++      }
++
+       setCompletedOrder({
+         orderNumber: data.order.orderNumber,
+         items: cart.map((l) => ({
+@@ -308,6 +339,80 @@ function CheckoutModal({
+     }
+   }
+ 
++  async function checkMpStatus() {
++    if (!pendingMpCheckout) return;
++    setCheckingMpStatus(true);
++    setMpStatusMessage("");
++    try {
++      const res = await fetch(`/api/orders/${pendingMpCheckout.orderId}`);
++      const data = await res.json();
++      const payment = data.order?.payments?.find((p: { method: string }) => p.method === "MERCADOPAGO");
++
++      if (payment?.status === "APPROVED") {
++        setCompletedOrder({
++          orderNumber: pendingMpCheckout.orderNumber,
++          items: cart.map((l) => ({ quantity: l.quantity, name: l.product.name, unitPrice: Number(l.product.price) })),
++          subtotal,
++          discount,
++          total,
++          paymentMethod: "MERCADOPAGO",
++          cashReceived: total,
++          change: 0,
++        });
++        setPendingMpCheckout(null);
++      } else if (payment?.status === "REJECTED" || payment?.status === "CANCELLED") {
++        setMpStatusMessage("El pago fue rechazado o cancelado. Puedes cerrar esta ventana e intentar de nuevo.");
++      } else {
++        setMpStatusMessage("Todavía no se detecta el pago. Si el cliente ya pagó, espera unos segundos y vuelve a verificar.");
++      }
++    } catch {
++      setMpStatusMessage("No se pudo verificar el estatus. Intenta de nuevo.");
++    } finally {
++      setCheckingMpStatus(false);
++    }
++  }
++
++  // -----------------------------
++  // COBRO DE MERCADO PAGO EN ESPERA
++  // -----------------------------
++  if (pendingMpCheckout) {
++    return (
++      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
++        <div className="bg-white rounded-lg p-6 max-w-sm w-full text-center">
++          <p className="font-display text-xl font-semibold mb-2">Cobro con Mercado Pago</p>
++          <p className="text-muted text-sm mb-5">
++            Abre el link para que el cliente pague, o compártelo/escanéalo. Cuando confirme el pago, verifica aquí.
++          </p>
++          <a
++            href={pendingMpCheckout.checkoutUrl}
++            target="_blank"
++            rel="noreferrer"
++            className="block w-full rounded-md bg-ember text-white px-4 py-3 text-sm font-medium mb-3"
++          >
++            Abrir cobro en Mercado Pago
++          </a>
++          <button
++            onClick={checkMpStatus}
++            disabled={checkingMpStatus}
++            className="w-full rounded-md border border-line px-4 py-3 text-sm font-medium mb-3 disabled:opacity-50"
++          >
++            {checkingMpStatus ? "Verificando..." : "Ya pagó — verificar"}
++          </button>
++          {mpStatusMessage && <p className="text-xs text-muted mb-3">{mpStatusMessage}</p>}
++          <button
++            onClick={() => {
++              setPendingMpCheckout(null);
++              onClose();
++            }}
++            className="text-xs text-muted underline"
++          >
++            Cancelar y cerrar
++          </button>
++        </div>
++      </div>
++    );
++  }
++
+   // -----------------------------
+   // TICKET DE VENTA COMPLETADA
+   // -----------------------------
+@@ -602,6 +707,20 @@ function CheckoutModal({
+           >
+             Otro
+           </button>
++
++          {mercadoPagoEnabled && (
++            <button
++              type="button"
++              onClick={() => setMethod("MERCADOPAGO")}
++              className={`col-span-2 rounded-md border py-3 text-sm font-medium ${
++                method === "MERCADOPAGO"
++                  ? "bg-ember text-white border-ember"
++                  : "border-line"
++              }`}
++            >
++              Mercado Pago (link/QR)
++            </button>
++          )}
+         </div>
+ 
+         {method === "CASH" && (
+diff --git a/src/modules/kitchen/service.ts b/src/modules/kitchen/service.ts
+index 6d6fc10..6bf79ef 100644
+--- a/src/modules/kitchen/service.ts
++++ b/src/modules/kitchen/service.ts
+@@ -11,7 +11,15 @@ const NEXT_STATUS: Record<string, string> = {
+ export const kitchenService = {
+   async listActive(branchId: string) {
+     return prisma.order.findMany({
+-      where: { branchId, status: { in: [...ACTIVE_STATUSES] } },
++      where: {
++        branchId,
++        status: { in: [...ACTIVE_STATUSES] },
++        // No manda a cocina una orden de Mercado Pago cuyo cobro todavía no
++        // se confirma — evita que se empiece a preparar algo que el cliente
++        // podría no llegar a pagar. No afecta CASH/CARD/TRANSFER/OTHER,
++        // que siempre nacen ya aprobados (ver Payment.status default).
++        payments: { none: { method: "MERCADOPAGO", status: "PENDING" } },
++      },
+       include: {
+         items: { include: { product: true } },
+         user: { select: { name: true } },
+diff --git a/src/modules/mercadoPago/service.ts b/src/modules/mercadoPago/service.ts
+new file mode 100644
+index 0000000..327768b
+--- /dev/null
++++ b/src/modules/mercadoPago/service.ts
+@@ -0,0 +1,234 @@
++import { prisma } from "@/lib/prisma";
++import { encodeExternalReference, decodeExternalReference } from "./externalReference";
++
++const MP_API = "https://api.mercadopago.com";
++const MP_AUTH = "https://auth.mercadopago.com/authorization";
++
++function requireEnv(name: string): string {
++  const value = process.env[name];
++  if (!value) throw new Error(`Falta configurar ${name} en las variables de entorno`);
++  return value;
++}
++
++/**
++ * OAuth Connect: cada restaurante conecta SU PROPIA cuenta de Mercado Pago.
++ * Tappy nunca ve/toca el dinero — solo genera el cobro con el token del
++ * restaurante, así que el dinero cae directo en su cuenta (sección de
++ * "Mercado Pago Marketplace decisions" — cero comisión extra de Tappy).
++ */
++export function getAuthorizeUrl(companyId: string): string {
++  const clientId = requireEnv("MERCADOPAGO_CLIENT_ID");
++  const redirectUri = requireEnv("MERCADOPAGO_REDIRECT_URI");
++
++  const params = new URLSearchParams({
++    client_id: clientId,
++    response_type: "code",
++    platform_id: "mp",
++    state: companyId, // el callback confía en esto porque solo el link que nosotros generamos lo trae
++    redirect_uri: redirectUri,
++  });
++
++  return `${MP_AUTH}?${params.toString()}`;
++}
++
++interface MpTokenResponse {
++  access_token: string;
++  refresh_token: string;
++  user_id: number;
++  public_key: string;
++  live_mode: boolean;
++  expires_in: number; // segundos
++}
++
++export const mercadoPagoService = {
++  async exchangeCodeForToken(code: string): Promise<MpTokenResponse> {
++    const res = await fetch(`${MP_API}/oauth/token`, {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({
++        client_id: requireEnv("MERCADOPAGO_CLIENT_ID"),
++        client_secret: requireEnv("MERCADOPAGO_CLIENT_SECRET"),
++        grant_type: "authorization_code",
++        code,
++        redirect_uri: requireEnv("MERCADOPAGO_REDIRECT_URI"),
++      }),
++    });
++
++    if (!res.ok) {
++      const body = await res.text();
++      throw new Error(`Mercado Pago rechazó el código de autorización: ${body}`);
++    }
++
++    return res.json();
++  },
++
++  async saveAccount(companyId: string, token: MpTokenResponse) {
++    const expiresAt = new Date(Date.now() + token.expires_in * 1000);
++    return prisma.mercadoPagoAccount.upsert({
++      where: { companyId },
++      update: {
++        mpUserId: String(token.user_id),
++        accessToken: token.access_token,
++        refreshToken: token.refresh_token,
++        publicKey: token.public_key,
++        liveMode: token.live_mode,
++        expiresAt,
++      },
++      create: {
++        companyId,
++        mpUserId: String(token.user_id),
++        accessToken: token.access_token,
++        refreshToken: token.refresh_token,
++        publicKey: token.public_key,
++        liveMode: token.live_mode,
++        expiresAt,
++      },
++    });
++  },
++
++  async getAccount(companyId: string) {
++    return prisma.mercadoPagoAccount.findUnique({ where: { companyId } });
++  },
++
++  async disconnect(companyId: string) {
++    await prisma.mercadoPagoAccount.deleteMany({ where: { companyId } });
++  },
++
++  /**
++   * Devuelve un access_token vigente para la cuenta de la empresa,
++   * refrescándolo primero si ya venció o está por vencer. Todo lo que
++   * llame a la API de Mercado Pago a nombre del restaurante debe pasar
++   * por aquí en vez de leer accessToken directo del modelo.
++   */
++  async getValidAccessToken(companyId: string): Promise<string> {
++    const account = await prisma.mercadoPagoAccount.findUnique({ where: { companyId } });
++    if (!account) throw new Error("Esta empresa no tiene una cuenta de Mercado Pago conectada");
++
++    const expiresInFiveMinutes = account.expiresAt.getTime() - Date.now() < 5 * 60 * 1000;
++    if (!expiresInFiveMinutes) return account.accessToken;
++
++    const res = await fetch(`${MP_API}/oauth/token`, {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({
++        client_id: requireEnv("MERCADOPAGO_CLIENT_ID"),
++        client_secret: requireEnv("MERCADOPAGO_CLIENT_SECRET"),
++        grant_type: "refresh_token",
++        refresh_token: account.refreshToken,
++      }),
++    });
++
++    if (!res.ok) {
++      const body = await res.text();
++      throw new Error(`No se pudo refrescar el token de Mercado Pago: ${body}`);
++    }
++
++    const token: MpTokenResponse = await res.json();
++    const updated = await this.saveAccount(companyId, token);
++    return updated.accessToken;
++  },
++
++  /**
++   * Crea una preferencia de Checkout Pro para una orden ya existente.
++   * notification_url lleva el companyId en la query — así el webhook (que
++   * llega sin ningún contexto de sesión) sabe de entrada de qué empresa es
++   * el pago, antes incluso de tener que llamar a Mercado Pago.
++   */
++  async createPreferenceForOrder(companyId: string, order: {
++    id: string;
++    total: number | string;
++    items: { product: { name: string }; quantity: number; unitPriceAtSale: number | string }[];
++  }) {
++    const accessToken = await this.getValidAccessToken(companyId);
++    const baseUrl = requireEnv("MERCADOPAGO_REDIRECT_URI").replace("/api/mercadopago/oauth/callback", "");
++
++    const externalReference = encodeExternalReference({ kind: "order", companyId, orderId: order.id });
++
++    const res = await fetch(`${MP_API}/checkout/preferences`, {
++      method: "POST",
++      headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
++      body: JSON.stringify({
++        items: order.items.map((item) => ({
++          title: item.product.name,
++          quantity: item.quantity,
++          unit_price: Number(item.unitPriceAtSale),
++          currency_id: "MXN",
++        })),
++        external_reference: externalReference,
++        notification_url: `${baseUrl}/api/mercadopago/webhook?companyId=${companyId}`,
++        back_urls: {
++          success: `${baseUrl}/pos`,
++          failure: `${baseUrl}/pos`,
++          pending: `${baseUrl}/pos`,
++        },
++        auto_return: "approved",
++      }),
++    });
++
++    if (!res.ok) {
++      const body = await res.text();
++      throw new Error(`No se pudo crear el cobro en Mercado Pago: ${body}`);
++    }
++
++    const preference = await res.json();
++
++    await prisma.payment.updateMany({
++      where: { orderId: order.id, method: "MERCADOPAGO" },
++      data: { mpPreferenceId: preference.id },
++    });
++
++    return {
++      preferenceId: preference.id as string,
++      checkoutUrl: (preference.init_point ?? preference.sandbox_init_point) as string,
++    };
++  },
++
++  /**
++   * Procesa una notificación de webhook. companyId viene de la query del
++   * notification_url (ver createPreferenceForOrder), NUNCA del body —
++   * el body de Mercado Pago no trae de qué empresa es hasta que ya
++   * consultamos el pago, y para consultarlo primero necesitamos saber
++   * de qué empresa es el token a usar.
++   */
++  async handleWebhook(companyId: string, paymentId: string) {
++    const accessToken = await this.getValidAccessToken(companyId);
++
++    const res = await fetch(`${MP_API}/v1/payments/${paymentId}`, {
++      headers: { Authorization: `Bearer ${accessToken}` },
++    });
++    if (!res.ok) {
++      throw new Error(`No se pudo consultar el pago ${paymentId} en Mercado Pago`);
++    }
++    const payment = await res.json();
++
++    const ref = payment.external_reference ? decodeExternalReference(payment.external_reference) : null;
++    if (!ref || ref.kind !== "order" || ref.companyId !== companyId) {
++      // No es un pago de una orden de POS de esta empresa (podría ser de
++      // financiamiento de hardware u otra cosa) — no es error, solo no aplica aquí.
++      return { handled: false as const };
++    }
++
++    const status: "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED" =
++      payment.status === "approved"
++        ? "APPROVED"
++        : payment.status === "rejected"
++        ? "REJECTED"
++        : payment.status === "cancelled"
++        ? "CANCELLED"
++        : "PENDING";
++
++    await prisma.payment.updateMany({
++      where: { orderId: ref.orderId, method: "MERCADOPAGO" },
++      data: { status, mpPaymentId: String(payment.id) },
++    });
++
++    if (status === "APPROVED") {
++      const { salesService } = await import("@/modules/sales/service");
++      await salesService.finalizeApprovedOrder(ref.orderId);
++    } else if (status === "REJECTED" || status === "CANCELLED") {
++      await prisma.order.updateMany({ where: { id: ref.orderId }, data: { status: "CANCELED" } });
++    }
++
++    return { handled: true as const, orderId: ref.orderId, status };
++  },
++};
+diff --git a/src/modules/sales/service.ts b/src/modules/sales/service.ts
+index 0552c5d..a882941 100644
+--- a/src/modules/sales/service.ts
++++ b/src/modules/sales/service.ts
+@@ -11,7 +11,7 @@ export const saleSchema = z.object({
+     )
+     .min(1, "El carrito está vacío"),
+   discount: z.coerce.number().min(0).default(0),
+-  paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER"]),
++  paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO"]),
+   cashReceived: z.coerce.number().min(0).optional(),
+   tableId: z.string().optional(),
+ });
+@@ -82,6 +82,7 @@ export const salesService = {
+         payments: {
+           create: {
+             method: input.paymentMethod,
++            status: input.paymentMethod === "MERCADOPAGO" ? "PENDING" : "APPROVED",
+             amount: total,
+             cashReceived: input.cashReceived,
+             change,
+@@ -100,17 +101,39 @@ export const salesService = {
+       });
+     }
+ 
+-    // Descuenta inventario para los productos que lo controlan (no bloquea
+-    // la venta si algo falla aquí; la venta ya quedó registrada).
++    // Para Mercado Pago el cobro todavía no se ha confirmado — el
++    // inventario se descuenta hasta que el webhook confirme el pago
++    // (finalizeApprovedOrder), para no descontar stock de un cobro que
++    // termine rechazado o abandonado.
++    if (input.paymentMethod !== "MERCADOPAGO") {
++      const { inventoryService } = await import("@/modules/inventory/service");
++      try {
++        await inventoryService.deductForSale(branchId, userId, input.items);
++      } catch {
++        // El inventario es informativo respecto a la venta; un fallo aquí
++        // no debe revertir un cobro ya realizado al cliente.
++      }
++    }
++
++    return order;
++  },
++
++  /** Se llama desde el webhook de Mercado Pago cuando un pago queda aprobado: descuenta el inventario que se difirió en create(). */
++  async finalizeApprovedOrder(orderId: string) {
++    const order = await prisma.order.findUnique({ where: { id: orderId }, include: { items: true } });
++    if (!order) return;
++
+     const { inventoryService } = await import("@/modules/inventory/service");
++    type MinimalOrderItem = { productId: string; quantity: number };
+     try {
+-      await inventoryService.deductForSale(branchId, userId, input.items);
++      await inventoryService.deductForSale(
++        order.branchId,
++        order.userId,
++        (order.items as MinimalOrderItem[]).map((i) => ({ productId: i.productId, quantity: i.quantity }))
++      );
+     } catch {
+-      // El inventario es informativo respecto a la venta; un fallo aquí
+-      // no debe revertir un cobro ya realizado al cliente.
++      // Igual que en create(): el inventario no debe bloquear que el pago quede confirmado.
+     }
+-
+-    return order;
+   },
+ 
+   async listToday(companyId: string, branchId?: string) {
+-- 
+2.43.0
+

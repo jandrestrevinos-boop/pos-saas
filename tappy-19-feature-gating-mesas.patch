@@ -1,0 +1,1019 @@
+From 9183632c9c8da7bb745054b42e5412e154a7a1eb Mon Sep 17 00:00:00 2001
+From: Claude <claude@tappy.local>
+Date: Fri, 18 Sep 2026 08:06:07 +0000
+Subject: [PATCH] =?UTF-8?q?Arquitectura=20de=20feature-gating=20(hasFeatur?=
+ =?UTF-8?q?e)=20+=20m=C3=B3dulo=20de=20Gesti=C3=B3n=20de=20mesas?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- src/lib/plan-features.ts: catálogo de 22 features con keys estables y
+  status (live/partial/planned), reemplaza los strings sueltos en español
+- src/lib/feature-gating.ts: hasFeature()/getEffectiveFeatureKeys(),
+  mismo patrón que hasPermission()
+- Gestión de mesas construida completa: schema (Table + Order.tableId),
+  servicio, API routes, pantalla /tables, gateada por hasFeature +
+  permiso TABLES_MANAGE nuevo (rol MESERO incluido)
+- Nav de empresa solo muestra 'Mesas' si la empresa tiene la feature
+- POS: selector de mesa opcional en el checkout, marca la mesa como
+  Ocupada automáticamente al cobrar
+- /plataforma/plans y /plataforma/companies: checklist actualizado a
+  keys + badge visual (parcial/sin construir) por feature
+- NO se tocaron datos existentes: los strings viejos del seed
+  (Auditoría, Pantalla de cocina, etc.) se preservan intactos en
+  Plan.features/customFeatures y se siguen mostrando igual que antes
+---
+ prisma/schema.prisma                          |  29 ++++
+ src/app/(company)/layout.tsx                  |  18 ++-
+ src/app/(company)/tables/page.tsx             |  43 ++++++
+ src/app/(company)/tables/tables-client.tsx    | 137 ++++++++++++++++++
+ src/app/api/tables/[id]/route.ts              |  67 +++++++++
+ src/app/api/tables/route.ts                   |  57 ++++++++
+ .../plataforma/companies/companies-table.tsx  |  27 +++-
+ src/app/plataforma/plans/plans-client.tsx     |  36 +++--
+ src/app/pos/page.tsx                          |   7 +
+ src/app/pos/pos-client.tsx                    |  35 ++++-
+ src/lib/feature-gating.ts                     |  40 +++++
+ src/lib/permissions.ts                        |   6 +-
+ src/lib/plan-features.ts                      |  86 +++++++----
+ src/modules/sales/service.ts                  |  11 ++
+ src/modules/tables/service.ts                 |  64 ++++++++
+ 15 files changed, 614 insertions(+), 49 deletions(-)
+ create mode 100644 src/app/(company)/tables/page.tsx
+ create mode 100644 src/app/(company)/tables/tables-client.tsx
+ create mode 100644 src/app/api/tables/[id]/route.ts
+ create mode 100644 src/app/api/tables/route.ts
+ create mode 100644 src/lib/feature-gating.ts
+ create mode 100644 src/modules/tables/service.ts
+
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 9383320..db67436 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -79,11 +79,38 @@ model Branch {
+   orders             Order[]
+   cashRegisters      CashRegister[]
+   inventoryMovements InventoryMovement[]
++  tables             Table[]
+ 
+   @@index([companyId])
+   @@map("branches")
+ }
+ 
++enum TableStatus {
++  LIBRE
++  OCUPADA
++  CUENTA
++  LIMPIEZA
++}
++
++model Table {
++  id        String   @id @default(uuid())
++  companyId String
++  branchId  String
++  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
++
++  name      String // "Mesa 1", "Terraza 3", etc. — texto libre, no solo número
++  capacity  Int?
++  status    TableStatus @default(LIBRE)
++  isActive  Boolean  @default(true)
++  createdAt DateTime @default(now())
++  updatedAt DateTime @updatedAt
++
++  orders Order[]
++
++  @@index([companyId, branchId])
++  @@map("tables")
++}
++
+ model Plan {
+   id             String   @id @default(uuid())
+   name           String   @unique // "Básico", "Profesional", "Empresarial"
+@@ -293,6 +320,8 @@ model Order {
+   customerId String?
+   customer  Customer? @relation(fields: [customerId], references: [id])
+   whatsAppCart WhatsAppCart?
++  tableId   String?
++  table     Table?   @relation(fields: [tableId], references: [id])
+ 
+   orderNumber Int      @default(autoincrement())
+   status      OrderStatus @default(PENDING)
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index 2c85081..123d04c 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -2,8 +2,10 @@ import { redirect } from "next/navigation";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
+ import { SidebarNav } from "@/components/sidebar-nav";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
+ 
+-const NAV_ITEMS = [
++const BASE_NAV_ITEMS = [
+   { href: "/pos", label: "Punto de Venta" },
+   { href: "/kitchen", label: "Cocina" },
+   { href: "/dashboard", label: "Dashboard" },
+@@ -22,9 +24,21 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+     redirect("/login");
+   }
+ 
++  // El nav en sí no reemplaza el gating real (page.tsx de cada ruta valida
++  // hasFeature/hasPermission de nuevo) — esto es solo para no mostrar un
++  // link a algo que la empresa no tiene contratado.
++  const tablesEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.GESTION_MESAS);
++  const navItems = tablesEnabled
++    ? [
++        BASE_NAV_ITEMS[0],
++        { href: "/tables", label: "Mesas" },
++        ...BASE_NAV_ITEMS.slice(1),
++      ]
++    : BASE_NAV_ITEMS;
++
+   return (
+     <div className="min-h-screen flex">
+-      <SidebarNav items={NAV_ITEMS} brand="Mi Restaurante" userName={session.user.name ?? ""} />
++      <SidebarNav items={navItems} brand="Mi Restaurante" userName={session.user.name ?? ""} />
+       <main className="flex-1 p-8 bg-paper">{children}</main>
+     </div>
+   );
+diff --git a/src/app/(company)/tables/page.tsx b/src/app/(company)/tables/page.tsx
+new file mode 100644
+index 0000000..446ea01
+--- /dev/null
++++ b/src/app/(company)/tables/page.tsx
+@@ -0,0 +1,43 @@
++import { redirect } from "next/navigation";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { tablesService } from "@/modules/tables/service";
++import { TablesClient } from "./tables-client";
++import Link from "next/link";
++
++export default async function TablesPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++
++  const enabled = await hasFeature(session.user.companyId, FEATURE_KEYS.GESTION_MESAS);
++
++  if (!enabled) {
++    return (
++      <div className="h-screen flex items-center justify-center bg-paper">
++        <div className="text-center max-w-sm">
++          <p className="font-display text-2xl font-semibold mb-2">Función no incluida en tu plan</p>
++          <p className="text-muted text-sm mb-6">
++            Gestión de mesas no está activa para tu empresa. Contacta a soporte para agregarla a tu plan.
++          </p>
++          <Link href="/dashboard" className="inline-block rounded-md bg-ember text-white px-5 py-3 text-sm font-medium">
++            Volver al Dashboard
++          </Link>
++        </div>
++      </div>
++    );
++  }
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.TABLES_MANAGE)) {
++    redirect("/dashboard");
++  }
++
++  const ctx = await getTenantContext();
++  const branchId = await resolveBranchId(ctx, session.user.companyId);
++  const tables = branchId ? await tablesService.list(session.user.companyId, branchId) : [];
++
++  return <TablesClient initialTables={JSON.parse(JSON.stringify(tables))} />;
++}
+diff --git a/src/app/(company)/tables/tables-client.tsx b/src/app/(company)/tables/tables-client.tsx
+new file mode 100644
+index 0000000..4390b8d
+--- /dev/null
++++ b/src/app/(company)/tables/tables-client.tsx
+@@ -0,0 +1,137 @@
++"use client";
++
++import { useState } from "react";
++import { clsx } from "clsx";
++
++type TableStatus = "LIBRE" | "OCUPADA" | "CUENTA" | "LIMPIEZA";
++type TableRow = { id: string; name: string; capacity: number | null; status: TableStatus };
++
++const STATUS_LABEL: Record<TableStatus, string> = {
++  LIBRE: "Libre",
++  OCUPADA: "Ocupada",
++  CUENTA: "Cuenta",
++  LIMPIEZA: "Limpieza",
++};
++
++const STATUS_COLOR: Record<TableStatus, string> = {
++  LIBRE: "bg-sage/15 text-sage border-sage/30",
++  OCUPADA: "bg-ember/15 text-ember-dark border-ember/30",
++  CUENTA: "bg-marigold/20 text-marigold-dark border-marigold/40",
++  LIMPIEZA: "bg-ink-100 text-muted border-line",
++};
++
++export function TablesClient({ initialTables }: { initialTables: TableRow[] }) {
++  const [tables, setTables] = useState<TableRow[]>(initialTables);
++  const [newName, setNewName] = useState("");
++  const [newCapacity, setNewCapacity] = useState("");
++  const [error, setError] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++
++  async function createTable() {
++    if (!newName.trim()) return;
++    setBusy(true);
++    setError(null);
++    try {
++      const res = await fetch("/api/tables", {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ name: newName.trim(), capacity: newCapacity || undefined }),
++      });
++      const data = await res.json();
++      if (!res.ok) throw new Error(data.error ?? "No se pudo crear la mesa");
++      setTables((prev) => [...prev, data.table]);
++      setNewName("");
++      setNewCapacity("");
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "No se pudo crear la mesa");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  async function advanceStatus(tableId: string) {
++    const res = await fetch(`/api/tables/${tableId}`, {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ action: "advance" }),
++    });
++    const data = await res.json();
++    if (res.ok) {
++      setTables((prev) => prev.map((t) => (t.id === tableId ? data.table : t)));
++    }
++  }
++
++  async function removeTable(tableId: string) {
++    if (!confirm("¿Eliminar esta mesa?")) return;
++    const res = await fetch(`/api/tables/${tableId}`, { method: "DELETE" });
++    if (res.ok) {
++      setTables((prev) => prev.filter((t) => t.id !== tableId));
++    }
++  }
++
++  return (
++    <div>
++      <div className="flex items-center justify-between mb-6">
++        <div>
++          <h1 className="font-display text-2xl font-semibold">Mesas</h1>
++          <p className="text-muted text-sm">Toca una mesa para avanzar su estado: Libre → Ocupada → Cuenta → Limpieza.</p>
++        </div>
++      </div>
++
++      <div className="flex items-end gap-2 mb-6 bg-white border border-line rounded-md p-4">
++        <div className="flex-1">
++          <label className="block text-xs text-muted mb-1">Nombre de la mesa</label>
++          <input
++            className="w-full rounded-md border border-line px-3 py-2 text-sm"
++            placeholder="Mesa 5 / Terraza 2"
++            value={newName}
++            onChange={(e) => setNewName(e.target.value)}
++          />
++        </div>
++        <div className="w-28">
++          <label className="block text-xs text-muted mb-1">Capacidad</label>
++          <input
++            type="number"
++            min="1"
++            className="w-full rounded-md border border-line px-3 py-2 text-sm"
++            value={newCapacity}
++            onChange={(e) => setNewCapacity(e.target.value)}
++          />
++        </div>
++        <button
++          onClick={createTable}
++          disabled={busy || !newName.trim()}
++          className="rounded-md bg-ember text-white px-4 py-2 text-sm font-medium disabled:opacity-50"
++        >
++          Agregar mesa
++        </button>
++      </div>
++
++      {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
++
++      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
++        {tables.map((table) => (
++          <div
++            key={table.id}
++            className={clsx("border rounded-lg p-4 text-center cursor-pointer transition-colors", STATUS_COLOR[table.status])}
++            onClick={() => advanceStatus(table.id)}
++          >
++            <p className="font-display text-lg font-semibold">{table.name}</p>
++            {table.capacity && <p className="text-xs opacity-70">{table.capacity} personas</p>}
++            <p className="text-xs font-medium mt-2">{STATUS_LABEL[table.status]}</p>
++            <button
++              onClick={(e) => {
++                e.stopPropagation();
++                removeTable(table.id);
++              }}
++              className="text-xs underline opacity-60 hover:opacity-100 mt-2"
++            >
++              Eliminar
++            </button>
++          </div>
++        ))}
++        {tables.length === 0 && <p className="text-muted text-sm col-span-full">Aún no hay mesas registradas.</p>}
++      </div>
++    </div>
++  );
++}
+diff --git a/src/app/api/tables/[id]/route.ts b/src/app/api/tables/[id]/route.ts
+new file mode 100644
+index 0000000..14b81b0
+--- /dev/null
++++ b/src/app/api/tables/[id]/route.ts
+@@ -0,0 +1,67 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { tablesService, updateTableSchema } from "@/modules/tables/service";
++
++async function assertAccess(companyId: string, permissions: string[]) {
++  if (!(await hasFeature(companyId, FEATURE_KEYS.GESTION_MESAS))) {
++    return NextResponse.json({ error: "Tu plan no incluye Gestión de mesas" }, { status: 403 });
++  }
++  if (!hasPermission(permissions, PERMISSIONS.TABLES_MANAGE)) {
++    return NextResponse.json({ error: "No tienes permiso para editar mesas" }, { status: 403 });
++  }
++  return null;
++}
++
++export async function PATCH(req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  const denied = await assertAccess(companyId, ctx.permissions);
++  if (denied) return denied;
++
++  const body = await req.json();
++
++  // "advance" es un atajo desde la vista de mesas para avanzar el ciclo
++  // Libre → Ocupada → Cuenta → Limpieza → Libre sin mandar el status explícito.
++  if (body?.action === "advance") {
++    try {
++      const table = await tablesService.advanceStatus(companyId, params.id);
++      return NextResponse.json({ table });
++    } catch (err) {
++      const message = err instanceof Error ? err.message : "No se pudo actualizar la mesa";
++      return NextResponse.json({ error: message }, { status: 400 });
++    }
++  }
++
++  const parsed = updateTableSchema.safeParse(body);
++  if (!parsed.success) {
++    return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  }
++
++  try {
++    const table = await tablesService.update(companyId, params.id, parsed.data);
++    return NextResponse.json({ table });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo actualizar la mesa";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
++
++export async function DELETE(_req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  const denied = await assertAccess(companyId, ctx.permissions);
++  if (denied) return denied;
++
++  try {
++    await tablesService.remove(companyId, params.id);
++    return NextResponse.json({ ok: true });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo eliminar la mesa";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/tables/route.ts b/src/app/api/tables/route.ts
+new file mode 100644
+index 0000000..b21915a
+--- /dev/null
++++ b/src/app/api/tables/route.ts
+@@ -0,0 +1,57 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId, resolveBranchId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { tablesService, createTableSchema } from "@/modules/tables/service";
++
++export async function GET() {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.GESTION_MESAS))) {
++    return NextResponse.json({ error: "Tu plan no incluye Gestión de mesas" }, { status: 403 });
++  }
++  if (!hasPermission(ctx.permissions, PERMISSIONS.TABLES_MANAGE)) {
++    return NextResponse.json({ error: "No tienes permiso para ver mesas" }, { status: 403 });
++  }
++
++  const branchId = await resolveBranchId(ctx, companyId);
++  if (!branchId) {
++    return NextResponse.json({ error: "La empresa no tiene sucursales configuradas" }, { status: 400 });
++  }
++
++  const tables = await tablesService.list(companyId, branchId);
++  return NextResponse.json({ tables });
++}
++
++export async function POST(req: Request) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.GESTION_MESAS))) {
++    return NextResponse.json({ error: "Tu plan no incluye Gestión de mesas" }, { status: 403 });
++  }
++  if (!hasPermission(ctx.permissions, PERMISSIONS.TABLES_MANAGE)) {
++    return NextResponse.json({ error: "No tienes permiso para crear mesas" }, { status: 403 });
++  }
++
++  const branchId = await resolveBranchId(ctx, companyId);
++  if (!branchId) {
++    return NextResponse.json({ error: "La empresa no tiene sucursales configuradas" }, { status: 400 });
++  }
++
++  const body = await req.json();
++  const parsed = createTableSchema.safeParse(body);
++  if (!parsed.success) {
++    return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  }
++
++  try {
++    const table = await tablesService.create(companyId, branchId, parsed.data);
++    return NextResponse.json({ table }, { status: 201 });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo crear la mesa";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/plataforma/companies/companies-table.tsx b/src/app/plataforma/companies/companies-table.tsx
+index e11de03..21c6010 100644
+--- a/src/app/plataforma/companies/companies-table.tsx
++++ b/src/app/plataforma/companies/companies-table.tsx
+@@ -5,6 +5,8 @@ import { Button, Card, StatusBadge } from "@/components/ui";
+ import { Modal, Field, inputClass } from "@/components/ui/modal";
+ import { formatMxn } from "@/lib/format";
+ import { FEATURE_CATALOG } from "@/lib/plan-features";
++// FEATURE_CATALOG ahora es [{ key, label, status }] — customFeatures y
++// plan.features guardan `key`, la UI muestra `label`.
+ 
+ type Plan = { id: string; name: string; priceMxn: string; features: string[] | null };
+ type Role = { id: string; name: string };
+@@ -416,14 +418,23 @@ function ChangePlanModal({
+             <Field label="Features personalizadas para esta empresa">
+               <div className="grid grid-cols-1 gap-1.5 max-h-56 overflow-y-auto border border-line rounded-md p-3">
+                 {FEATURE_CATALOG.map((feature) => (
+-                  <label key={feature} className="flex items-start gap-2 text-sm cursor-pointer">
++                  <label key={feature.key} className="flex items-start gap-2 text-sm cursor-pointer">
+                     <input
+                       type="checkbox"
+                       className="mt-0.5"
+-                      checked={customFeatures.has(feature)}
+-                      onChange={() => toggleFeature(feature)}
++                      checked={customFeatures.has(feature.key)}
++                      onChange={() => toggleFeature(feature.key)}
+                     />
+-                    <span>{feature}</span>
++                    <span className="flex-1">{feature.label}</span>
++                    {feature.status !== "live" && (
++                      <span
++                        className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${
++                          feature.status === "partial" ? "bg-marigold/20 text-marigold-dark" : "bg-ink-100 text-muted"
++                        }`}
++                      >
++                        {feature.status === "partial" ? "parcial" : "sin construir"}
++                      </span>
++                    )}
+                   </label>
+                 ))}
+               </div>
+@@ -436,11 +447,11 @@ function ChangePlanModal({
+                 {FEATURE_CATALOG.map((feature) => {
+                   const included = new Set(selectedPlan.features ?? []);
+                   return (
+-                    <div key={feature} className="flex items-start gap-2">
+-                      <span className={included.has(feature) ? "text-sage" : "text-muted"}>
+-                        {included.has(feature) ? "✓" : "—"}
++                    <div key={feature.key} className="flex items-start gap-2">
++                      <span className={included.has(feature.key) ? "text-sage" : "text-muted"}>
++                        {included.has(feature.key) ? "✓" : "—"}
+                       </span>
+-                      <span className={included.has(feature) ? "text-ink" : "text-muted"}>{feature}</span>
++                      <span className={included.has(feature.key) ? "text-ink" : "text-muted"}>{feature.label}</span>
+                     </div>
+                   );
+                 })}
+diff --git a/src/app/plataforma/plans/plans-client.tsx b/src/app/plataforma/plans/plans-client.tsx
+index bdd6376..62b0d5d 100644
+--- a/src/app/plataforma/plans/plans-client.tsx
++++ b/src/app/plataforma/plans/plans-client.tsx
+@@ -4,7 +4,7 @@ import { useState } from "react";
+ import { Button, Card } from "@/components/ui";
+ import { Modal, Field, inputClass } from "@/components/ui/modal";
+ import { formatMxn } from "@/lib/format";
+-import { FEATURE_CATALOG } from "@/lib/plan-features";
++import { FEATURE_CATALOG, featureLabel, VALID_FEATURE_KEYS } from "@/lib/plan-features";
+ 
+ type Plan = {
+   id: string;
+@@ -28,7 +28,11 @@ export function PlansClient({ initialPlans }: { initialPlans: Plan[] }) {
+   const [editing, setEditing] = useState<Plan | null>(null);
+ 
+ function buildDisplayFeatures(plan: Plan): string[] {
+-  const nonCapacity = (plan.features ?? []).filter((f) => !/sucursal|caja|usuario/i.test(f));
++  // No tocar lo que ya funciona: cualquier string guardado que no sea una
++  // key del catálogo nuevo (ej. las labels viejas de prisma/seed.ts como
++  // "Auditoría" o "Pantalla de cocina (sin impresora)") se muestra tal cual,
++  // sin filtrarlo. Solo las keys nuevas del catálogo se traducen a su label.
++  const nonCapacity = (plan.features ?? []).map((f) => (VALID_FEATURE_KEYS.has(f) ? featureLabel(f) : f));
+ 
+   if (plan.name === "Empresarial") {
+     return ["Multi-sucursal", `Hasta ${plan.maxCashRegisters} cajas`, `Hasta ${plan.maxUsers} usuarios`, ...nonCapacity];
+@@ -91,7 +95,7 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () =>
+   const [maxUsers, setMaxUsers] = useState(String(plan.maxUsers));
+   const [maxCashRegisters, setMaxCashRegisters] = useState(String(plan.maxCashRegisters));
+   const [checkedFeatures, setCheckedFeatures] = useState<Set<string>>(
+-    new Set((plan.features ?? []).filter((f) => (FEATURE_CATALOG as readonly string[]).includes(f)))
++    new Set((plan.features ?? []).filter((f) => VALID_FEATURE_KEYS.has(f)))
+   );
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
+@@ -113,10 +117,11 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () =>
+     // Conserva cualquier feature que ya estuviera guardada y que no forme
+     // parte de este catálogo (por si hay algo custom cargado desde el
+     // seed), y sobreescribe únicamente las del catálogo con lo marcado.
+-    const preservedNonCatalog = (plan.features ?? []).filter(
+-      (f) => !(FEATURE_CATALOG as readonly string[]).includes(f)
+-    );
+-    const features = [...preservedNonCatalog, ...FEATURE_CATALOG.filter((f) => checkedFeatures.has(f))];
++    const preservedNonCatalog = (plan.features ?? []).filter((f) => !VALID_FEATURE_KEYS.has(f));
++    const features = [
++      ...preservedNonCatalog,
++      ...FEATURE_CATALOG.filter((f) => checkedFeatures.has(f.key)).map((f) => f.key),
++    ];
+ 
+     const res = await fetch(`/api/plans/${plan.id}`, {
+       method: "PATCH",
+@@ -157,14 +162,23 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () =>
+         <Field label="Características incluidas">
+           <div className="grid grid-cols-1 gap-1.5 max-h-56 overflow-y-auto border border-line rounded-md p-3">
+             {FEATURE_CATALOG.map((feature) => (
+-              <label key={feature} className="flex items-start gap-2 text-sm cursor-pointer">
++              <label key={feature.key} className="flex items-start gap-2 text-sm cursor-pointer">
+                 <input
+                   type="checkbox"
+                   className="mt-0.5"
+-                  checked={checkedFeatures.has(feature)}
+-                  onChange={() => toggleFeature(feature)}
++                  checked={checkedFeatures.has(feature.key)}
++                  onChange={() => toggleFeature(feature.key)}
+                 />
+-                <span>{feature}</span>
++                <span className="flex-1">{feature.label}</span>
++                {feature.status !== "live" && (
++                  <span
++                    className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${
++                      feature.status === "partial" ? "bg-marigold/20 text-marigold-dark" : "bg-ink-100 text-muted"
++                    }`}
++                  >
++                    {feature.status === "partial" ? "parcial" : "sin construir"}
++                  </span>
++                )}
+               </label>
+             ))}
+           </div>
+diff --git a/src/app/pos/page.tsx b/src/app/pos/page.tsx
+index 496f86a..668db17 100644
+--- a/src/app/pos/page.tsx
++++ b/src/app/pos/page.tsx
+@@ -6,6 +6,9 @@ import { productsService } from "@/modules/products/service";
+ import { hasPermission, PERMISSIONS } from "@/lib/permissions";
+ import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
+ import { cashService } from "@/modules/cash/service";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { tablesService } from "@/modules/tables/service";
+ import { PosClient } from "./pos-client";
+ import Link from "next/link";
+ 
+@@ -42,10 +45,14 @@ export default async function PosPage() {
+ 
+   const activeProducts = products.filter((p: (typeof products)[number]) => p.isActive);
+ 
++  const tablesEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.GESTION_MESAS);
++  const tables = tablesEnabled && branchId ? await tablesService.list(session.user.companyId, branchId) : [];
++
+   return (
+     <PosClient
+       categories={JSON.parse(JSON.stringify(categories.filter((c: (typeof categories)[number]) => c.isActive)))}
+       products={JSON.parse(JSON.stringify(activeProducts))}
++      tables={JSON.parse(JSON.stringify(tables))}
+       userName={session.user.name ?? ""}
+     />
+   );
+diff --git a/src/app/pos/pos-client.tsx b/src/app/pos/pos-client.tsx
+index e032b4c..f42fe40 100644
+--- a/src/app/pos/pos-client.tsx
++++ b/src/app/pos/pos-client.tsx
+@@ -7,6 +7,7 @@ import { formatMxn } from "@/lib/format";
+ type Category = { id: string; name: string };
+ type Product = { id: string; name: string; price: string; categoryId: string };
+ type CartLine = { product: Product; quantity: number };
++type TableOption = { id: string; name: string; status: string };
+ 
+ const PAYMENT_METHODS: { value: "CASH" | "CARD" | "TRANSFER" | "OTHER"; label: string }[] = [
+   { value: "CASH", label: "Efectivo" },
+@@ -18,10 +19,12 @@ const PAYMENT_METHODS: { value: "CASH" | "CARD" | "TRANSFER" | "OTHER"; label: s
+ export function PosClient({
+   categories,
+   products,
++  tables,
+   userName,
+ }: {
+   categories: Category[];
+   products: Product[];
++  tables: TableOption[];
+   userName: string;
+ }) {
+   const [activeCategory, setActiveCategory] = useState<string>(categories[0]?.id ?? "");
+@@ -200,7 +203,15 @@ export function PosClient({
+       </div>
+ 
+       {checkoutOpen && (
+-        <CheckoutModal total={total} discount={safeDiscount} subtotal={subtotal} cart={cart} onClose={() => setCheckoutOpen(false)} onDone={resetSale} />
++        <CheckoutModal
++          total={total}
++          discount={safeDiscount}
++          subtotal={subtotal}
++          cart={cart}
++          tables={tables}
++          onClose={() => setCheckoutOpen(false)}
++          onDone={resetSale}
++        />
+       )}
+     </div>
+   );
+@@ -211,6 +222,7 @@ function CheckoutModal({
+   discount,
+   subtotal,
+   cart,
++  tables,
+   onClose,
+   onDone,
+ }: {
+@@ -218,11 +230,13 @@ function CheckoutModal({
+   discount: number;
+   subtotal: number;
+   cart: CartLine[];
++  tables: TableOption[];
+   onClose: () => void;
+   onDone: () => void;
+ }) {
+   const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER">("CASH");
+   const [cashReceived, setCashReceived] = useState("");
++  const [tableId, setTableId] = useState("");
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
+ 
+@@ -262,6 +276,7 @@ function CheckoutModal({
+           discount,
+           paymentMethod: method,
+           cashReceived: method === "CASH" ? cashReceivedNum : undefined,
++          tableId: tableId || undefined,
+         }),
+       });
+ 
+@@ -521,6 +536,24 @@ function CheckoutModal({
+           </span>
+         </p>
+ 
++        {tables.length > 0 && (
++          <div className="mb-5">
++            <label className="block text-xs text-muted mb-1">Mesa (opcional)</label>
++            <select
++              className="w-full rounded-md border border-line px-3 py-2 text-sm"
++              value={tableId}
++              onChange={(e) => setTableId(e.target.value)}
++            >
++              <option value="">Sin mesa (para llevar / mostrador)</option>
++              {tables.map((t) => (
++                <option key={t.id} value={t.id}>
++                  {t.name}
++                </option>
++              ))}
++            </select>
++          </div>
++        )}
++
+         <div className="grid grid-cols-2 gap-2 mb-5">
+           <button
+             type="button"
+diff --git a/src/lib/feature-gating.ts b/src/lib/feature-gating.ts
+new file mode 100644
+index 0000000..49fb2b0
+--- /dev/null
++++ b/src/lib/feature-gating.ts
+@@ -0,0 +1,40 @@
++import { prisma } from "@/lib/prisma";
++import { VALID_FEATURE_KEYS } from "@/lib/plan-features";
++
++/**
++ * Punto único de verdad para "¿esta empresa tiene esta feature de plan?".
++ * Mismo patrón que hasPermission()/PERMISSIONS en src/lib/permissions.ts,
++ * pero para features de plan en vez de permisos de rol.
++ *
++ * Resolución:
++ *  - Si la empresa tiene useCustomPlan=true en su Subscription, se usa
++ *    Subscription.customFeatures (negociado por empresa).
++ *  - Si no, se usa Plan.features del plan base contratado.
++ *  - SUPER_ADMIN nunca pasa por aquí (no tiene companyId).
++ *
++ * No cachea entre requests a propósito: un cambio de plan/feature desde
++ * /plataforma debe reflejarse de inmediato en el siguiente request del
++ * tenant, sin esperar a que expire un cache.
++ */
++export async function getEffectiveFeatureKeys(companyId: string): Promise<Set<string>> {
++  const subscription = await prisma.subscription.findUnique({
++    where: { companyId },
++    include: { plan: true },
++  });
++
++  if (!subscription) return new Set();
++
++  const raw = subscription.useCustomPlan
++    ? subscription.customFeatures
++    : ((subscription.plan.features as string[] | null) ?? []);
++
++  // Filtra cualquier valor que no sea una key válida del catálogo actual
++  // (por ejemplo, labels viejos en español que no se hayan migrado, o
++  // features que se hayan retirado del catálogo).
++  return new Set(raw.filter((key: string) => VALID_FEATURE_KEYS.has(key)));
++}
++
++export async function hasFeature(companyId: string, featureKey: string): Promise<boolean> {
++  const keys = await getEffectiveFeatureKeys(companyId);
++  return keys.has(featureKey);
++}
+diff --git a/src/lib/permissions.ts b/src/lib/permissions.ts
+index ebf4ae9..f366bc4 100644
+--- a/src/lib/permissions.ts
++++ b/src/lib/permissions.ts
+@@ -20,6 +20,7 @@ export const PERMISSIONS = {
+   REPORTS_VIEW: "reports.view",
+   SETTINGS_MANAGE: "settings.manage",
+   HARDWARE_FINANCING_MANAGE: "hardware_financing.manage", // solo SUPER_ADMIN: crear/liquidar/reestructurar financiamientos
++  TABLES_MANAGE: "tables.manage", // requiere además la feature de plan "gestion_mesas" — ver hasFeature()
+ } as const;
+ 
+ export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
+@@ -41,6 +42,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, PermissionKey[]> = {
+     PERMISSIONS.INVENTORY_MANAGE,
+     PERMISSIONS.REPORTS_VIEW,
+     PERMISSIONS.SETTINGS_MANAGE,
++    PERMISSIONS.TABLES_MANAGE,
+   ],
+   GERENTE: [
+     PERMISSIONS.PRODUCTS_MANAGE,
+@@ -53,6 +55,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, PermissionKey[]> = {
+     PERMISSIONS.CASH_MOVEMENT,
+     PERMISSIONS.INVENTORY_MANAGE,
+     PERMISSIONS.REPORTS_VIEW,
++    PERMISSIONS.TABLES_MANAGE,
+   ],
+   CAJERO: [
+     PERMISSIONS.SALES_CREATE,
+@@ -60,8 +63,9 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, PermissionKey[]> = {
+     PERMISSIONS.CASH_OPEN,
+     PERMISSIONS.CASH_CLOSE,
+     PERMISSIONS.CASH_MOVEMENT,
++    PERMISSIONS.TABLES_MANAGE,
+   ],
+-  MESERO: [PERMISSIONS.SALES_CREATE, PERMISSIONS.SALES_VIEW],
++  MESERO: [PERMISSIONS.SALES_CREATE, PERMISSIONS.SALES_VIEW, PERMISSIONS.TABLES_MANAGE],
+ };
+ 
+ export function hasPermission(
+diff --git a/src/lib/plan-features.ts b/src/lib/plan-features.ts
+index 70209a2..ba9c0b5 100644
+--- a/src/lib/plan-features.ts
++++ b/src/lib/plan-features.ts
+@@ -1,31 +1,65 @@
+ /**
+- * Catálogo compartido de features editables por plan. No incluye
++ * Catálogo central de features editables por plan. No incluye
+  * sucursales/usuarios/cajas — esos se editan como números aparte y se
+  * renderizan dinámicamente en buildDisplayFeatures(). Usado tanto en el
+  * editor de planes (/plataforma/plans) como en la vista de features por
+- * empresa (/plataforma/companies).
++ * empresa (/plataforma/companies), y leído por hasFeature() (ver
++ * feature-gating.ts) para gatear funcionalidad real en el lado del tenant.
++ *
++ * Cada feature tiene una `key` estable (no cambia aunque se traduzca o
++ * reformule el texto) — es lo que se guarda en Plan.features y
++ * Subscription.customFeatures, y lo que hasFeature() compara. `label` es
++ * solo para mostrar en la UI del admin, nunca se compara en código.
++ *
++ * `status`:
++ *  - "live": hay un módulo real detrás. hasFeature() lo puede gatear hoy.
++ *  - "partial": existe algo de código pero no una UI/flujo completo para
++ *    el tenant todavía. hasFeature() funciona, pero no hay nada que gatear
++ *    en el lado del tenant hasta que se construya esa pantalla/endpoint.
++ *  - "planned": no existe ningún código funcional todavía. Se muestra en
++ *    el checklist como referencia comercial, pero no se gatea nada.
+  */
+-export const FEATURE_CATALOG = [
+-  "Menús por turno/hora",
+-  "Gestión de mesas",
+-  "Comandas digitales para cocina",
+-  "Automatizaciones avanzadas",
+-  "Integración con delivery (Uber Eats, DoorDash, Rappi)",
+-  "WhatsApp Business",
+-  "Pagos integrados (tarjetas desde el POS)",
+-  "API básica",
+-  "Conexión con Contpaq/SAT",
+-  "Dashboard avanzado (15+ gráficos)",
+-  "Control de acceso por rol",
+-  "Auditoría de cajas",
+-  "Soporte prioritario (4h)",
+-  "Inventario compartido entre sucursales",
+-  "Transferencias automáticas entre sucursales",
+-  "Costeo por receta",
+-  "Dashboard empresarial (30+ métricas)",
+-  "Reportes consolidados",
+-  "Proyecciones con IA básica",
+-  "Auditoría avanzada",
+-  "Multi-moneda",
+-  "Soporte 24/7 con gestor de cuenta dedicado",
+-] as const;
++export type FeatureStatus = "live" | "partial" | "planned";
++
++export interface FeatureDef {
++  key: string;
++  label: string;
++  status: FeatureStatus;
++}
++
++export const FEATURE_CATALOG: FeatureDef[] = [
++  { key: "menus_por_turno", label: "Menús por turno/hora", status: "planned" },
++  { key: "gestion_mesas", label: "Gestión de mesas", status: "live" },
++  { key: "comandas_cocina", label: "Comandas digitales para cocina", status: "live" },
++  { key: "automatizaciones_avanzadas", label: "Automatizaciones avanzadas", status: "planned" },
++  { key: "integracion_delivery", label: "Integración con delivery (Uber Eats, DoorDash, Rappi)", status: "planned" },
++  { key: "whatsapp_business", label: "WhatsApp Business", status: "partial" },
++  { key: "pagos_integrados", label: "Pagos integrados (tarjetas desde el POS)", status: "partial" },
++  { key: "api_basica", label: "API básica", status: "planned" },
++  { key: "conexion_contpaq_sat", label: "Conexión con Contpaq/SAT", status: "planned" },
++  { key: "dashboard_avanzado", label: "Dashboard avanzado (15+ gráficos)", status: "partial" },
++  { key: "control_acceso_rol", label: "Control de acceso por rol", status: "live" },
++  { key: "auditoria_cajas", label: "Auditoría de cajas", status: "partial" },
++  { key: "soporte_prioritario", label: "Soporte prioritario (4h)", status: "planned" },
++  { key: "inventario_compartido", label: "Inventario compartido entre sucursales", status: "planned" },
++  { key: "transferencias_automaticas", label: "Transferencias automáticas entre sucursales", status: "planned" },
++  { key: "costeo_receta", label: "Costeo por receta", status: "planned" },
++  { key: "dashboard_empresarial", label: "Dashboard empresarial (30+ métricas)", status: "planned" },
++  { key: "reportes_consolidados", label: "Reportes consolidados", status: "planned" },
++  { key: "proyecciones_ia", label: "Proyecciones con IA básica", status: "planned" },
++  { key: "auditoria_avanzada", label: "Auditoría avanzada", status: "partial" },
++  { key: "multi_moneda", label: "Multi-moneda", status: "planned" },
++  { key: "soporte_247", label: "Soporte 24/7 con gestor de cuenta dedicado", status: "planned" },
++];
++
++export const FEATURE_KEYS = FEATURE_CATALOG.reduce(
++  (acc, f) => ({ ...acc, [f.key.toUpperCase()]: f.key }),
++  {} as Record<string, string>
++);
++
++/** Set de keys válidas, usado para filtrar cualquier valor legacy/basura guardado. */
++export const VALID_FEATURE_KEYS = new Set(FEATURE_CATALOG.map((f) => f.key));
++
++export function featureLabel(key: string): string {
++  return FEATURE_CATALOG.find((f) => f.key === key)?.label ?? key;
++}
+diff --git a/src/modules/sales/service.ts b/src/modules/sales/service.ts
+index eced707..0552c5d 100644
+--- a/src/modules/sales/service.ts
++++ b/src/modules/sales/service.ts
+@@ -13,6 +13,7 @@ export const saleSchema = z.object({
+   discount: z.coerce.number().min(0).default(0),
+   paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER"]),
+   cashReceived: z.coerce.number().min(0).optional(),
++  tableId: z.string().optional(),
+ });
+ 
+ export type SaleInput = z.infer<typeof saleSchema>;
+@@ -71,6 +72,7 @@ export const salesService = {
+         companyId,
+         branchId,
+         userId,
++        tableId: input.tableId ?? null,
+         status: "PENDING",
+         subtotal,
+         discount,
+@@ -89,6 +91,15 @@ export const salesService = {
+       include: { items: { include: { product: true } }, payments: true },
+     });
+ 
++    // Si la venta viene ligada a una mesa, la marca como Ocupada
++    // automáticamente (el mesero ya no tiene que hacerlo a mano).
++    if (input.tableId) {
++      await prisma.table.updateMany({
++        where: { id: input.tableId, companyId },
++        data: { status: "OCUPADA" },
++      });
++    }
++
+     // Descuenta inventario para los productos que lo controlan (no bloquea
+     // la venta si algo falla aquí; la venta ya quedó registrada).
+     const { inventoryService } = await import("@/modules/inventory/service");
+diff --git a/src/modules/tables/service.ts b/src/modules/tables/service.ts
+new file mode 100644
+index 0000000..5dbb8e0
+--- /dev/null
++++ b/src/modules/tables/service.ts
+@@ -0,0 +1,64 @@
++import { prisma } from "@/lib/prisma";
++import { z } from "zod";
++
++const NEXT_STATUS: Record<string, string> = {
++  LIBRE: "OCUPADA",
++  OCUPADA: "CUENTA",
++  CUENTA: "LIMPIEZA",
++  LIMPIEZA: "LIBRE",
++};
++
++export const createTableSchema = z.object({
++  name: z.string().min(1, "El nombre de la mesa es requerido").max(60),
++  capacity: z.coerce.number().int().positive().optional(),
++});
++
++export const updateTableSchema = z.object({
++  name: z.string().min(1).max(60).optional(),
++  capacity: z.coerce.number().int().positive().nullable().optional(),
++  status: z.enum(["LIBRE", "OCUPADA", "CUENTA", "LIMPIEZA"]).optional(),
++  isActive: z.boolean().optional(),
++});
++
++export const tablesService = {
++  async list(companyId: string, branchId: string) {
++    return prisma.table.findMany({
++      where: { companyId, branchId, isActive: true },
++      orderBy: { name: "asc" },
++    });
++  },
++
++  async create(companyId: string, branchId: string, input: z.infer<typeof createTableSchema>) {
++    return prisma.table.create({
++      data: { companyId, branchId, name: input.name, capacity: input.capacity ?? null },
++    });
++  },
++
++  async update(companyId: string, tableId: string, input: z.infer<typeof updateTableSchema>) {
++    const table = await prisma.table.findFirst({ where: { id: tableId, companyId } });
++    if (!table) throw new Error("Mesa no encontrada");
++
++    return prisma.table.update({
++      where: { id: tableId },
++      data: input,
++    });
++  },
++
++  /** Avanza la mesa al siguiente estado del ciclo: Libre → Ocupada → Cuenta → Limpieza → Libre. */
++  async advanceStatus(companyId: string, tableId: string) {
++    const table = await prisma.table.findFirst({ where: { id: tableId, companyId } });
++    if (!table) throw new Error("Mesa no encontrada");
++
++    const next = NEXT_STATUS[table.status];
++    return prisma.table.update({ where: { id: tableId }, data: { status: next as never } });
++  },
++
++  async remove(companyId: string, tableId: string) {
++    const table = await prisma.table.findFirst({ where: { id: tableId, companyId } });
++    if (!table) throw new Error("Mesa no encontrada");
++
++    // Soft delete: si la mesa ya tiene órdenes asociadas, borrarla de verdad
++    // rompería el historial de ventas. Se desactiva en vez de eliminarse.
++    return prisma.table.update({ where: { id: tableId }, data: { isActive: false } });
++  },
++};
+-- 
+2.43.0
+

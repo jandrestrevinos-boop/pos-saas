@@ -11,7 +11,18 @@ const NEXT_STATUS: Record<string, string> = {
 export const kitchenService = {
   async listActive(branchId: string) {
     return prisma.order.findMany({
-      where: { branchId, status: { in: [...ACTIVE_STATUSES] } },
+      where: {
+        branchId,
+        status: { in: [...ACTIVE_STATUSES] },
+        // No manda a cocina una orden de Mercado Pago cuyo cobro todavía no
+        // se confirma — evita que se empiece a preparar algo que el cliente
+        // podría no llegar a pagar. No afecta CASH/CARD/TRANSFER/OTHER,
+        // que siempre nacen ya aprobados (ver Payment.status default).
+        payments: { none: { method: "MERCADOPAGO", status: "PENDING" } },
+        // Una mesa recién abierta (Caja tipo Mesa) crea la orden antes de
+        // tener productos — no debe aparecer en cocina hasta la primera ronda.
+        items: { some: {} },
+      },
       include: {
         items: { include: { product: true } },
         user: { select: { name: true } },

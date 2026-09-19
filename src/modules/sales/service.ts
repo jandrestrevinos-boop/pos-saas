@@ -1,19 +1,33 @@
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
 
-export const saleSchema = z.object({
-  items: z
-    .array(
-      z.object({
-        productId: z.string().min(1),
-        quantity: z.coerce.number().int().positive(),
-      })
-    )
-    .min(1, "El carrito está vacío"),
-  discount: z.coerce.number().min(0).default(0),
-  paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER"]),
-  cashReceived: z.coerce.number().min(0).optional(),
-});
+export const saleSchema = z
+  .object({
+    items: z
+      .array(
+        z.object({
+          productId: z.string().min(1),
+          quantity: z.coerce.number().int().positive(),
+        })
+      )
+      .min(1, "El carrito está vacío"),
+    discount: z.coerce.number().min(0).default(0),
+    paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO"]),
+    cashReceived: z.coerce.number().min(0).optional(),
+    tableId: z.string().optional(),
+    orderType: z.enum(["COMER_AQUI", "PARA_LLEVAR", "DOMICILIO"]).default("COMER_AQUI"),
+    notes: z.string().max(500).optional(),
+    deliveryAddress: z.string().max(500).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.orderType === "DOMICILIO" && !data.deliveryAddress?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "La dirección es requerida para pedidos a domicilio",
+        path: ["deliveryAddress"],
+      });
+    }
+  });
 
 export type SaleInput = z.infer<typeof saleSchema>;
 
@@ -71,7 +85,11 @@ export const salesService = {
         companyId,
         branchId,
         userId,
+        tableId: input.tableId ?? null,
         status: "PENDING",
+        orderType: input.orderType,
+        notes: input.notes?.trim() || null,
+        deliveryAddress: input.orderType === "DOMICILIO" ? input.deliveryAddress?.trim() : null,
         subtotal,
         discount,
         tax: 0,
@@ -80,6 +98,7 @@ export const salesService = {
         payments: {
           create: {
             method: input.paymentMethod,
+            status: input.paymentMethod === "MERCADOPAGO" ? "PENDING" : "APPROVED",
             amount: total,
             cashReceived: input.cashReceived,
             change,
@@ -89,17 +108,48 @@ export const salesService = {
       include: { items: { include: { product: true } }, payments: true },
     });
 
-    // Descuenta inventario para los productos que lo controlan (no bloquea
-    // la venta si algo falla aquí; la venta ya quedó registrada).
-    const { inventoryService } = await import("@/modules/inventory/service");
-    try {
-      await inventoryService.deductForSale(branchId, userId, input.items);
-    } catch {
-      // El inventario es informativo respecto a la venta; un fallo aquí
-      // no debe revertir un cobro ya realizado al cliente.
+    // Si la venta viene ligada a una mesa, la marca como Ocupada
+    // automáticamente (el mesero ya no tiene que hacerlo a mano).
+    if (input.tableId) {
+      await prisma.table.updateMany({
+        where: { id: input.tableId, companyId },
+        data: { status: "OCUPADA" },
+      });
+    }
+
+    // Para Mercado Pago el cobro todavía no se ha confirmado — el
+    // inventario se descuenta hasta que el webhook confirme el pago
+    // (finalizeApprovedOrder), para no descontar stock de un cobro que
+    // termine rechazado o abandonado.
+    if (input.paymentMethod !== "MERCADOPAGO") {
+      const { inventoryService } = await import("@/modules/inventory/service");
+      try {
+        await inventoryService.deductForSale(branchId, userId, input.items);
+      } catch {
+        // El inventario es informativo respecto a la venta; un fallo aquí
+        // no debe revertir un cobro ya realizado al cliente.
+      }
     }
 
     return order;
+  },
+
+  /** Se llama desde el webhook de Mercado Pago cuando un pago queda aprobado: descuenta el inventario que se difirió en create(). */
+  async finalizeApprovedOrder(orderId: string) {
+    const order = await prisma.order.findUnique({ where: { id: orderId }, include: { items: true } });
+    if (!order) return;
+
+    const { inventoryService } = await import("@/modules/inventory/service");
+    type MinimalOrderItem = { productId: string; quantity: number };
+    try {
+      await inventoryService.deductForSale(
+        order.branchId,
+        order.userId,
+        (order.items as MinimalOrderItem[]).map((i) => ({ productId: i.productId, quantity: i.quantity }))
+      );
+    } catch {
+      // Igual que en create(): el inventario no debe bloquear que el pago quede confirmado.
+    }
   },
 
   async listToday(companyId: string, branchId?: string) {

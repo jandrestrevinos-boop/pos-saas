@@ -1,12 +1,14 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { formatMxn } from "@/lib/format";
 
 type Category = { id: string; name: string };
 type Product = { id: string; name: string; price: string; categoryId: string };
 type CartLine = { product: Product; quantity: number };
+type TableOption = { id: string; name: string; status: string };
 
 const PAYMENT_METHODS: { value: "CASH" | "CARD" | "TRANSFER" | "OTHER"; label: string }[] = [
   { value: "CASH", label: "Efectivo" },
@@ -15,19 +17,91 @@ const PAYMENT_METHODS: { value: "CASH" | "CARD" | "TRANSFER" | "OTHER"; label: s
   { value: "OTHER", label: "Otro" },
 ];
 
-export function PosClient({
+export function PosClient(props: {
+  categories: Category[];
+  products: Product[];
+  tables: TableOption[];
+  mercadoPagoEnabled: boolean;
+  userName: string;
+}) {
+  return (
+    <Suspense fallback={<div className="h-screen flex items-center justify-center text-muted text-sm">Cargando...</div>}>
+      <PosClientInner {...props} />
+    </Suspense>
+  );
+}
+
+function PosClientInner({
   categories,
   products,
+  tables,
+  mercadoPagoEnabled,
   userName,
 }: {
   categories: Category[];
   products: Product[];
+  tables: TableOption[];
+  mercadoPagoEnabled: boolean;
   userName: string;
 }) {
   const [activeCategory, setActiveCategory] = useState<string>(categories[0]?.id ?? "");
   const [cart, setCart] = useState<CartLine[]>([]);
   const [discount, setDiscount] = useState(0);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
+
+  // -----------------------------
+  // MODO MESA (Caja tipo Mesa): llegamos aquí desde /tables con
+  // ?tableId=X — en vez de cobrar de una vez, cada "Enviar a cocina" manda
+  // una ronda a la cuenta abierta de esa mesa, sin pedir pago todavía.
+  // -----------------------------
+  const searchParams = useSearchParams();
+  const tableIdParam = searchParams.get("tableId");
+  const tableInfo = tableIdParam ? tables.find((t) => t.id === tableIdParam) : undefined;
+  const [openOrderId, setOpenOrderId] = useState<string | null>(null);
+  const [tableRunningTotal, setTableRunningTotal] = useState(0);
+  const [sendingRound, setSendingRound] = useState(false);
+  const [roundError, setRoundError] = useState("");
+  const [roundSent, setRoundSent] = useState(false);
+
+  useEffect(() => {
+    if (!tableIdParam) return;
+    (async () => {
+      let res = await fetch(`/api/tables/${tableIdParam}/order`);
+      let data = await res.json();
+      if (!data.order) {
+        res = await fetch(`/api/tables/${tableIdParam}/open`, { method: "POST" });
+        data = await res.json();
+      }
+      if (data.order) {
+        setOpenOrderId(data.order.id);
+        setTableRunningTotal(Number(data.order.total));
+      }
+    })();
+  }, [tableIdParam]);
+
+  async function sendRound() {
+    if (!openOrderId || cart.length === 0) return;
+    setSendingRound(true);
+    setRoundError("");
+    try {
+      const res = await fetch(`/api/orders/${openOrderId}/items`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: cart.map((l) => ({ productId: l.product.id, quantity: l.quantity })) }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "No se pudo mandar la ronda a cocina");
+      setTableRunningTotal(Number(data.order.total));
+      setCart([]);
+      setDiscount(0);
+      setRoundSent(true);
+      setTimeout(() => setRoundSent(false), 2500);
+    } catch (err) {
+      setRoundError(err instanceof Error ? err.message : "No se pudo mandar la ronda a cocina");
+    } finally {
+      setSendingRound(false);
+    }
+  }
 
   const visibleProducts = useMemo(
     () => products.filter((p) => p.categoryId === activeCategory),
@@ -71,8 +145,20 @@ export function PosClient({
             ← Salir
           </Link>
           <p className="font-display text-lg font-semibold">Punto de Venta</p>
+          {tableInfo && (
+            <span className="text-xs bg-ember/15 text-ember-dark px-2 py-1 rounded-full font-medium">
+              Mesa {tableInfo.name} · cuenta abierta: {formatMxn(tableRunningTotal)}
+            </span>
+          )}
         </div>
-        <p className="text-sm text-muted">{userName}</p>
+        <div className="flex items-center gap-3">
+          {tableInfo && (
+            <Link href="/tables" className="text-sm text-muted hover:text-ink underline">
+              Volver a Mesas
+            </Link>
+          )}
+          <p className="text-sm text-muted">{userName}</p>
+        </div>
       </header>
 
       <div className="flex-1 flex overflow-hidden">
@@ -179,6 +265,8 @@ export function PosClient({
               <span className="font-display text-xl font-semibold">Total</span>
               <span className="font-display text-2xl font-semibold">{formatMxn(total)}</span>
             </div>
+            {roundError && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-3">{roundError}</p>}
+            {roundSent && <p className="text-sm text-sage bg-sage/10 rounded-md px-3 py-2 mb-3">Ronda mandada a cocina.</p>}
             <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={resetSale}
@@ -187,20 +275,38 @@ export function PosClient({
               >
                 Cancelar
               </button>
-              <button
-                onClick={() => setCheckoutOpen(true)}
-                disabled={cart.length === 0}
-                className="rounded-md bg-ember text-white py-3 text-sm font-medium disabled:opacity-40"
-              >
-                Cobrar
-              </button>
+              {tableInfo ? (
+                <button
+                  onClick={sendRound}
+                  disabled={cart.length === 0 || sendingRound || !openOrderId}
+                  className="rounded-md bg-ember text-white py-3 text-sm font-medium disabled:opacity-40"
+                >
+                  {sendingRound ? "Mandando..." : "Enviar a cocina"}
+                </button>
+              ) : (
+                <button
+                  onClick={() => setCheckoutOpen(true)}
+                  disabled={cart.length === 0}
+                  className="rounded-md bg-ember text-white py-3 text-sm font-medium disabled:opacity-40"
+                >
+                  Cobrar
+                </button>
+              )}
             </div>
           </div>
         </aside>
       </div>
 
-      {checkoutOpen && (
-        <CheckoutModal total={total} discount={safeDiscount} subtotal={subtotal} cart={cart} onClose={() => setCheckoutOpen(false)} onDone={resetSale} />
+      {checkoutOpen && !tableInfo && (
+        <CheckoutModal
+          total={total}
+          discount={safeDiscount}
+          subtotal={subtotal}
+          cart={cart}
+          mercadoPagoEnabled={mercadoPagoEnabled}
+          onClose={() => setCheckoutOpen(false)}
+          onDone={resetSale}
+        />
       )}
     </div>
   );
@@ -211,6 +317,7 @@ function CheckoutModal({
   discount,
   subtotal,
   cart,
+  mercadoPagoEnabled,
   onClose,
   onDone,
 }: {
@@ -218,11 +325,15 @@ function CheckoutModal({
   discount: number;
   subtotal: number;
   cart: CartLine[];
+  mercadoPagoEnabled: boolean;
   onClose: () => void;
   onDone: () => void;
 }) {
-  const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER">("CASH");
+  const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO">("CASH");
   const [cashReceived, setCashReceived] = useState("");
+  const [orderType, setOrderType] = useState<"COMER_AQUI" | "PARA_LLEVAR" | "DOMICILIO">("COMER_AQUI");
+  const [notes, setNotes] = useState("");
+  const [deliveryAddress, setDeliveryAddress] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -236,6 +347,13 @@ function CheckoutModal({
     cashReceived: number;
     change: number;
   } | null>(null);
+  const [pendingMpCheckout, setPendingMpCheckout] = useState<{
+    orderId: string;
+    orderNumber: number;
+    checkoutUrl: string;
+  } | null>(null);
+  const [checkingMpStatus, setCheckingMpStatus] = useState(false);
+  const [mpStatusMessage, setMpStatusMessage] = useState("");
 
   const cashReceivedNum = parseFloat(cashReceived) || 0;
   const change = cashReceivedNum - total;
@@ -262,6 +380,9 @@ function CheckoutModal({
           discount,
           paymentMethod: method,
           cashReceived: method === "CASH" ? cashReceivedNum : undefined,
+          orderType,
+          notes: notes.trim() || undefined,
+          deliveryAddress: orderType === "DOMICILIO" ? deliveryAddress.trim() : undefined,
         }),
       });
 
@@ -269,6 +390,25 @@ function CheckoutModal({
 
       if (!res.ok) {
         setError(data.error ?? "No se pudo registrar la venta");
+        return;
+      }
+
+      if (method === "MERCADOPAGO") {
+        const prefRes = await fetch("/api/mercadopago/preference", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ orderId: data.order.id }),
+        });
+        const prefData = await prefRes.json();
+        if (!prefRes.ok) {
+          setError(prefData.error ?? "No se pudo generar el cobro de Mercado Pago");
+          return;
+        }
+        setPendingMpCheckout({
+          orderId: data.order.id,
+          orderNumber: data.order.orderNumber,
+          checkoutUrl: prefData.checkoutUrl,
+        });
         return;
       }
 
@@ -291,6 +431,80 @@ function CheckoutModal({
     } finally {
       setSaving(false);
     }
+  }
+
+  async function checkMpStatus() {
+    if (!pendingMpCheckout) return;
+    setCheckingMpStatus(true);
+    setMpStatusMessage("");
+    try {
+      const res = await fetch(`/api/orders/${pendingMpCheckout.orderId}`);
+      const data = await res.json();
+      const payment = data.order?.payments?.find((p: { method: string }) => p.method === "MERCADOPAGO");
+
+      if (payment?.status === "APPROVED") {
+        setCompletedOrder({
+          orderNumber: pendingMpCheckout.orderNumber,
+          items: cart.map((l) => ({ quantity: l.quantity, name: l.product.name, unitPrice: Number(l.product.price) })),
+          subtotal,
+          discount,
+          total,
+          paymentMethod: "MERCADOPAGO",
+          cashReceived: total,
+          change: 0,
+        });
+        setPendingMpCheckout(null);
+      } else if (payment?.status === "REJECTED" || payment?.status === "CANCELLED") {
+        setMpStatusMessage("El pago fue rechazado o cancelado. Puedes cerrar esta ventana e intentar de nuevo.");
+      } else {
+        setMpStatusMessage("Todavía no se detecta el pago. Si el cliente ya pagó, espera unos segundos y vuelve a verificar.");
+      }
+    } catch {
+      setMpStatusMessage("No se pudo verificar el estatus. Intenta de nuevo.");
+    } finally {
+      setCheckingMpStatus(false);
+    }
+  }
+
+  // -----------------------------
+  // COBRO DE MERCADO PAGO EN ESPERA
+  // -----------------------------
+  if (pendingMpCheckout) {
+    return (
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="bg-white rounded-lg p-6 max-w-sm w-full text-center">
+          <p className="font-display text-xl font-semibold mb-2">Cobro con Mercado Pago</p>
+          <p className="text-muted text-sm mb-5">
+            Abre el link para que el cliente pague, o compártelo/escanéalo. Cuando confirme el pago, verifica aquí.
+          </p>
+          <a
+            href={pendingMpCheckout.checkoutUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="block w-full rounded-md bg-ember text-white px-4 py-3 text-sm font-medium mb-3"
+          >
+            Abrir cobro en Mercado Pago
+          </a>
+          <button
+            onClick={checkMpStatus}
+            disabled={checkingMpStatus}
+            className="w-full rounded-md border border-line px-4 py-3 text-sm font-medium mb-3 disabled:opacity-50"
+          >
+            {checkingMpStatus ? "Verificando..." : "Ya pagó — verificar"}
+          </button>
+          {mpStatusMessage && <p className="text-xs text-muted mb-3">{mpStatusMessage}</p>}
+          <button
+            onClick={() => {
+              setPendingMpCheckout(null);
+              onClose();
+            }}
+            className="text-xs text-muted underline"
+          >
+            Cancelar y cerrar
+          </button>
+        </div>
+      </div>
+    );
   }
 
   // -----------------------------
@@ -521,6 +735,54 @@ function CheckoutModal({
           </span>
         </p>
 
+        <div className="mb-5">
+          <label className="block text-xs text-muted mb-1">Tipo de pedido</label>
+          <div className="grid grid-cols-3 gap-2">
+            {(
+              [
+                { value: "COMER_AQUI", label: "Comer aquí" },
+                { value: "PARA_LLEVAR", label: "Para llevar" },
+                { value: "DOMICILIO", label: "A domicilio" },
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => setOrderType(opt.value)}
+                className={`rounded-md border py-2 text-xs font-medium ${
+                  orderType === opt.value ? "bg-ember text-white border-ember" : "border-line"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {orderType === "DOMICILIO" && (
+          <div className="mb-5">
+            <label className="block text-xs text-muted mb-1">Dirección de envío</label>
+            <textarea
+              className="w-full rounded-md border border-line px-3 py-2 text-sm"
+              rows={2}
+              placeholder="Calle, número, colonia, referencias..."
+              value={deliveryAddress}
+              onChange={(e) => setDeliveryAddress(e.target.value)}
+            />
+          </div>
+        )}
+
+        <div className="mb-5">
+          <label className="block text-xs text-muted mb-1">Comentarios (opcional)</label>
+          <textarea
+            className="w-full rounded-md border border-line px-3 py-2 text-sm"
+            rows={2}
+            placeholder="Sin cebolla, alergia a mariscos, etc."
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+          />
+        </div>
+
         <div className="grid grid-cols-2 gap-2 mb-5">
           <button
             type="button"
@@ -569,6 +831,20 @@ function CheckoutModal({
           >
             Otro
           </button>
+
+          {mercadoPagoEnabled && (
+            <button
+              type="button"
+              onClick={() => setMethod("MERCADOPAGO")}
+              className={`col-span-2 rounded-md border py-3 text-sm font-medium ${
+                method === "MERCADOPAGO"
+                  ? "bg-ember text-white border-ember"
+                  : "border-line"
+              }`}
+            >
+              Mercado Pago (link/QR)
+            </button>
+          )}
         </div>
 
         {method === "CASH" && (

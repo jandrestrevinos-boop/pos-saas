@@ -20,6 +20,7 @@ export const PERMISSIONS = {
   REPORTS_VIEW: "reports.view",
   SETTINGS_MANAGE: "settings.manage",
   HARDWARE_FINANCING_MANAGE: "hardware_financing.manage", // solo SUPER_ADMIN: crear/liquidar/reestructurar financiamientos
+  TABLES_MANAGE: "tables.manage", // requiere además la feature de plan "gestion_mesas" — ver hasFeature()
 } as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -41,6 +42,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, PermissionKey[]> = {
     PERMISSIONS.INVENTORY_MANAGE,
     PERMISSIONS.REPORTS_VIEW,
     PERMISSIONS.SETTINGS_MANAGE,
+    PERMISSIONS.TABLES_MANAGE,
   ],
   GERENTE: [
     PERMISSIONS.PRODUCTS_MANAGE,
@@ -53,6 +55,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, PermissionKey[]> = {
     PERMISSIONS.CASH_MOVEMENT,
     PERMISSIONS.INVENTORY_MANAGE,
     PERMISSIONS.REPORTS_VIEW,
+    PERMISSIONS.TABLES_MANAGE,
   ],
   CAJERO: [
     PERMISSIONS.SALES_CREATE,
@@ -60,8 +63,9 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, PermissionKey[]> = {
     PERMISSIONS.CASH_OPEN,
     PERMISSIONS.CASH_CLOSE,
     PERMISSIONS.CASH_MOVEMENT,
+    PERMISSIONS.TABLES_MANAGE,
   ],
-  MESERO: [PERMISSIONS.SALES_CREATE, PERMISSIONS.SALES_VIEW],
+  MESERO: [PERMISSIONS.SALES_CREATE, PERMISSIONS.SALES_VIEW, PERMISSIONS.TABLES_MANAGE],
 };
 
 export function hasPermission(
