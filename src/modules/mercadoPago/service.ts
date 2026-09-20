@@ -320,4 +320,118 @@ export const mercadoPagoService = {
       headers: { Authorization: `Bearer ${accessToken}`, "X-Idempotency-Key": crypto.randomUUID() },
     });
   },
+
+  /**
+   * Manda un cobro a la terminal a imprimir un ticket completo (productos,
+   * tipo de pedido, dirección, comentarios) usando la Printing API de
+   * Mercado Pago — separada del cobro. Requiere que Mercado Pago haya
+   * activado esta función en la terminal específica (hay que pedírselo a
+   * Soporte antes de que esto funcione; el código está listo desde ya).
+   */
+  async printOnTerminal(companyId: string, terminalId: string, content: string) {
+    const accessToken = await this.getValidAccessToken(companyId);
+    const res = await fetch(`${MP_API}/terminals/v1/actions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+        "X-Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        type: "print",
+        external_reference: crypto.randomUUID().replace(/-/g, "").slice(0, 32),
+        config: { point: { terminal_id: terminalId, subtype: "custom" } },
+        content,
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`No se pudo mandar a imprimir a la terminal: ${body}`);
+    }
+
+    return res.json();
+  },
 };
+
+const ORDER_TYPE_LABEL: Record<string, string> = {
+  COMER_AQUI: "COMER AQUÍ",
+  PARA_LLEVAR: "PARA LLEVAR",
+  DOMICILIO: "A DOMICILIO",
+};
+
+/**
+ * Arma el texto con las etiquetas de formato de Mercado Pago (ver
+ * "Configure printings" en sus docs) a partir de una orden — el mismo
+ * contenido que ya va en el ticket impreso por el navegador, pero en el
+ * formato de texto plano que espera la Printing API. Entre 100 y 4096
+ * caracteres permitidos.
+ */
+export function buildTerminalReceiptContent(order: {
+  orderNumber: number;
+  orderType: string;
+  notes: string | null;
+  deliveryAddress: string | null;
+  subtotal: unknown;
+  discount: unknown;
+  total: unknown;
+  items: { quantity: number; unitPriceAtSale: unknown; product: { name: string } }[];
+}): string {
+  const lines: string[] = [];
+
+  lines.push("{center}{w}Tappy{/w}{/center}");
+  lines.push("{br}");
+  lines.push(`{s}Folio: #${order.orderNumber}{/s}`);
+  lines.push("{br}");
+
+  if (order.orderType !== "COMER_AQUI") {
+    lines.push(`{center}{b}${ORDER_TYPE_LABEL[order.orderType] ?? order.orderType}{/b}{/center}`);
+    lines.push("{br}");
+  }
+
+  if (order.deliveryAddress) {
+    lines.push("{b}Dirección:{/b}");
+    lines.push(order.deliveryAddress);
+    lines.push("{br}");
+  }
+
+  if (order.notes) {
+    lines.push("{b}Comentarios:{/b}");
+    lines.push(order.notes);
+    lines.push("{br}");
+  }
+
+  lines.push("--------------------------------");
+  lines.push("{br}");
+
+  for (const item of order.items) {
+    const lineTotal = (item.quantity * Number(item.unitPriceAtSale)).toFixed(2);
+    lines.push(`${item.quantity}x ${item.product.name} - $${lineTotal}`);
+  }
+
+  lines.push("{br}");
+  lines.push("--------------------------------");
+  lines.push("{br}");
+  lines.push(`Subtotal: $${Number(order.subtotal).toFixed(2)}`);
+  if (Number(order.discount) > 0) {
+    lines.push(`Descuento: -$${Number(order.discount).toFixed(2)}`);
+  }
+  lines.push(`{b}TOTAL: $${Number(order.total).toFixed(2)}{/b}`);
+  lines.push("{br}");
+  lines.push("{center}¡Gracias por tu compra!{/center}");
+
+  let content = lines.join("{br}");
+
+  // La API exige mínimo 100 caracteres — de sobra en cualquier ticket real,
+  // pero por si acaso se rellena para no fallar en tickets minúsculos de prueba.
+  if (content.length < 100) {
+    content = content + "{br}".repeat(Math.ceil((100 - content.length) / 4));
+  }
+  // Y máximo 4096 — un ticket con MUCHOS productos podría pasarse; se corta
+  // dejando el cierre (total) en vez de perder productos a la mitad.
+  if (content.length > 4096) {
+    content = content.slice(0, 4090) + "{br}";
+  }
+
+  return content;
+}

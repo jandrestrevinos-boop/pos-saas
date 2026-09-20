@@ -344,8 +344,11 @@ function CheckoutModal({
   const [deliveryAddress, setDeliveryAddress] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [printingTerminal, setPrintingTerminal] = useState(false);
+  const [terminalPrintMessage, setTerminalPrintMessage] = useState("");
 
   const [completedOrder, setCompletedOrder] = useState<{
+    orderId: string;
     orderNumber: number;
     items: { quantity: number; name: string; unitPrice: number }[];
     subtotal: number;
@@ -447,6 +450,7 @@ function CheckoutModal({
       }
 
       setCompletedOrder({
+        orderId: data.order.id,
         orderNumber: data.order.orderNumber,
         items: cart.map((l) => ({
           quantity: l.quantity,
@@ -481,6 +485,7 @@ function CheckoutModal({
 
       if (payment?.status === "APPROVED") {
         setCompletedOrder({
+          orderId: pendingMpCheckout.orderId,
           orderNumber: pendingMpCheckout.orderNumber,
           items: cart.map((l) => ({ quantity: l.quantity, name: l.product.name, unitPrice: Number(l.product.price) })),
           subtotal,
@@ -517,6 +522,7 @@ function CheckoutModal({
 
       if (data.paymentStatus === "APPROVED" || data.status === "processed") {
         setCompletedOrder({
+          orderId: pendingPointCharge.orderId,
           orderNumber: pendingPointCharge.orderNumber,
           items: cart.map((l) => ({ quantity: l.quantity, name: l.product.name, unitPrice: Number(l.product.price) })),
           subtotal,
@@ -614,6 +620,22 @@ function CheckoutModal({
         </div>
       </div>
     );
+  }
+
+  async function printOnTerminal() {
+    if (!completedOrder) return;
+    setPrintingTerminal(true);
+    setTerminalPrintMessage("");
+    try {
+      const res = await fetch(`/api/orders/${completedOrder.orderId}/print-terminal`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "No se pudo imprimir en la terminal");
+      setTerminalPrintMessage("Mandado a imprimir en la terminal.");
+    } catch (err) {
+      setTerminalPrintMessage(err instanceof Error ? err.message : "No se pudo imprimir en la terminal");
+    } finally {
+      setPrintingTerminal(false);
+    }
   }
 
   // -----------------------------
@@ -859,6 +881,17 @@ function CheckoutModal({
           >
             🖨️ Imprimir ticket
           </button>
+
+          {terminalLinked && (
+            <button
+              onClick={printOnTerminal}
+              disabled={printingTerminal}
+              className="w-full rounded-md border border-line py-3 text-sm font-medium mb-3 disabled:opacity-50"
+            >
+              {printingTerminal ? "Imprimiendo..." : "🖨️ Imprimir en terminal"}
+            </button>
+          )}
+          {terminalPrintMessage && <p className="text-xs text-muted mb-3">{terminalPrintMessage}</p>}
 
           <button
             onClick={onDone}

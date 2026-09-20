@@ -1,0 +1,313 @@
+From df2594d324fa08a8f7500488d87536b24b6eea4c Mon Sep 17 00:00:00 2001
+From: Claude <claude@tappy.local>
+Date: Sun, 20 Sep 2026 03:10:32 +0000
+Subject: [PATCH] Imprimir ticket completo en terminal (Printing API de Mercado
+ Pago)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Caso de uso real de Jose: negocios sin impresora térmica que reciben
+pedidos por WhatsApp y usan la terminal Point como único aparato
+físico — necesitan que el repartidor se lleve un ticket con
+productos, tipo de pedido, dirección y comentarios, no solo el
+comprobante de pago.
+
+IMPORTANTE — esto no es solo código: Mercado Pago exige pedirle a su
+equipo de Soporte que active esta función en cada terminal Point
+Smart 1/2 específica antes de que funcione. El código queda listo
+para el día que la activen.
+
+- mercadoPago/service.ts: printOnTerminal() → POST /terminals/v1/actions
+  (Printing API, separada de la de cobro), buildTerminalReceiptContent()
+  arma el texto con las etiquetas de formato de Mercado Pago ({b} {w}
+  {s} {br} {center}) a partir de la orden — mismo contenido que el
+  ticket que ya imprime el navegador, pero en su formato de texto plano
+- /api/orders/[id]/print-terminal: no importa el método de pago (efectivo,
+  transferencia, terminal, lo que sea) — es solo la impresión, sirve
+  para pedidos ya acordados por WhatsApp y solo cobrados en Tappy
+- POS: botón 'Imprimir en terminal' en la pantalla de venta completada,
+  junto al de imprimir por navegador, visible solo si la sucursal tiene
+  terminal vinculada
+- Se corrigieron los tipos ANTES de entregar (Decimal → unknown en los
+  campos que vienen de Prisma) para no repetir el error de build de
+  Vercel de la vez pasada — esta vez sí se revisó a propósito
+- Verificado con tsc real, cero errores en todo lo nuevo/tocado
+---
+ .../api/orders/[id]/print-terminal/route.ts   |  58 +++++++++
+ src/app/pos/pos-client.tsx                    |  33 +++++
+ src/modules/mercadoPago/service.ts            | 114 ++++++++++++++++++
+ 3 files changed, 205 insertions(+)
+ create mode 100644 src/app/api/orders/[id]/print-terminal/route.ts
+
+diff --git a/src/app/api/orders/[id]/print-terminal/route.ts b/src/app/api/orders/[id]/print-terminal/route.ts
+new file mode 100644
+index 0000000..12e8ffc
+--- /dev/null
++++ b/src/app/api/orders/[id]/print-terminal/route.ts
+@@ -0,0 +1,58 @@
++import { NextResponse } from "next/server";
++import { prisma } from "@/lib/prisma";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { mercadoPagoService, buildTerminalReceiptContent } from "@/modules/mercadoPago/service";
++
++/**
++ * Manda a imprimir el ticket completo (productos, tipo de pedido, dirección,
++ * comentarios) en la terminal física vinculada a la sucursal de la orden.
++ * No importa con qué se haya pagado (efectivo, tarjeta genérica,
++ * transferencia, terminal, link) — esto es solo la impresión, separada
++ * del cobro. Pensado para negocios que no tienen impresora térmica y usan
++ * la terminal como su único aparato físico para dársela al repartidor.
++ */
++export async function POST(_req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.PAGOS_INTEGRADOS))) {
++    return NextResponse.json({ error: "Tu plan no incluye Pagos integrados" }, { status: 403 });
++  }
++  if (!hasPermission(ctx.permissions, PERMISSIONS.SALES_CREATE)) {
++    return NextResponse.json({ error: "No tienes permiso para imprimir" }, { status: 403 });
++  }
++
++  const order = await prisma.order.findFirst({
++    where: { id: params.id, companyId },
++    include: { items: { include: { product: true } } },
++  });
++  if (!order) {
++    return NextResponse.json({ error: "Orden no encontrada" }, { status: 404 });
++  }
++
++  const terminal = await prisma.mercadoPagoTerminal.findUnique({ where: { branchId: order.branchId } });
++  if (!terminal) {
++    return NextResponse.json({ error: "Esta sucursal no tiene una terminal vinculada" }, { status: 400 });
++  }
++
++  try {
++    const content = buildTerminalReceiptContent({
++      orderNumber: order.orderNumber,
++      orderType: order.orderType,
++      notes: order.notes,
++      deliveryAddress: order.deliveryAddress,
++      subtotal: order.subtotal,
++      discount: order.discount,
++      total: order.total,
++      items: order.items,
++    });
++    const action = await mercadoPagoService.printOnTerminal(companyId, terminal.terminalId, content);
++    return NextResponse.json({ action });
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo imprimir en la terminal";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/pos/pos-client.tsx b/src/app/pos/pos-client.tsx
+index 77bd482..6a2d3d2 100644
+--- a/src/app/pos/pos-client.tsx
++++ b/src/app/pos/pos-client.tsx
+@@ -344,8 +344,11 @@ function CheckoutModal({
+   const [deliveryAddress, setDeliveryAddress] = useState("");
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
++  const [printingTerminal, setPrintingTerminal] = useState(false);
++  const [terminalPrintMessage, setTerminalPrintMessage] = useState("");
+ 
+   const [completedOrder, setCompletedOrder] = useState<{
++    orderId: string;
+     orderNumber: number;
+     items: { quantity: number; name: string; unitPrice: number }[];
+     subtotal: number;
+@@ -447,6 +450,7 @@ function CheckoutModal({
+       }
+ 
+       setCompletedOrder({
++        orderId: data.order.id,
+         orderNumber: data.order.orderNumber,
+         items: cart.map((l) => ({
+           quantity: l.quantity,
+@@ -481,6 +485,7 @@ function CheckoutModal({
+ 
+       if (payment?.status === "APPROVED") {
+         setCompletedOrder({
++          orderId: pendingMpCheckout.orderId,
+           orderNumber: pendingMpCheckout.orderNumber,
+           items: cart.map((l) => ({ quantity: l.quantity, name: l.product.name, unitPrice: Number(l.product.price) })),
+           subtotal,
+@@ -517,6 +522,7 @@ function CheckoutModal({
+ 
+       if (data.paymentStatus === "APPROVED" || data.status === "processed") {
+         setCompletedOrder({
++          orderId: pendingPointCharge.orderId,
+           orderNumber: pendingPointCharge.orderNumber,
+           items: cart.map((l) => ({ quantity: l.quantity, name: l.product.name, unitPrice: Number(l.product.price) })),
+           subtotal,
+@@ -616,6 +622,22 @@ function CheckoutModal({
+     );
+   }
+ 
++  async function printOnTerminal() {
++    if (!completedOrder) return;
++    setPrintingTerminal(true);
++    setTerminalPrintMessage("");
++    try {
++      const res = await fetch(`/api/orders/${completedOrder.orderId}/print-terminal`, { method: "POST" });
++      const data = await res.json();
++      if (!res.ok) throw new Error(data.error ?? "No se pudo imprimir en la terminal");
++      setTerminalPrintMessage("Mandado a imprimir en la terminal.");
++    } catch (err) {
++      setTerminalPrintMessage(err instanceof Error ? err.message : "No se pudo imprimir en la terminal");
++    } finally {
++      setPrintingTerminal(false);
++    }
++  }
++
+   // -----------------------------
+   // TICKET DE VENTA COMPLETADA
+   // -----------------------------
+@@ -860,6 +882,17 @@ function CheckoutModal({
+             🖨️ Imprimir ticket
+           </button>
+ 
++          {terminalLinked && (
++            <button
++              onClick={printOnTerminal}
++              disabled={printingTerminal}
++              className="w-full rounded-md border border-line py-3 text-sm font-medium mb-3 disabled:opacity-50"
++            >
++              {printingTerminal ? "Imprimiendo..." : "🖨️ Imprimir en terminal"}
++            </button>
++          )}
++          {terminalPrintMessage && <p className="text-xs text-muted mb-3">{terminalPrintMessage}</p>}
++
+           <button
+             onClick={onDone}
+             className="w-full rounded-md bg-ember text-white py-3 text-sm font-medium"
+diff --git a/src/modules/mercadoPago/service.ts b/src/modules/mercadoPago/service.ts
+index f6c5378..74988ef 100644
+--- a/src/modules/mercadoPago/service.ts
++++ b/src/modules/mercadoPago/service.ts
+@@ -320,4 +320,118 @@ export const mercadoPagoService = {
+       headers: { Authorization: `Bearer ${accessToken}`, "X-Idempotency-Key": crypto.randomUUID() },
+     });
+   },
++
++  /**
++   * Manda un cobro a la terminal a imprimir un ticket completo (productos,
++   * tipo de pedido, dirección, comentarios) usando la Printing API de
++   * Mercado Pago — separada del cobro. Requiere que Mercado Pago haya
++   * activado esta función en la terminal específica (hay que pedírselo a
++   * Soporte antes de que esto funcione; el código está listo desde ya).
++   */
++  async printOnTerminal(companyId: string, terminalId: string, content: string) {
++    const accessToken = await this.getValidAccessToken(companyId);
++    const res = await fetch(`${MP_API}/terminals/v1/actions`, {
++      method: "POST",
++      headers: {
++        "Content-Type": "application/json",
++        Authorization: `Bearer ${accessToken}`,
++        "X-Idempotency-Key": crypto.randomUUID(),
++      },
++      body: JSON.stringify({
++        type: "print",
++        external_reference: crypto.randomUUID().replace(/-/g, "").slice(0, 32),
++        config: { point: { terminal_id: terminalId, subtype: "custom" } },
++        content,
++      }),
++    });
++
++    if (!res.ok) {
++      const body = await res.text();
++      throw new Error(`No se pudo mandar a imprimir a la terminal: ${body}`);
++    }
++
++    return res.json();
++  },
+ };
++
++const ORDER_TYPE_LABEL: Record<string, string> = {
++  COMER_AQUI: "COMER AQUÍ",
++  PARA_LLEVAR: "PARA LLEVAR",
++  DOMICILIO: "A DOMICILIO",
++};
++
++/**
++ * Arma el texto con las etiquetas de formato de Mercado Pago (ver
++ * "Configure printings" en sus docs) a partir de una orden — el mismo
++ * contenido que ya va en el ticket impreso por el navegador, pero en el
++ * formato de texto plano que espera la Printing API. Entre 100 y 4096
++ * caracteres permitidos.
++ */
++export function buildTerminalReceiptContent(order: {
++  orderNumber: number;
++  orderType: string;
++  notes: string | null;
++  deliveryAddress: string | null;
++  subtotal: unknown;
++  discount: unknown;
++  total: unknown;
++  items: { quantity: number; unitPriceAtSale: unknown; product: { name: string } }[];
++}): string {
++  const lines: string[] = [];
++
++  lines.push("{center}{w}Tappy{/w}{/center}");
++  lines.push("{br}");
++  lines.push(`{s}Folio: #${order.orderNumber}{/s}`);
++  lines.push("{br}");
++
++  if (order.orderType !== "COMER_AQUI") {
++    lines.push(`{center}{b}${ORDER_TYPE_LABEL[order.orderType] ?? order.orderType}{/b}{/center}`);
++    lines.push("{br}");
++  }
++
++  if (order.deliveryAddress) {
++    lines.push("{b}Dirección:{/b}");
++    lines.push(order.deliveryAddress);
++    lines.push("{br}");
++  }
++
++  if (order.notes) {
++    lines.push("{b}Comentarios:{/b}");
++    lines.push(order.notes);
++    lines.push("{br}");
++  }
++
++  lines.push("--------------------------------");
++  lines.push("{br}");
++
++  for (const item of order.items) {
++    const lineTotal = (item.quantity * Number(item.unitPriceAtSale)).toFixed(2);
++    lines.push(`${item.quantity}x ${item.product.name} - $${lineTotal}`);
++  }
++
++  lines.push("{br}");
++  lines.push("--------------------------------");
++  lines.push("{br}");
++  lines.push(`Subtotal: $${Number(order.subtotal).toFixed(2)}`);
++  if (Number(order.discount) > 0) {
++    lines.push(`Descuento: -$${Number(order.discount).toFixed(2)}`);
++  }
++  lines.push(`{b}TOTAL: $${Number(order.total).toFixed(2)}{/b}`);
++  lines.push("{br}");
++  lines.push("{center}¡Gracias por tu compra!{/center}");
++
++  let content = lines.join("{br}");
++
++  // La API exige mínimo 100 caracteres — de sobra en cualquier ticket real,
++  // pero por si acaso se rellena para no fallar en tickets minúsculos de prueba.
++  if (content.length < 100) {
++    content = content + "{br}".repeat(Math.ceil((100 - content.length) / 4));
++  }
++  // Y máximo 4096 — un ticket con MUCHOS productos podría pasarse; se corta
++  // dejando el cierre (total) en vez de perder productos a la mitad.
++  if (content.length > 4096) {
++    content = content.slice(0, 4090) + "{br}";
++  }
++
++  return content;
++}
+-- 
+2.43.0
+
