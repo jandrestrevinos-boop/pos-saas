@@ -11,6 +11,7 @@ const BASE_NAV_ITEMS = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/cash", label: "Caja" },
   { href: "/reports", label: "Reportes" },
+  { href: "/sales-history", label: "Historial de ventas" },
   { href: "/inventory", label: "Inventario" },
   { href: "/products", label: "Productos" },
   { href: "/categories", label: "Categorías" },

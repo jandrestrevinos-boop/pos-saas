@@ -81,4 +81,27 @@ export const inventoryService = {
       ]);
     }
   },
+
+  /** Repone el stock que se descontó por una venta que se está cancelando. */
+  async restockForCancelledSale(branchId: string, userId: string, items: { productId: string; quantity: number }[]) {
+    for (const item of items) {
+      const product = await prisma.product.findUnique({ where: { id: item.productId } });
+      if (!product?.tracksInventory) continue;
+
+      const newStock = product.stock + item.quantity;
+      await prisma.$transaction([
+        prisma.inventoryMovement.create({
+          data: {
+            productId: product.id,
+            branchId,
+            userId,
+            type: "IN",
+            quantity: item.quantity,
+            reason: "Cancelación de venta",
+          },
+        }),
+        prisma.product.update({ where: { id: product.id }, data: { stock: newStock } }),
+      ]);
+    }
+  },
 };

@@ -165,4 +165,75 @@ export const salesService = {
       orderBy: { createdAt: "desc" },
     });
   },
+
+  /** Historial de ventas con filtros — usado por /sales-history. */
+  async listHistory(companyId: string, filters: { branchId?: string; from?: Date; to?: Date; limit?: number }) {
+    return prisma.order.findMany({
+      where: {
+        companyId,
+        ...(filters.branchId ? { branchId: filters.branchId } : {}),
+        isOpenTab: false, // las cuentas de mesa que siguen abiertas no aparecen aquí, solo ventas ya cerradas
+        createdAt: {
+          ...(filters.from ? { gte: filters.from } : {}),
+          ...(filters.to ? { lte: filters.to } : {}),
+        },
+      },
+      include: {
+        items: { include: { product: true } },
+        payments: true,
+        user: { select: { name: true } },
+        table: { select: { name: true } },
+        branch: { select: { name: true } },
+      },
+      orderBy: { createdAt: "desc" },
+      take: filters.limit ?? 100,
+    });
+  },
+
+  /**
+   * Cancela una venta ya cerrada (no una cuenta de mesa abierta). Repone
+   * inventario y deja rastro en AuditLog. OJO: esto NO reembolsa un cobro
+   * ya hecho por Mercado Pago o tarjeta física — solo anula el registro y
+   * el inventario del lado de Tappy.
+   */
+  async cancelSale(companyId: string, orderId: string, userId: string) {
+    const order = await prisma.order.findFirst({
+      where: { id: orderId, companyId },
+      include: { items: true, payments: true },
+    });
+    if (!order) throw new Error("Venta no encontrada");
+    if (order.isOpenTab) throw new Error("Esta mesa todavía tiene la cuenta abierta — no se puede cancelar desde aquí");
+    if (order.status === "CANCELED") throw new Error("Esta venta ya estaba cancelada");
+
+    const wasApproved = order.payments.some((p: { status: string }) => p.status === "APPROVED");
+
+    await prisma.order.update({ where: { id: orderId }, data: { status: "CANCELED" } });
+
+    if (wasApproved) {
+      const { inventoryService } = await import("@/modules/inventory/service");
+      try {
+        await inventoryService.restockForCancelledSale(
+          order.branchId,
+          userId,
+          order.items.map((i: { productId: string; quantity: number }) => ({ productId: i.productId, quantity: i.quantity }))
+        );
+      } catch {
+        // No debe bloquear la cancelación si el inventario falla al reponerse.
+      }
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        companyId,
+        userId,
+        action: "SALE_CANCEL",
+        entity: "Order",
+        entityId: orderId,
+        previousData: { status: order.status, total: order.total.toString() },
+        newData: { status: "CANCELED" },
+      },
+    });
+
+    return order;
+  },
 };
