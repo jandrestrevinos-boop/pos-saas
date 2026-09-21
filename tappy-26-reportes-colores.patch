@@ -1,0 +1,102 @@
+From db37b3fd41a4d57e431872fda98b1762a107f878 Mon Sep 17 00:00:00 2001
+From: Claude <claude@tappy.local>
+Date: Sun, 20 Sep 2026 19:15:49 +0000
+Subject: [PATCH] Reportes: tarjetas resaltadas por color + labels de Mercado
+ Pago faltantes
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- StatCard (compartido con Dashboard) gana un prop opcional 'tone'
+  (sage/ember/marigold) que tiñe borde, fondo y la etiqueta — el número
+  grande se queda en tinta oscura de siempre para que siga siendo lo
+  más legible de la tarjeta. Sin tone, se ve exactamente igual que
+  antes (Dashboard no se toca)
+- Reportes: las 6 tarjetas de arriba alternan sage/ember/marigold
+- PAYMENT_LABELS de 'Por método de pago' no traía MERCADOPAGO ni
+  MERCADOPAGO_TERMINAL — se mostraban con su nombre crudo en vez de
+  'Mercado Pago (link/QR)' / 'Mercado Pago (terminal)'
+- Verificado con tsc real, cero errores
+---
+ src/app/(company)/reports/reports-client.tsx | 21 +++++++++++------
+ src/components/ui/index.tsx                  | 24 +++++++++++++++++---
+ 2 files changed, 35 insertions(+), 10 deletions(-)
+
+diff --git a/src/app/(company)/reports/reports-client.tsx b/src/app/(company)/reports/reports-client.tsx
+index beda0e1..3eab85a 100644
+--- a/src/app/(company)/reports/reports-client.tsx
++++ b/src/app/(company)/reports/reports-client.tsx
+@@ -18,7 +18,14 @@ type Report = {
+   byUser: { name: string; total: number; count: number }[];
+ };
+ 
+-const PAYMENT_LABELS: Record<string, string> = { CASH: "Efectivo", CARD: "Tarjeta", TRANSFER: "Transferencia", OTHER: "Otro" };
++const PAYMENT_LABELS: Record<string, string> = {
++  CASH: "Efectivo",
++  CARD: "Tarjeta",
++  TRANSFER: "Transferencia",
++  OTHER: "Otro",
++  MERCADOPAGO: "Mercado Pago (link/QR)",
++  MERCADOPAGO_TERMINAL: "Mercado Pago (terminal)",
++};
+ 
+ function todayStr() {
+   return new Date().toISOString().slice(0, 10);
+@@ -82,12 +89,12 @@ export function ReportsClient() {
+       ) : (
+         <>
+           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+-            <StatCard label="Utilidad real" value={formatMxn(report.totalProfit)} sublabel={`${report.profitMargin.toFixed(0)}% de margen`} />
+-            <StatCard label="Costo total" value={formatMxn(report.totalCost)} sublabel={report.itemsWithoutCost > 0 ? `${report.itemsWithoutCost} productos sin costo capturado` : undefined} />
+-            <StatCard label="Ventas totales" value={formatMxn(report.totalSales)} />
+-            <StatCard label="Número de ventas" value={report.totalOrders} />
+-            <StatCard label="Ticket promedio" value={formatMxn(report.avgTicket)} />
+-            <StatCard label="Efectivo" value={formatMxn(report.byPaymentMethod.CASH ?? 0)} />
++            <StatCard tone="sage" label="Utilidad real" value={formatMxn(report.totalProfit)} sublabel={`${report.profitMargin.toFixed(0)}% de margen`} />
++            <StatCard tone="ember" label="Costo total" value={formatMxn(report.totalCost)} sublabel={report.itemsWithoutCost > 0 ? `${report.itemsWithoutCost} productos sin costo capturado` : undefined} />
++            <StatCard tone="marigold" label="Ventas totales" value={formatMxn(report.totalSales)} />
++            <StatCard tone="sage" label="Número de ventas" value={report.totalOrders} />
++            <StatCard tone="ember" label="Ticket promedio" value={formatMxn(report.avgTicket)} />
++            <StatCard tone="marigold" label="Efectivo" value={formatMxn(report.byPaymentMethod.CASH ?? 0)} />
+           </div>
+ 
+           <div className="grid lg:grid-cols-2 gap-6 mb-8">
+diff --git a/src/components/ui/index.tsx b/src/components/ui/index.tsx
+index 5c7a283..d77c92e 100644
+--- a/src/components/ui/index.tsx
++++ b/src/components/ui/index.tsx
+@@ -31,10 +31,28 @@ export function Card({ className, children }: { className?: string; children: Re
+   );
+ }
+ 
+-export function StatCard({ label, value, sublabel }: { label: string; value: string | number; sublabel?: string }) {
++const STAT_CARD_TONES: Record<string, { border: string; bg: string; label: string }> = {
++  sage: { border: "border-sage/30", bg: "bg-sage-light", label: "text-sage" },
++  ember: { border: "border-ember/25", bg: "bg-ember/5", label: "text-ember-dark" },
++  marigold: { border: "border-marigold/30", bg: "bg-marigold/10", label: "text-[#006e85]" },
++};
++
++export function StatCard({
++  label,
++  value,
++  sublabel,
++  tone,
++}: {
++  label: string;
++  value: string | number;
++  sublabel?: string;
++  /** Resalta la tarjeta con un color de acento — opcional, no afecta las pantallas que no lo pasan (ej. Dashboard). */
++  tone?: "sage" | "ember" | "marigold";
++}) {
++  const t = tone ? STAT_CARD_TONES[tone] : null;
+   return (
+-    <Card className="ticket-edge p-5">
+-      <p className="text-xs font-medium uppercase tracking-wide text-muted">{label}</p>
++    <Card className={clsx("ticket-edge p-5", t && `border ${t.border} ${t.bg}`)}>
++      <p className={clsx("text-xs font-medium uppercase tracking-wide", t ? t.label : "text-muted")}>{label}</p>
+       <p className="font-display text-3xl font-semibold mt-1.5">{value}</p>
+       {sublabel && <p className="text-xs text-muted mt-1">{sublabel}</p>}
+     </Card>
+-- 
+2.43.0
+

@@ -31,10 +31,28 @@ export function Card({ className, children }: { className?: string; children: Re
   );
 }
 
-export function StatCard({ label, value, sublabel }: { label: string; value: string | number; sublabel?: string }) {
+const STAT_CARD_TONES: Record<string, { border: string; bg: string; label: string }> = {
+  sage: { border: "border-sage/30", bg: "bg-sage-light", label: "text-sage" },
+  ember: { border: "border-ember/25", bg: "bg-ember/5", label: "text-ember-dark" },
+  marigold: { border: "border-marigold/30", bg: "bg-marigold/10", label: "text-[#006e85]" },
+};
+
+export function StatCard({
+  label,
+  value,
+  sublabel,
+  tone,
+}: {
+  label: string;
+  value: string | number;
+  sublabel?: string;
+  /** Resalta la tarjeta con un color de acento — opcional, no afecta las pantallas que no lo pasan (ej. Dashboard). */
+  tone?: "sage" | "ember" | "marigold";
+}) {
+  const t = tone ? STAT_CARD_TONES[tone] : null;
   return (
-    <Card className="ticket-edge p-5">
-      <p className="text-xs font-medium uppercase tracking-wide text-muted">{label}</p>
+    <Card className={clsx("ticket-edge p-5", t && `border ${t.border} ${t.bg}`)}>
+      <p className={clsx("text-xs font-medium uppercase tracking-wide", t ? t.label : "text-muted")}>{label}</p>
       <p className="font-display text-3xl font-semibold mt-1.5">{value}</p>
       {sublabel && <p className="text-xs text-muted mt-1">{sublabel}</p>}
     </Card>

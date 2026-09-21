@@ -18,7 +18,14 @@ type Report = {
   byUser: { name: string; total: number; count: number }[];
 };
 
-const PAYMENT_LABELS: Record<string, string> = { CASH: "Efectivo", CARD: "Tarjeta", TRANSFER: "Transferencia", OTHER: "Otro" };
+const PAYMENT_LABELS: Record<string, string> = {
+  CASH: "Efectivo",
+  CARD: "Tarjeta",
+  TRANSFER: "Transferencia",
+  OTHER: "Otro",
+  MERCADOPAGO: "Mercado Pago (link/QR)",
+  MERCADOPAGO_TERMINAL: "Mercado Pago (terminal)",
+};
 
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
@@ -82,12 +89,12 @@ export function ReportsClient() {
       ) : (
         <>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-            <StatCard label="Utilidad real" value={formatMxn(report.totalProfit)} sublabel={`${report.profitMargin.toFixed(0)}% de margen`} />
-            <StatCard label="Costo total" value={formatMxn(report.totalCost)} sublabel={report.itemsWithoutCost > 0 ? `${report.itemsWithoutCost} productos sin costo capturado` : undefined} />
-            <StatCard label="Ventas totales" value={formatMxn(report.totalSales)} />
-            <StatCard label="Número de ventas" value={report.totalOrders} />
-            <StatCard label="Ticket promedio" value={formatMxn(report.avgTicket)} />
-            <StatCard label="Efectivo" value={formatMxn(report.byPaymentMethod.CASH ?? 0)} />
+            <StatCard tone="sage" label="Utilidad real" value={formatMxn(report.totalProfit)} sublabel={`${report.profitMargin.toFixed(0)}% de margen`} />
+            <StatCard tone="ember" label="Costo total" value={formatMxn(report.totalCost)} sublabel={report.itemsWithoutCost > 0 ? `${report.itemsWithoutCost} productos sin costo capturado` : undefined} />
+            <StatCard tone="marigold" label="Ventas totales" value={formatMxn(report.totalSales)} />
+            <StatCard tone="sage" label="Número de ventas" value={report.totalOrders} />
+            <StatCard tone="ember" label="Ticket promedio" value={formatMxn(report.avgTicket)} />
+            <StatCard tone="marigold" label="Efectivo" value={formatMxn(report.byPaymentMethod.CASH ?? 0)} />
           </div>
 
           <div className="grid lg:grid-cols-2 gap-6 mb-8">
