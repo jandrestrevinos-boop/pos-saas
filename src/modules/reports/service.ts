@@ -100,4 +100,68 @@ export const reportsService = {
       orders,
     };
   },
+
+  /**
+   * Datos para el Dashboard empresarial: reusa salesReport() para no
+   * duplicar la lógica de costos/categorías/etc., y le agrega encima las
+   * series de tiempo (día, hora, día de la semana) que salesReport no
+   * calcula, más Food Cost % y margen de contribución por producto.
+   */
+  async enterpriseDashboard(companyId: string, days: number = 30) {
+    const to = new Date();
+    const from = new Date();
+    from.setDate(from.getDate() - (days - 1));
+    from.setHours(0, 0, 0, 0);
+
+    const report = await this.salesReport(companyId, from, to);
+
+    const dailyMap = new Map<string, number>();
+    for (let i = 0; i < days; i++) {
+      const d = new Date(from);
+      d.setDate(d.getDate() + i);
+      dailyMap.set(d.toISOString().slice(0, 10), 0);
+    }
+
+    const hourly = Array(24).fill(0) as number[];
+    const weekdayTotals = Array(7).fill(0) as number[]; // 0=domingo...6=sábado (Date.getDay())
+
+    for (const order of report.orders as unknown as { createdAt: Date; total: number | string }[]) {
+      const date = new Date(order.createdAt);
+      const dayKey = date.toISOString().slice(0, 10);
+      if (dailyMap.has(dayKey)) dailyMap.set(dayKey, (dailyMap.get(dayKey) ?? 0) + Number(order.total));
+      hourly[date.getHours()] += Number(order.total);
+      weekdayTotals[date.getDay()] += Number(order.total);
+    }
+
+    const dailyTrend = [...dailyMap.entries()].map(([date, total]) => ({ date, total }));
+
+    const foodCostPercent = report.totalSales > 0 ? (report.totalCost / report.totalSales) * 100 : 0;
+
+    const contributionMargin = report.topProducts
+      .map((p) => ({
+        name: p.name,
+        marginTotal: p.revenue - p.cost,
+        marginPercent: p.revenue > 0 ? ((p.revenue - p.cost) / p.revenue) * 100 : 0,
+      }))
+      .sort((a, b) => b.marginTotal - a.marginTotal);
+
+    return {
+      totalSales: report.totalSales,
+      totalOrders: report.totalOrders,
+      avgTicket: report.avgTicket,
+      totalCost: report.totalCost,
+      totalProfit: report.totalProfit,
+      profitMargin: report.profitMargin,
+      foodCostPercent,
+      byPaymentMethod: report.byPaymentMethod,
+      topProducts: report.topProducts,
+      byCategory: report.byCategory,
+      byUser: report.byUser,
+      contributionMargin,
+      dailyTrend,
+      hourly,
+      weekdayTotals,
+      days,
+    };
+  },
 };

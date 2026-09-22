@@ -1,0 +1,498 @@
+From d5dc085e04a6fcd6e8cc6651cb26bf4bd80f1332 Mon Sep 17 00:00:00 2001
+From: Claude <claude@tappy.local>
+Date: Tue, 22 Sep 2026 05:22:54 +0000
+Subject: [PATCH] =?UTF-8?q?Dashboard=20empresarial:=2010=20gr=C3=A1ficas/m?=
+ =?UTF-8?q?=C3=A9tricas=20reales=20con=20datos=20que=20ya=20existen?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+En vez de perseguir el número '30 métricas' del catálogo original, se
+construyeron 10 piezas genuinamente útiles con datos que Tappy ya
+captura (nada inventado, nada placeholder):
+
+1. Ventas de los últimos 30 días (tendencia diaria)
+2. Ventas por categoría
+3. Ventas por método de pago (con Mercado Pago incluido)
+4. Top 5 productos más vendidos
+5. Ventas por hora del día
+6. Ventas por día de la semana
+7. Rendimiento por cajero/usuario
+8. Utilidad vs. costo del periodo
+9. Food Cost % (costo ÷ ventas — mismo dato que ya se usaba para
+   Utilidad real, solo expresado como porcentaje)
+10. Margen de contribución por producto (precio venta - costo, tabla
+    ordenada de mayor a menor)
+
+- reportsService.enterpriseDashboard() reusa salesReport() para no
+  duplicar la lógica de costos/categorías, y le agrega encima las
+  series de tiempo (día/hora/día de semana) que salesReport no tenía
+- /api/dashboard-empresarial: gateado por hasFeature('dashboard_empresarial')
+  Y por rol ADMIN_EMPRESA (info financiera sensible — mismo criterio
+  que ya usa el chart de ingresos mensuales del dashboard normal)
+- Nav: 'Dashboard empresarial' aparece justo después de 'Dashboard',
+  solo si la empresa tiene la feature Y quien ve el menú es Admin
+- Quedaron fuera del alcance (ya platicado con Jose): Prime Cost,
+  EBITDA y RevPASH necesitarían un módulo de nómina/gastos operativos
+  que no existe; Ticket real y Rotación de mesas necesitarían capturar
+  número de comensales, que tampoco se captura hoy
+- Verificado con tsc real, cero errores en todo lo nuevo/tocado
+---
+ .../dashboard-empresarial-client.tsx          | 255 ++++++++++++++++++
+ .../(company)/dashboard-empresarial/page.tsx  |  42 +++
+ src/app/(company)/layout.tsx                  |  19 +-
+ src/app/api/dashboard-empresarial/route.ts    |  24 ++
+ src/modules/reports/service.ts                |  64 +++++
+ 5 files changed, 398 insertions(+), 6 deletions(-)
+ create mode 100644 src/app/(company)/dashboard-empresarial/dashboard-empresarial-client.tsx
+ create mode 100644 src/app/(company)/dashboard-empresarial/page.tsx
+ create mode 100644 src/app/api/dashboard-empresarial/route.ts
+
+diff --git a/src/app/(company)/dashboard-empresarial/dashboard-empresarial-client.tsx b/src/app/(company)/dashboard-empresarial/dashboard-empresarial-client.tsx
+new file mode 100644
+index 0000000..57c2d07
+--- /dev/null
++++ b/src/app/(company)/dashboard-empresarial/dashboard-empresarial-client.tsx
+@@ -0,0 +1,255 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import {
++  BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
++  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
++} from "recharts";
++import { Card, StatCard } from "@/components/ui";
++import { formatMxn } from "@/lib/format";
++
++type DashboardData = {
++  totalSales: number;
++  totalOrders: number;
++  avgTicket: number;
++  totalCost: number;
++  totalProfit: number;
++  profitMargin: number;
++  foodCostPercent: number;
++  byPaymentMethod: Record<string, number>;
++  topProducts: { name: string; quantity: number; revenue: number; cost: number; profit: number }[];
++  byCategory: { name: string; revenue: number; cost: number; profit: number }[];
++  byUser: { name: string; total: number; count: number }[];
++  contributionMargin: { name: string; marginTotal: number; marginPercent: number }[];
++  dailyTrend: { date: string; total: number }[];
++  hourly: number[];
++  weekdayTotals: number[];
++  days: number;
++};
++
++const PAYMENT_LABELS: Record<string, string> = {
++  CASH: "Efectivo",
++  CARD: "Tarjeta",
++  TRANSFER: "Transferencia",
++  OTHER: "Otro",
++  MERCADOPAGO: "Mercado Pago (link/QR)",
++  MERCADOPAGO_TERMINAL: "Mercado Pago (terminal)",
++};
++
++const WEEKDAY_LABELS = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
++const CHART_COLORS = ["#0038FF", "#00B4D8", "#3F7D20", "#F0A93B", "#E8562C", "#7C3AED"];
++
++const axisTick = { fontSize: 12, fill: "#64748B" };
++const gridStyle = { stroke: "#E2E8F0" };
++const tooltipStyle = { borderRadius: 8, border: "1px solid #E2E8F0", fontSize: 13 };
++
++export function DashboardEmpresarialClient() {
++  const [data, setData] = useState<DashboardData | null>(null);
++  const [loading, setLoading] = useState(true);
++  const [error, setError] = useState("");
++
++  useEffect(() => {
++    fetch("/api/dashboard-empresarial?days=30")
++      .then(async (res) => {
++        const json = await res.json();
++        if (!res.ok) throw new Error(json.error ?? "No se pudo cargar el dashboard");
++        setData(json);
++      })
++      .catch((err) => setError(err instanceof Error ? err.message : "No se pudo cargar el dashboard"))
++      .finally(() => setLoading(false));
++  }, []);
++
++  if (loading) return <p className="text-muted text-sm">Cargando...</p>;
++  if (error) return <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2">{error}</p>;
++  if (!data) return null;
++
++  const dailyChartData = data.dailyTrend.map((d) => ({
++    label: new Date(`${d.date}T00:00:00`).toLocaleDateString("es-MX", { day: "2-digit", month: "short" }),
++    total: d.total,
++  }));
++
++  const hourlyChartData = data.hourly.map((total, h) => ({ label: `${h}:00`, total }));
++  const weekdayChartData = data.weekdayTotals.map((total, i) => ({ label: WEEKDAY_LABELS[i].slice(0, 3), total }));
++  const paymentChartData = Object.entries(data.byPaymentMethod)
++    .filter(([, v]) => v > 0)
++    .map(([method, total]) => ({ name: PAYMENT_LABELS[method] ?? method, value: total }));
++
++  return (
++    <div className="space-y-10">
++      {/* Métricas rápidas */}
++      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
++        <StatCard tone="sage" label="Ventas (30 días)" value={formatMxn(data.totalSales)} sublabel={`${data.totalOrders} ventas`} />
++        <StatCard tone="ember" label="Utilidad real" value={formatMxn(data.totalProfit)} sublabel={`${data.profitMargin.toFixed(1)}% de margen`} />
++        <StatCard tone="marigold" label="Food Cost %" value={`${data.foodCostPercent.toFixed(1)}%`} sublabel="Costo ÷ ventas" />
++        <StatCard label="Ticket promedio" value={formatMxn(data.avgTicket)} />
++      </div>
++
++      {/* Ventas últimos 30 días */}
++      <div>
++        <p className="text-xs font-medium uppercase tracking-wide text-muted mb-3">Ventas de los últimos {data.days} días</p>
++        <Card className="p-5">
++          <ResponsiveContainer width="100%" height={260}>
++            <LineChart data={dailyChartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
++              <CartesianGrid strokeDasharray="3 3" {...gridStyle} vertical={false} />
++              <XAxis dataKey="label" tick={axisTick} axisLine={{ stroke: "#E2E8F0" }} tickLine={false} interval={2} />
++              <YAxis tick={axisTick} axisLine={false} tickLine={false} tickFormatter={(v) => `$${v >= 1000 ? `${Math.round(v / 1000)}k` : v}`} />
++              <Tooltip formatter={(v: number) => [formatMxn(v), "Ventas"]} contentStyle={tooltipStyle} />
++              <Line type="monotone" dataKey="total" stroke="#0038FF" strokeWidth={2} dot={false} />
++            </LineChart>
++          </ResponsiveContainer>
++        </Card>
++      </div>
++
++      <div className="grid lg:grid-cols-2 gap-6">
++        {/* Ventas por categoría */}
++        <div>
++          <p className="text-xs font-medium uppercase tracking-wide text-muted mb-3">Ventas por categoría</p>
++          <Card className="p-5">
++            <ResponsiveContainer width="100%" height={240}>
++              <BarChart data={data.byCategory} layout="vertical" margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
++                <CartesianGrid strokeDasharray="3 3" {...gridStyle} horizontal={false} />
++                <XAxis type="number" tick={axisTick} axisLine={false} tickLine={false} tickFormatter={(v) => `$${v >= 1000 ? `${Math.round(v / 1000)}k` : v}`} />
++                <YAxis type="category" dataKey="name" tick={axisTick} axisLine={false} tickLine={false} width={90} />
++                <Tooltip formatter={(v: number) => [formatMxn(v), "Ventas"]} contentStyle={tooltipStyle} />
++                <Bar dataKey="revenue" fill="#00B4D8" radius={[0, 4, 4, 0]} />
++              </BarChart>
++            </ResponsiveContainer>
++          </Card>
++        </div>
++
++        {/* Ventas por método de pago */}
++        <div>
++          <p className="text-xs font-medium uppercase tracking-wide text-muted mb-3">Ventas por método de pago</p>
++          <Card className="p-5">
++            <ResponsiveContainer width="100%" height={240}>
++              <PieChart>
++                <Pie data={paymentChartData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={(entry) => entry.name}>
++                  {paymentChartData.map((_, i) => (
++                    <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
++                  ))}
++                </Pie>
++                <Tooltip formatter={(v: number) => formatMxn(v)} contentStyle={tooltipStyle} />
++              </PieChart>
++            </ResponsiveContainer>
++          </Card>
++        </div>
++
++        {/* Top 5 productos */}
++        <div>
++          <p className="text-xs font-medium uppercase tracking-wide text-muted mb-3">Top 5 productos más vendidos</p>
++          <Card className="p-5">
++            <ResponsiveContainer width="100%" height={240}>
++              <BarChart data={data.topProducts.slice(0, 5)} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
++                <CartesianGrid strokeDasharray="3 3" {...gridStyle} vertical={false} />
++                <XAxis dataKey="name" tick={axisTick} axisLine={{ stroke: "#E2E8F0" }} tickLine={false} />
++                <YAxis tick={axisTick} axisLine={false} tickLine={false} />
++                <Tooltip formatter={(v: number, key) => [key === "quantity" ? v : formatMxn(v), key === "quantity" ? "Cantidad" : "Ventas"]} contentStyle={tooltipStyle} />
++                <Bar dataKey="quantity" fill="#3F7D20" radius={[4, 4, 0, 0]} />
++              </BarChart>
++            </ResponsiveContainer>
++          </Card>
++        </div>
++
++        {/* Rendimiento por cajero */}
++        <div>
++          <p className="text-xs font-medium uppercase tracking-wide text-muted mb-3">Rendimiento por cajero</p>
++          <Card className="p-5">
++            <ResponsiveContainer width="100%" height={240}>
++              <BarChart data={data.byUser} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
++                <CartesianGrid strokeDasharray="3 3" {...gridStyle} vertical={false} />
++                <XAxis dataKey="name" tick={axisTick} axisLine={{ stroke: "#E2E8F0" }} tickLine={false} />
++                <YAxis tick={axisTick} axisLine={false} tickLine={false} tickFormatter={(v) => `$${v >= 1000 ? `${Math.round(v / 1000)}k` : v}`} />
++                <Tooltip formatter={(v: number) => [formatMxn(v), "Ventas"]} contentStyle={tooltipStyle} />
++                <Bar dataKey="total" fill="#F0A93B" radius={[4, 4, 0, 0]} />
++              </BarChart>
++            </ResponsiveContainer>
++          </Card>
++        </div>
++
++        {/* Ventas por hora del día */}
++        <div>
++          <p className="text-xs font-medium uppercase tracking-wide text-muted mb-3">Ventas por hora del día</p>
++          <Card className="p-5">
++            <ResponsiveContainer width="100%" height={240}>
++              <BarChart data={hourlyChartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
++                <CartesianGrid strokeDasharray="3 3" {...gridStyle} vertical={false} />
++                <XAxis dataKey="label" tick={{ ...axisTick, fontSize: 10 }} axisLine={{ stroke: "#E2E8F0" }} tickLine={false} interval={2} />
++                <YAxis tick={axisTick} axisLine={false} tickLine={false} tickFormatter={(v) => `$${v >= 1000 ? `${Math.round(v / 1000)}k` : v}`} />
++                <Tooltip formatter={(v: number) => [formatMxn(v), "Ventas"]} contentStyle={tooltipStyle} />
++                <Bar dataKey="total" fill="#0038FF" radius={[4, 4, 0, 0]} />
++              </BarChart>
++            </ResponsiveContainer>
++          </Card>
++        </div>
++
++        {/* Ventas por día de la semana */}
++        <div>
++          <p className="text-xs font-medium uppercase tracking-wide text-muted mb-3">Ventas por día de la semana</p>
++          <Card className="p-5">
++            <ResponsiveContainer width="100%" height={240}>
++              <BarChart data={weekdayChartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
++                <CartesianGrid strokeDasharray="3 3" {...gridStyle} vertical={false} />
++                <XAxis dataKey="label" tick={axisTick} axisLine={{ stroke: "#E2E8F0" }} tickLine={false} />
++                <YAxis tick={axisTick} axisLine={false} tickLine={false} tickFormatter={(v) => `$${v >= 1000 ? `${Math.round(v / 1000)}k` : v}`} />
++                <Tooltip formatter={(v: number) => [formatMxn(v), "Ventas"]} contentStyle={tooltipStyle} />
++                <Bar dataKey="total" fill="#00B4D8" radius={[4, 4, 0, 0]} />
++              </BarChart>
++            </ResponsiveContainer>
++          </Card>
++        </div>
++      </div>
++
++      {/* Utilidad vs costo */}
++      <div>
++        <p className="text-xs font-medium uppercase tracking-wide text-muted mb-3">Utilidad vs. costo del periodo</p>
++        <Card className="p-5">
++          <ResponsiveContainer width="100%" height={160}>
++            <BarChart
++              data={[{ name: "Periodo", Costo: data.totalCost, Utilidad: data.totalProfit }]}
++              layout="vertical"
++              margin={{ top: 5, right: 20, left: 10, bottom: 5 }}
++            >
++              <CartesianGrid strokeDasharray="3 3" {...gridStyle} horizontal={false} />
++              <XAxis type="number" tick={axisTick} axisLine={false} tickLine={false} tickFormatter={(v) => `$${v >= 1000 ? `${Math.round(v / 1000)}k` : v}`} />
++              <YAxis type="category" dataKey="name" hide />
++              <Tooltip formatter={(v: number) => formatMxn(v)} contentStyle={tooltipStyle} />
++              <Legend />
++              <Bar dataKey="Costo" stackId="a" fill="#E8562C" radius={[0, 0, 0, 0]} />
++              <Bar dataKey="Utilidad" stackId="a" fill="#3F7D20" radius={[0, 4, 4, 0]} />
++            </BarChart>
++          </ResponsiveContainer>
++        </Card>
++      </div>
++
++      {/* Margen de contribución por producto */}
++      <div>
++        <p className="text-xs font-medium uppercase tracking-wide text-muted mb-3">Margen de contribución por producto</p>
++        <Card className="ticket-edge overflow-hidden">
++          <table className="w-full text-sm">
++            <thead className="bg-paper text-xs uppercase text-muted">
++              <tr>
++                <th className="text-left px-4 py-3">Producto</th>
++                <th className="text-right px-4 py-3">Margen total</th>
++                <th className="text-right px-4 py-3">Margen %</th>
++              </tr>
++            </thead>
++            <tbody>
++              {data.contributionMargin.map((p) => (
++                <tr key={p.name} className="border-t border-line">
++                  <td className="px-4 py-3">{p.name}</td>
++                  <td className="px-4 py-3 text-right font-mono">{formatMxn(p.marginTotal)}</td>
++                  <td className="px-4 py-3 text-right font-mono">{p.marginPercent.toFixed(1)}%</td>
++                </tr>
++              ))}
++              {data.contributionMargin.length === 0 && (
++                <tr>
++                  <td colSpan={3} className="px-4 py-3 text-muted text-center">Sin datos en este periodo.</td>
++                </tr>
++              )}
++            </tbody>
++          </table>
++        </Card>
++      </div>
++    </div>
++  );
++}
+diff --git a/src/app/(company)/dashboard-empresarial/page.tsx b/src/app/(company)/dashboard-empresarial/page.tsx
+new file mode 100644
+index 0000000..591b498
+--- /dev/null
++++ b/src/app/(company)/dashboard-empresarial/page.tsx
+@@ -0,0 +1,42 @@
++import { redirect } from "next/navigation";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { DashboardEmpresarialClient } from "./dashboard-empresarial-client";
++import Link from "next/link";
++
++export default async function DashboardEmpresarialPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++
++  const enabled = await hasFeature(session.user.companyId, FEATURE_KEYS.DASHBOARD_EMPRESARIAL);
++
++  if (!enabled) {
++    return (
++      <div className="h-screen flex items-center justify-center bg-paper">
++        <div className="text-center max-w-sm">
++          <p className="font-display text-2xl font-semibold mb-2">Función no incluida en tu plan</p>
++          <p className="text-muted text-sm mb-6">
++            El Dashboard empresarial no está activo para tu empresa. Contacta a soporte para agregarlo a tu plan.
++          </p>
++          <Link href="/dashboard" className="inline-block rounded-md bg-ember text-white px-5 py-3 text-sm font-medium">
++            Volver al Dashboard
++          </Link>
++        </div>
++      </div>
++    );
++  }
++
++  if (session.user.roleName !== "ADMIN_EMPRESA") {
++    redirect("/dashboard");
++  }
++
++  return (
++    <div>
++      <h1 className="font-display text-3xl font-semibold mb-1">Dashboard empresarial</h1>
++      <p className="text-muted text-sm mb-8">Vista financiera completa de los últimos 30 días — solo visible para ti como Admin.</p>
++      <DashboardEmpresarialClient />
++    </div>
++  );
++}
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index e026e55..52831ba 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -31,14 +31,21 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+   // hasFeature/hasPermission de nuevo) — esto es solo para no mostrar un
+   // link a algo que la empresa no tiene contratado.
+   const tablesEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.GESTION_MESAS);
+-  const navItems = tablesEnabled
+-    ? [
+-        BASE_NAV_ITEMS[0],
+-        { href: "/tables", label: "Mesas" },
+-        ...BASE_NAV_ITEMS.slice(1),
+-      ]
++  const dashboardEmpresarialEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.DASHBOARD_EMPRESARIAL);
++
++  let navItems = tablesEnabled
++    ? [BASE_NAV_ITEMS[0], { href: "/tables", label: "Mesas" }, ...BASE_NAV_ITEMS.slice(1)]
+     : BASE_NAV_ITEMS;
+ 
++  if (dashboardEmpresarialEnabled && session.user.roleName === "ADMIN_EMPRESA") {
++    const dashboardIndex = navItems.findIndex((item) => item.href === "/dashboard");
++    navItems = [
++      ...navItems.slice(0, dashboardIndex + 1),
++      { href: "/dashboard-empresarial", label: "Dashboard empresarial" },
++      ...navItems.slice(dashboardIndex + 1),
++    ];
++  }
++
+   return (
+     <div className="min-h-screen flex">
+       <SidebarNav items={navItems} brand="Mi Restaurante" userName={session.user.name ?? ""} />
+diff --git a/src/app/api/dashboard-empresarial/route.ts b/src/app/api/dashboard-empresarial/route.ts
+new file mode 100644
+index 0000000..6262ebb
+--- /dev/null
++++ b/src/app/api/dashboard-empresarial/route.ts
+@@ -0,0 +1,24 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { reportsService } from "@/modules/reports/service";
++
++export async function GET(req: Request) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.DASHBOARD_EMPRESARIAL))) {
++    return NextResponse.json({ error: "Tu plan no incluye el Dashboard empresarial" }, { status: 403 });
++  }
++  // Información financiera sensible (costos, márgenes): solo el Admin de la empresa.
++  if (ctx.roleName !== "ADMIN_EMPRESA") {
++    return NextResponse.json({ error: "No tienes permiso para ver esta información" }, { status: 403 });
++  }
++
++  const { searchParams } = new URL(req.url);
++  const days = Number(searchParams.get("days") ?? "30");
++
++  const data = await reportsService.enterpriseDashboard(companyId, days);
++  return NextResponse.json(data);
++}
+diff --git a/src/modules/reports/service.ts b/src/modules/reports/service.ts
+index dbfb486..23d388c 100644
+--- a/src/modules/reports/service.ts
++++ b/src/modules/reports/service.ts
+@@ -100,4 +100,68 @@ export const reportsService = {
+       orders,
+     };
+   },
++
++  /**
++   * Datos para el Dashboard empresarial: reusa salesReport() para no
++   * duplicar la lógica de costos/categorías/etc., y le agrega encima las
++   * series de tiempo (día, hora, día de la semana) que salesReport no
++   * calcula, más Food Cost % y margen de contribución por producto.
++   */
++  async enterpriseDashboard(companyId: string, days: number = 30) {
++    const to = new Date();
++    const from = new Date();
++    from.setDate(from.getDate() - (days - 1));
++    from.setHours(0, 0, 0, 0);
++
++    const report = await this.salesReport(companyId, from, to);
++
++    const dailyMap = new Map<string, number>();
++    for (let i = 0; i < days; i++) {
++      const d = new Date(from);
++      d.setDate(d.getDate() + i);
++      dailyMap.set(d.toISOString().slice(0, 10), 0);
++    }
++
++    const hourly = Array(24).fill(0) as number[];
++    const weekdayTotals = Array(7).fill(0) as number[]; // 0=domingo...6=sábado (Date.getDay())
++
++    for (const order of report.orders as unknown as { createdAt: Date; total: number | string }[]) {
++      const date = new Date(order.createdAt);
++      const dayKey = date.toISOString().slice(0, 10);
++      if (dailyMap.has(dayKey)) dailyMap.set(dayKey, (dailyMap.get(dayKey) ?? 0) + Number(order.total));
++      hourly[date.getHours()] += Number(order.total);
++      weekdayTotals[date.getDay()] += Number(order.total);
++    }
++
++    const dailyTrend = [...dailyMap.entries()].map(([date, total]) => ({ date, total }));
++
++    const foodCostPercent = report.totalSales > 0 ? (report.totalCost / report.totalSales) * 100 : 0;
++
++    const contributionMargin = report.topProducts
++      .map((p) => ({
++        name: p.name,
++        marginTotal: p.revenue - p.cost,
++        marginPercent: p.revenue > 0 ? ((p.revenue - p.cost) / p.revenue) * 100 : 0,
++      }))
++      .sort((a, b) => b.marginTotal - a.marginTotal);
++
++    return {
++      totalSales: report.totalSales,
++      totalOrders: report.totalOrders,
++      avgTicket: report.avgTicket,
++      totalCost: report.totalCost,
++      totalProfit: report.totalProfit,
++      profitMargin: report.profitMargin,
++      foodCostPercent,
++      byPaymentMethod: report.byPaymentMethod,
++      topProducts: report.topProducts,
++      byCategory: report.byCategory,
++      byUser: report.byUser,
++      contributionMargin,
++      dailyTrend,
++      hourly,
++      weekdayTotals,
++      days,
++    };
++  },
+ };
+\ No newline at end of file
+-- 
+2.43.0
+

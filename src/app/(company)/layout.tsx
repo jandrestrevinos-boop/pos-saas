@@ -31,13 +31,20 @@ export default async function CompanyLayout({ children }: { children: React.Reac
   // hasFeature/hasPermission de nuevo) — esto es solo para no mostrar un
   // link a algo que la empresa no tiene contratado.
   const tablesEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.GESTION_MESAS);
-  const navItems = tablesEnabled
-    ? [
-        BASE_NAV_ITEMS[0],
-        { href: "/tables", label: "Mesas" },
-        ...BASE_NAV_ITEMS.slice(1),
-      ]
+  const dashboardEmpresarialEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.DASHBOARD_EMPRESARIAL);
+
+  let navItems = tablesEnabled
+    ? [BASE_NAV_ITEMS[0], { href: "/tables", label: "Mesas" }, ...BASE_NAV_ITEMS.slice(1)]
     : BASE_NAV_ITEMS;
+
+  if (dashboardEmpresarialEnabled && session.user.roleName === "ADMIN_EMPRESA") {
+    const dashboardIndex = navItems.findIndex((item) => item.href === "/dashboard");
+    navItems = [
+      ...navItems.slice(0, dashboardIndex + 1),
+      { href: "/dashboard-empresarial", label: "Dashboard empresarial" },
+      ...navItems.slice(dashboardIndex + 1),
+    ];
+  }
 
   return (
     <div className="min-h-screen flex">
