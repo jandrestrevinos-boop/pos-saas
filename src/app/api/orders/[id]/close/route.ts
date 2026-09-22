@@ -24,7 +24,7 @@ export async function POST(req: Request, { params }: { params: { id: string } })
   }
 
   try {
-    const order = await tableTabsService.close(companyId, params.id, parsed.data);
+    const order = await tableTabsService.close(companyId, params.id, ctx.userId, parsed.data);
     let mpCheckout: { preferenceId: string; checkoutUrl: string } | null = null;
     let pointOrder: { id: string; status: string } | null = null;
 

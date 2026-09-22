@@ -128,7 +128,7 @@ export const tableTabsService = {
   },
 
   /** Cierra la cuenta: cobra el total acumulado de todas las rondas y libera la mesa. */
-  async close(companyId: string, orderId: string, input: z.infer<typeof closeTabSchema>) {
+  async close(companyId: string, orderId: string, userId: string, input: z.infer<typeof closeTabSchema>) {
     const order = await prisma.order.findFirst({
       where: { id: orderId, companyId, isOpenTab: true },
       include: { items: true },
@@ -168,6 +168,17 @@ export const tableTabsService = {
         },
       },
       include: { items: { include: { product: true } }, payments: true },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        companyId,
+        userId,
+        action: "TABLE_CLOSE",
+        entity: "Order",
+        entityId: orderId,
+        newData: { total: total.toString(), paymentMethod: input.paymentMethod, tableId: order.tableId },
+      },
     });
 
     // La mesa ya se desocupa al cerrar la cuenta — los clientes ya
