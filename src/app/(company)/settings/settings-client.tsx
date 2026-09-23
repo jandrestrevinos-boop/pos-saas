@@ -7,10 +7,18 @@ export function SettingsClient({
   pagosIntegradosEnabled,
   mercadoPagoConnected,
   mercadoPagoLiveMode,
+  whatsappEnabled,
+  whatsappConnected,
+  whatsappPhoneNumberId,
+  whatsappWelcomeMessage,
 }: {
   pagosIntegradosEnabled: boolean;
   mercadoPagoConnected: boolean;
   mercadoPagoLiveMode: boolean | null;
+  whatsappEnabled: boolean;
+  whatsappConnected: boolean;
+  whatsappPhoneNumberId: string;
+  whatsappWelcomeMessage: string;
 }) {
   const searchParams = useSearchParams();
   const [connected, setConnected] = useState(mercadoPagoConnected);
@@ -85,6 +93,13 @@ export function SettingsClient({
       </div>
 
       {connected && <TerminalsSection />}
+
+      <WhatsAppSection
+        enabled={whatsappEnabled}
+        initialConnected={whatsappConnected}
+        initialPhoneNumberId={whatsappPhoneNumberId}
+        initialWelcomeMessage={whatsappWelcomeMessage}
+      />
     </div>
   );
 }
@@ -185,6 +200,152 @@ function TerminalsSection() {
             </button>
           </div>
         ))}
+    </div>
+  );
+}
+
+function WhatsAppSection({
+  enabled,
+  initialConnected,
+  initialPhoneNumberId,
+  initialWelcomeMessage,
+}: {
+  enabled: boolean;
+  initialConnected: boolean;
+  initialPhoneNumberId: string;
+  initialWelcomeMessage: string;
+}) {
+  const [connected, setConnected] = useState(initialConnected);
+  const [editing, setEditing] = useState(!initialConnected);
+  const [phoneNumberId, setPhoneNumberId] = useState(initialPhoneNumberId);
+  const [accessToken, setAccessToken] = useState("");
+  const [welcomeMessage, setWelcomeMessage] = useState(initialWelcomeMessage);
+  const [saving, setSaving] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [error, setError] = useState("");
+
+  async function save() {
+    setError("");
+    if (!phoneNumberId.trim() || (!connected && !accessToken.trim())) {
+      setError("Phone Number ID y token son obligatorios");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch("/api/whatsapp/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phoneNumberId, accessToken: accessToken || undefined, welcomeMessage }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "No se pudo guardar la configuración");
+      setConnected(true);
+      setEditing(false);
+      setAccessToken("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo guardar la configuración");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function disconnect() {
+    if (!confirm("¿Desconectar WhatsApp? Tu restaurante dejará de recibir y responder mensajes hasta que lo vuelvas a conectar.")) return;
+    setDisconnecting(true);
+    const res = await fetch("/api/whatsapp/config", { method: "DELETE" });
+    setDisconnecting(false);
+    if (res.ok) {
+      setConnected(false);
+      setEditing(true);
+    }
+  }
+
+  return (
+    <div className="bg-white border border-line rounded-lg p-5 mt-4">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="font-display text-lg font-semibold">WhatsApp Business</h2>
+        {connected && (
+          <span className="text-xs bg-sage/15 text-sage px-2 py-0.5 rounded-full font-medium">
+            Conectado
+          </span>
+        )}
+      </div>
+      <p className="text-muted text-sm mb-4">
+        Conecta tu número de WhatsApp Business para recibir y responder pedidos directo por WhatsApp. El Phone
+        Number ID y el token de acceso los sacas de tu propia app en Meta for Developers.
+      </p>
+
+      {!enabled ? (
+        <p className="text-sm text-muted bg-ink-100 rounded-md px-3 py-2">
+          WhatsApp Business no está incluido en tu plan actual. Contacta a soporte para agregarlo.
+        </p>
+      ) : editing ? (
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-medium text-muted mb-1">Phone Number ID</label>
+            <input
+              className="w-full rounded-md border border-line px-3 py-2 text-sm"
+              placeholder="Ej. 1371323052721018"
+              value={phoneNumberId}
+              onChange={(e) => setPhoneNumberId(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-muted mb-1">Token de acceso</label>
+            <input
+              type="password"
+              className="w-full rounded-md border border-line px-3 py-2 text-sm"
+              placeholder={connected ? "•••••••••••• (déjalo vacío para no cambiarlo)" : "Pega tu token de Meta"}
+              value={accessToken}
+              onChange={(e) => setAccessToken(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-muted mb-1">Mensaje de bienvenida</label>
+            <input
+              className="w-full rounded-md border border-line px-3 py-2 text-sm"
+              value={welcomeMessage}
+              onChange={(e) => setWelcomeMessage(e.target.value)}
+            />
+          </div>
+
+          {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2">{error}</p>}
+
+          <div className="flex gap-2">
+            <button
+              onClick={save}
+              disabled={saving}
+              className="rounded-md bg-ember text-white px-4 py-2 text-sm font-medium disabled:opacity-50"
+            >
+              {saving ? "Guardando..." : "Guardar"}
+            </button>
+            {connected && (
+              <button
+                onClick={() => setEditing(false)}
+                className="rounded-md border border-line px-4 py-2 text-sm font-medium"
+              >
+                Cancelar
+              </button>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setEditing(true)}
+            className="rounded-md border border-line px-4 py-2 text-sm font-medium"
+          >
+            Editar configuración
+          </button>
+          <button
+            onClick={disconnect}
+            disabled={disconnecting}
+            className="rounded-md border border-line px-4 py-2 text-sm font-medium disabled:opacity-50"
+          >
+            Desconectar
+          </button>
+        </div>
+      )}
     </div>
   );
 }
