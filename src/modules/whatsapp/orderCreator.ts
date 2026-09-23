@@ -16,17 +16,28 @@ export const orderCreator = {
     phoneNumber: string
   ): Promise<OrderCreationResult> {
     try {
-      // Obtener un usuario por defecto para WhatsApp
+      const cart = await prisma.whatsAppCart.findUnique({
+        where: { id: cartId },
+        include: { items: true },
+      });
+
+      if (!cart || cart.items.length === 0) {
+        throw new Error("El carrito está vacío, no se puede crear la orden");
+      }
+
+      // Usuario "sistema" para atribuir ventas que entran por WhatsApp
+      // (no hay un cajero humano detrás). Usamos el primero de la empresa
+      // por ahora — mejora futura: un usuario dedicado tipo "WhatsApp Bot".
       const user = await prisma.user.findFirst({
         where: { companyId },
       });
 
       if (!user) {
-        throw new Error("No hay usuario en la compañía");
+        throw new Error("No hay usuario en la compañía para atribuir la orden");
       }
 
       const ticketNumber = `TKT${Date.now()}`;
-      
+
       const newOrder = await prisma.order.create({
         data: {
           branchId,
@@ -34,10 +45,21 @@ export const orderCreator = {
           userId: user.id,
           localId: ticketNumber,
           status: "PENDING",
-          subtotal: 100,
-          discount: 0,
-          tax: 16,
-          total: 116,
+          orderType: "PARA_LLEVAR",
+          // Totales reales del carrito — ya vienen calculados por
+          // cartManager.updateTotals(), no se inventan aquí.
+          subtotal: cart.subtotal,
+          discount: cart.discount,
+          tax: cart.tax,
+          total: cart.total,
+          items: {
+            create: cart.items.map((item) => ({
+              productId: item.productId,
+              quantity: item.quantity,
+              unitPriceAtSale: item.unitPrice,
+              lineTotal: item.lineTotal,
+            })),
+          },
         },
       });
 
@@ -52,9 +74,5 @@ export const orderCreator = {
       console.error("[OrderCreator]", error);
       throw error;
     }
-  },
-
-  async _generateTicketNumber(companyId: string): Promise<string> {
-    return `TKT${Date.now()}`;
   },
 };

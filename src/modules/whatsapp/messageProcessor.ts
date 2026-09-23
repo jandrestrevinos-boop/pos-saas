@@ -16,6 +16,10 @@ interface MessageContext {
   branchId: string;
   messageText: string;
   messageId: string;
+  // Credenciales de ESTA empresa — vienen del WhatsAppConfig resuelto en
+  // el webhook, nunca de una variable de entorno global.
+  whatsappPhoneNumberId: string;
+  whatsappAccessToken: string;
 }
 
 interface ProcessingResult {
@@ -135,6 +139,8 @@ export const messageProcessor = {
       await sender.sendMessage({
         phoneNumber: context.phoneNumber,
         message: result.response,
+        whatsappPhoneNumberId: context.whatsappPhoneNumberId,
+        whatsappAccessToken: context.whatsappAccessToken,
       });
 
       return result;

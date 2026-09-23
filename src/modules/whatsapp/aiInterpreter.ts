@@ -69,7 +69,9 @@ RESPONDE SOLO CON JSON:
 }`;
 
       const response = await anthropic.messages.create({
-        model: "claude-sonnet-4-20250514",
+        // claude-sonnet-4-20250514 fue retirado por Anthropic el 15 de
+        // junio de 2026 — este es su reemplazo recomendado.
+        model: "claude-sonnet-4-6",
         max_tokens: 200,
         system: systemPrompt,
         messages: [{ role: "user", content: `Cliente: "${messageText}"` }],

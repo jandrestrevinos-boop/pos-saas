@@ -1,36 +1,37 @@
 /**
  * sender.ts
- * Envía mensajes a WhatsApp via Meta Cloud API
+ * Envía mensajes a WhatsApp via Meta Cloud API.
+ * Multi-tenant: las credenciales (phoneNumberId/accessToken) se reciben
+ * como parámetro — cada restaurante manda desde su propio número, nunca
+ * desde una cuenta compartida de Jose.
  */
 
 interface SendMessageParams {
   phoneNumber: string;
   message: string;
-  companyId?: string;
+  whatsappPhoneNumberId: string;
+  whatsappAccessToken: string;
 }
 
 export const sender = {
   async sendMessage(params: SendMessageParams): Promise<boolean> {
     try {
-      const { phoneNumber, message } = params;
+      const { phoneNumber, message, whatsappPhoneNumberId, whatsappAccessToken } = params;
 
-      const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-      const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-
-      if (!phoneNumberId || !accessToken) {
-        console.error("[WhatsApp Sender] Credenciales faltantes");
+      if (!whatsappPhoneNumberId || !whatsappAccessToken) {
+        console.error("[WhatsApp Sender] Credenciales faltantes para esta empresa");
         return false;
       }
 
       const cleanNumber = phoneNumber.replace(/\D/g, "");
 
       const response = await fetch(
-        `https://graph.instagram.com/v18.0/${phoneNumberId}/messages`,
+        `https://graph.facebook.com/v21.0/${whatsappPhoneNumberId}/messages`,
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${accessToken}`,
+            Authorization: `Bearer ${whatsappAccessToken}`,
           },
           body: JSON.stringify({
             messaging_product: "whatsapp",
@@ -62,7 +63,9 @@ export const sender = {
   async sendOrderStatusUpdate(
     phoneNumber: string,
     ticketNumber: string,
-    status: "PREPARING" | "READY" | "DELIVERED" | "CANCELLED"
+    status: "PREPARING" | "READY" | "DELIVERED" | "CANCELLED",
+    whatsappPhoneNumberId: string,
+    whatsappAccessToken: string
   ): Promise<boolean> {
     const messages: Record<typeof status, string> = {
       PREPARING: `⏱️ Tu orden #${ticketNumber} está siendo preparada.`,
@@ -74,6 +77,8 @@ export const sender = {
     return this.sendMessage({
       phoneNumber,
       message: messages[status],
+      whatsappPhoneNumberId,
+      whatsappAccessToken,
     });
   },
 };
