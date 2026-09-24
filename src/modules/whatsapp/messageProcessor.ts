@@ -53,12 +53,35 @@ export const messageProcessor = {
       }
 
       if (session.expiresAt < new Date()) {
-        return {
+        const expiredResult: ProcessingResult = {
           success: false,
           response: "Tu sesión expiró. Escribe 'menú' para empezar de nuevo.",
           action: "abandon",
           error: "Session expired",
         };
+
+        // Antes este caso se regresaba sin mandar nada por WhatsApp — era
+        // el único camino del código que "se tragaba" la respuesta en vez
+        // de mandarla. Ahora sí la mandamos, igual que en el resto del
+        // flujo, y además reiniciamos la sesión para que el siguiente
+        // mensaje del cliente ya arranque en BROWSING sin volver a chocar
+        // con la misma sesión vencida.
+        await sender.sendMessage({
+          phoneNumber: context.phoneNumber,
+          message: expiredResult.response,
+          whatsappPhoneNumberId: context.whatsappPhoneNumberId,
+          whatsappAccessToken: context.whatsappAccessToken,
+        });
+
+        await prisma.whatsAppSession.update({
+          where: { id: session.id },
+          data: {
+            state: "BROWSING",
+            expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+          },
+        });
+
+        return expiredResult;
       }
 
       const aiResult = await aiInterpreter.interpret({
@@ -69,6 +92,16 @@ export const messageProcessor = {
       });
 
       if (!aiResult.success) {
+        // Mismo bug que el de sesión expirada: había que mandar el
+        // fallbackResponse por WhatsApp antes de regresar, no solo
+        // calcularlo.
+        await sender.sendMessage({
+          phoneNumber: context.phoneNumber,
+          message: aiResult.fallbackResponse,
+          whatsappPhoneNumberId: context.whatsappPhoneNumberId,
+          whatsappAccessToken: context.whatsappAccessToken,
+        });
+
         return {
           success: false,
           response: aiResult.fallbackResponse,
