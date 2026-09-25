@@ -60,12 +60,6 @@ export const messageProcessor = {
           error: "Session expired",
         };
 
-        // Antes este caso se regresaba sin mandar nada por WhatsApp — era
-        // el único camino del código que "se tragaba" la respuesta en vez
-        // de mandarla. Ahora sí la mandamos, igual que en el resto del
-        // flujo, y además reiniciamos la sesión para que el siguiente
-        // mensaje del cliente ya arranque en BROWSING sin volver a chocar
-        // con la misma sesión vencida.
         await sender.sendMessage({
           phoneNumber: context.phoneNumber,
           message: expiredResult.response,
@@ -92,9 +86,6 @@ export const messageProcessor = {
       });
 
       if (!aiResult.success) {
-        // Mismo bug que el de sesión expirada: había que mandar el
-        // fallbackResponse por WhatsApp antes de regresar, no solo
-        // calcularlo.
         await sender.sendMessage({
           phoneNumber: context.phoneNumber,
           message: aiResult.fallbackResponse,
@@ -202,13 +193,23 @@ export const messageProcessor = {
       };
     }
 
+    // Antes solo se listaban los nombres de las categorías — el cliente
+    // no tenía forma de saber qué productos existían ni qué escribir
+    // para pedir algo. Ahora se listan los productos con su precio.
     const menuText = categories
-      .map((cat: any) => `*${cat.name}*`)
-      .join("\n");
+      .map((cat: any) => {
+        const products = cat.products?.length
+          ? cat.products
+              .map((p: any) => `  • ${p.name} — $${Number(p.price).toFixed(2)}`)
+              .join("\n")
+          : "  (sin productos disponibles por ahora)";
+        return `*${cat.name}*\n${products}`;
+      })
+      .join("\n\n");
 
     return {
       success: true,
-      response: `📋 *MENÚ*\n\n${menuText}\n\n¿Qué deseas?`,
+      response: `📋 *MENÚ*\n\n${menuText}\n\n¿Qué te gustaría pedir? Escribe el nombre del producto.`,
       action: "browse",
     };
   },
@@ -240,6 +241,7 @@ export const messageProcessor = {
       }
 
       let addedCount = 0;
+      const addedNames: string[] = [];
       for (const product of products) {
         const dbProduct = await catalogService.getProduct(product.id, companyId);
         if (dbProduct && dbProduct.stock > 0) {
@@ -250,13 +252,14 @@ export const messageProcessor = {
             modifiers: modifiers || [],
           });
           addedCount++;
+          addedNames.push(dbProduct.name);
         }
       }
 
       if (addedCount === 0) {
         return {
           success: false,
-          response: "No pudimos agregar los productos.",
+          response: "No pudimos agregar los productos. Escribe 'menú' para ver las opciones disponibles.",
           action: "error",
         };
       }
@@ -265,7 +268,7 @@ export const messageProcessor = {
 
       return {
         success: true,
-        response: `✅ ${addedCount} producto(s) agregado(s)\n💰 Total: $${updated.total.toFixed(2)}`,
+        response: `✅ Agregado: ${addedNames.join(", ")}\n💰 Total del carrito: $${updated.total.toFixed(2)}\n\n¿Algo más? O escribe "confirmar" para cerrar tu pedido.`,
         action: "add_to_cart",
       };
     } catch (error) {
@@ -316,7 +319,7 @@ export const messageProcessor = {
       if (!cart) {
         return {
           success: false,
-          response: "No hay carrito activo.",
+          response: "No hay carrito activo. Escribe 'menú' para empezar tu pedido.",
           action: "error",
         };
       }
