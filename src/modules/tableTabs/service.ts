@@ -93,15 +93,36 @@ export const tableTabsService = {
     type MinimalProduct = { id: string; price: number | string };
     const productMap = new Map((products as unknown as MinimalProduct[]).map((p) => [p.id, p]));
 
+    // Cada ronda de una cuenta abierta es su propio ticket de cocina, para
+    // no volver a mandar a preparar lo que ya se despachó en rondas
+    // anteriores (antes se reabría el status de TODA la orden en cada
+    // ronda nueva, y cocina veía duplicados). El número de ronda es
+    // consecutivo dentro de esta orden.
+    const maxRound = await prisma.orderItem.aggregate({
+      where: { orderId },
+      _max: { roundNumber: true },
+    });
+    const roundNumber = (maxRound._max.roundNumber ?? 0) + 1;
+
     let roundSubtotal = 0;
     const orderItemsData = input.items.map((item) => {
       const product = productMap.get(item.productId)!;
       const unitPrice = Number(product.price);
       const lineTotal = unitPrice * item.quantity;
       roundSubtotal += lineTotal;
-      return { productId: product.id, quantity: item.quantity, unitPriceAtSale: unitPrice, lineTotal };
+      return {
+        productId: product.id,
+        quantity: item.quantity,
+        unitPriceAtSale: unitPrice,
+        lineTotal,
+        roundNumber,
+        status: "PENDING" as const,
+      };
     });
 
+    // El total de la cuenta sigue sumando TODAS las rondas (eso ya
+    // funcionaba bien) — lo único que cambia es que cocina ya no vuelve a
+    // ver las rondas previas.
     const newSubtotal = Number(order.subtotal) + roundSubtotal;
 
     const updated = await prisma.order.update({
@@ -110,9 +131,6 @@ export const tableTabsService = {
         items: { create: orderItemsData },
         subtotal: newSubtotal,
         total: newSubtotal - Number(order.discount),
-        // Llegó comida nueva a la mesa: reabre el status para que cocina la
-        // vea de nuevo, aunque ya hubiera entregado rondas anteriores.
-        status: "PENDING",
       },
       include: { items: { include: { product: true } } },
     });

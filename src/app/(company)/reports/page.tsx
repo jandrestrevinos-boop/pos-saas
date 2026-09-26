@@ -1,6 +1,17 @@
+import { redirect } from "next/navigation";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
 import { ReportsClient } from "./reports-client";
 
-export default function ReportsPage() {
+export default async function ReportsPage() {
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.companyId) redirect("/login");
+
+  if (!hasPermission(session.user.permissions, PERMISSIONS.REPORTS_VIEW)) {
+    redirect(getHomeRoute(session.user.permissions));
+  }
+
   return (
     <div>
       <h1 className="font-display text-3xl font-semibold mb-1">Reportes</h1>

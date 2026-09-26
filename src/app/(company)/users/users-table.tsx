@@ -15,10 +15,11 @@ type UserRow = {
 };
 
 const ROLE_LABELS: Record<string, string> = {
-  ADMIN_EMPRESA: "Admin Empresa",
+  ADMIN_EMPRESA: "Administrador",
   GERENTE: "Gerente",
   CAJERO: "Cajero",
   MESERO: "Mesero",
+  COCINERO: "Cocinero",
 };
 
 export function UsersTable({ initialUsers, roles }: { initialUsers: UserRow[]; roles: Role[] }) {

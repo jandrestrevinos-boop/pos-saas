@@ -1,12 +1,20 @@
+import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
 import { productsService } from "@/modules/products/service";
 import { categoriesService } from "@/modules/categories/service";
 import { ProductsTable } from "./products-table";
 
 export default async function ProductsPage() {
   const session = await getServerSession(authOptions);
-  const companyId = session!.user.companyId!;
+  if (!session?.user?.companyId) redirect("/login");
+
+  if (!hasPermission(session.user.permissions, PERMISSIONS.PRODUCTS_MANAGE)) {
+    redirect(getHomeRoute(session.user.permissions));
+  }
+
+  const companyId = session.user.companyId;
 
   const [products, categories] = await Promise.all([
     productsService.list(companyId),

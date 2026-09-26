@@ -1,12 +1,20 @@
+import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
 import { usersService } from "@/modules/users/service";
 import { prisma } from "@/lib/prisma";
 import { UsersTable } from "./users-table";
 
 export default async function UsersPage() {
   const session = await getServerSession(authOptions);
-  const companyId = session!.user.companyId!;
+  if (!session?.user?.companyId) redirect("/login");
+
+  if (!hasPermission(session.user.permissions, PERMISSIONS.USERS_MANAGE)) {
+    redirect(getHomeRoute(session.user.permissions));
+  }
+
+  const companyId = session.user.companyId;
 
   const [users, roles, subscription] = await Promise.all([
     usersService.list(companyId),

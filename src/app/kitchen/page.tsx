@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
 import { kitchenService } from "@/modules/kitchen/service";
 import { KitchenClient } from "./kitchen-client";
 import Link from "next/link";
@@ -8,6 +9,10 @@ import Link from "next/link";
 export default async function KitchenPage() {
   const session = await getServerSession(authOptions);
   if (!session?.user?.companyId) redirect("/login");
+
+  if (!hasPermission(session.user.permissions, PERMISSIONS.KITCHEN_VIEW)) {
+    redirect(getHomeRoute(session.user.permissions));
+  }
 
   const enabled = await kitchenService.isEnabledForCompany(session.user.companyId);
 

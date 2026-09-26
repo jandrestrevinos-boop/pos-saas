@@ -1,11 +1,19 @@
+import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
 import { categoriesService } from "@/modules/categories/service";
 import { CategoriesTable } from "./categories-table";
 
 export default async function CategoriesPage() {
   const session = await getServerSession(authOptions);
-  const categories = await categoriesService.list(session!.user.companyId!);
+  if (!session?.user?.companyId) redirect("/login");
+
+  if (!hasPermission(session.user.permissions, PERMISSIONS.CATEGORIES_MANAGE)) {
+    redirect(getHomeRoute(session.user.permissions));
+  }
+
+  const categories = await categoriesService.list(session.user.companyId);
 
   return (
     <div>

@@ -1,0 +1,919 @@
+From 1f0fb6299a10abc5ddd1d7becb14ff23e92f5c09 Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Sat, 26 Sep 2026 04:21:22 +0000
+Subject: [PATCH] =?UTF-8?q?Roles=20(Admin/Gerente/Mesero/Cajero/Cocinero)?=
+ =?UTF-8?q?=20+=20candado=20de=20permisos=20en=20p=C3=A1ginas=20+=20cocina?=
+ =?UTF-8?q?=20por=20ronda=20(fix=20duplicado=20en=20cuenta=20abierta)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ prisma/schema.prisma                          |  18 ++++
+ src/app/(company)/branches/page.tsx           |  10 +-
+ src/app/(company)/cash/page.tsx               |   7 ++
+ src/app/(company)/categories/page.tsx         |  10 +-
+ .../(company)/dashboard-empresarial/page.tsx  |   9 ++
+ src/app/(company)/dashboard/page.tsx          |  10 +-
+ src/app/(company)/inventory/page.tsx          |  13 ++-
+ src/app/(company)/layout.tsx                  |  51 +++++----
+ src/app/(company)/products/page.tsx           |  10 +-
+ src/app/(company)/reports/page.tsx            |  13 ++-
+ src/app/(company)/sales-history/page.tsx      |  13 ++-
+ src/app/(company)/users/page.tsx              |  10 +-
+ src/app/(company)/users/users-table.tsx       |   3 +-
+ src/app/api/kitchen/orders/[id]/route.ts      |  11 +-
+ src/app/api/kitchen/orders/route.ts           |   5 +-
+ src/app/kitchen/kitchen-client.tsx            |  57 ++++++----
+ src/app/kitchen/page.tsx                      |   5 +
+ src/app/redirect-after-login/page.tsx         |   6 +-
+ src/lib/permissions.ts                        |  96 ++++++++++-------
+ src/modules/kitchen/service.ts                | 102 +++++++++++++++---
+ src/modules/tableTabs/service.ts              |  26 ++++-
+ 21 files changed, 368 insertions(+), 117 deletions(-)
+
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 0407c80..2c998aa 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -422,8 +422,26 @@ model OrderItem {
+   unitPriceAtSale Decimal @db.Decimal(10, 2) // precio congelado al momento de la venta
+   lineTotal       Decimal @db.Decimal(10, 2)
+ 
++  // Estatus de cocina POR RENGLÓN, no de la orden completa. Antes cocina
++  // dependía de Order.status, así que cuando una cuenta abierta (mesa)
++  // recibía una ronda nueva, se reabría el status de TODA la orden y
++  // cocina volvía a ver los productos de rondas anteriores ya entregadas
++  // como si fueran pedido nuevo (duplicado). Ahora cada renglón avanza
++  // por su cuenta: PENDING -> IN_PREPARATION -> READY -> DELIVERED.
++  status      OrderStatus @default(PENDING)
++  // Todos los renglones mandados a cocina juntos en una misma "ronda"
++  // comparten este número (1 = primera ronda). En Mostrador siempre es 1.
++  // En una mesa con cuenta abierta, cada vez que se agregan productos
++  // nuevos se les asigna el siguiente número — así cocina los ve como un
++  // ticket aparte, sin tocar los de rondas previas. El cobro sigue siendo
++  // uno solo por toda la cuenta (Order.subtotal ya suma todas las rondas).
++  roundNumber Int         @default(1)
++  createdAt   DateTime    @default(now()) // hora de esta ronda, no la de apertura de la cuenta
++
+   modifiers OrderItemModifier[]
+ 
++  @@index([orderId, roundNumber])
++  @@index([status])
+   @@map("order_items")
+ }
+ 
+diff --git a/src/app/(company)/branches/page.tsx b/src/app/(company)/branches/page.tsx
+index e09f9f2..e69a7f6 100644
+--- a/src/app/(company)/branches/page.tsx
++++ b/src/app/(company)/branches/page.tsx
+@@ -1,12 +1,20 @@
++import { redirect } from "next/navigation";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+ import { prisma } from "@/lib/prisma";
+ import { Card, StatusBadge } from "@/components/ui";
+ 
+ export default async function BranchesPage() {
+   const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.BRANCHES_MANAGE)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++
+   const branches = await prisma.branch.findMany({
+-    where: { companyId: session!.user.companyId! },
++    where: { companyId: session.user.companyId },
+     orderBy: { createdAt: "asc" },
+   });
+   type BranchRow = (typeof branches)[number];
+diff --git a/src/app/(company)/cash/page.tsx b/src/app/(company)/cash/page.tsx
+index 1ca7140..4f68557 100644
+--- a/src/app/(company)/cash/page.tsx
++++ b/src/app/(company)/cash/page.tsx
+@@ -1,9 +1,16 @@
++import { redirect } from "next/navigation";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+ import { CashClient } from "./cash-client";
+ 
+ export default async function CashPage() {
+   const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.CASH_OPEN)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
+ 
+   return (
+     <div>
+diff --git a/src/app/(company)/categories/page.tsx b/src/app/(company)/categories/page.tsx
+index 6d771c0..9993678 100644
+--- a/src/app/(company)/categories/page.tsx
++++ b/src/app/(company)/categories/page.tsx
+@@ -1,11 +1,19 @@
++import { redirect } from "next/navigation";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+ import { categoriesService } from "@/modules/categories/service";
+ import { CategoriesTable } from "./categories-table";
+ 
+ export default async function CategoriesPage() {
+   const session = await getServerSession(authOptions);
+-  const categories = await categoriesService.list(session!.user.companyId!);
++  if (!session?.user?.companyId) redirect("/login");
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.CATEGORIES_MANAGE)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++
++  const categories = await categoriesService.list(session.user.companyId);
+ 
+   return (
+     <div>
+diff --git a/src/app/(company)/dashboard-empresarial/page.tsx b/src/app/(company)/dashboard-empresarial/page.tsx
+index 591b498..fa7e00d 100644
+--- a/src/app/(company)/dashboard-empresarial/page.tsx
++++ b/src/app/(company)/dashboard-empresarial/page.tsx
+@@ -1,6 +1,7 @@
+ import { redirect } from "next/navigation";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+ import { hasFeature } from "@/lib/feature-gating";
+ import { FEATURE_KEYS } from "@/lib/plan-features";
+ import { DashboardEmpresarialClient } from "./dashboard-empresarial-client";
+@@ -10,6 +11,14 @@ export default async function DashboardEmpresarialPage() {
+   const session = await getServerSession(authOptions);
+   if (!session?.user?.companyId) redirect("/login");
+ 
++  // Antes solo estaba "gateado" por el nombre del rol en el link del menú
++  // (layout.tsx) — la página en sí no revisaba nada, así que cualquiera
++  // que entrara directo a la URL la veía. Ahora sí valida el permiso real,
++  // igual que el resto de páginas sensibles.
++  if (!hasPermission(session.user.permissions, PERMISSIONS.REPORTS_VIEW)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++
+   const enabled = await hasFeature(session.user.companyId, FEATURE_KEYS.DASHBOARD_EMPRESARIAL);
+ 
+   if (!enabled) {
+diff --git a/src/app/(company)/dashboard/page.tsx b/src/app/(company)/dashboard/page.tsx
+index a1bed3c..bc901f1 100644
+--- a/src/app/(company)/dashboard/page.tsx
++++ b/src/app/(company)/dashboard/page.tsx
+@@ -1,5 +1,7 @@
++import { redirect } from "next/navigation";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+ import { prisma } from "@/lib/prisma";
+ import { StatCard, Button } from "@/components/ui";
+ import { formatMxn } from "@/lib/format";
+@@ -8,7 +10,13 @@ import { MonthlyRevenueChart } from "./monthly-revenue-chart";
+ 
+ export default async function CompanyDashboard() {
+   const session = await getServerSession(authOptions);
+-  const companyId = session!.user.companyId!;
++  if (!session?.user?.companyId) redirect("/login");
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.REPORTS_VIEW)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++
++  const companyId = session.user.companyId;
+ 
+   const startOfDay = new Date();
+   startOfDay.setHours(0, 0, 0, 0);
+diff --git a/src/app/(company)/inventory/page.tsx b/src/app/(company)/inventory/page.tsx
+index 64a93b5..8a413f9 100644
+--- a/src/app/(company)/inventory/page.tsx
++++ b/src/app/(company)/inventory/page.tsx
+@@ -1,6 +1,17 @@
++import { redirect } from "next/navigation";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+ import { InventoryClient } from "./inventory-client";
+ 
+-export default function InventoryPage() {
++export default async function InventoryPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.INVENTORY_MANAGE)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++
+   return (
+     <div>
+       <h1 className="font-display text-3xl font-semibold mb-1">Inventario</h1>
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index 52831ba..d252994 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -4,21 +4,22 @@ import { authOptions } from "@/lib/auth";
+ import { SidebarNav } from "@/components/sidebar-nav";
+ import { hasFeature } from "@/lib/feature-gating";
+ import { FEATURE_KEYS } from "@/lib/plan-features";
++import { hasPermission, PERMISSIONS, type PermissionKey } from "@/lib/permissions";
+ 
+-const BASE_NAV_ITEMS = [
+-  { href: "/pos", label: "Punto de Venta" },
+-  { href: "/kitchen", label: "Cocina" },
+-  { href: "/dashboard", label: "Dashboard" },
+-  { href: "/cash", label: "Caja" },
+-  { href: "/reports", label: "Reportes" },
+-  { href: "/sales-history", label: "Historial de ventas" },
+-  { href: "/audit-log", label: "Auditoría" },
+-  { href: "/inventory", label: "Inventario" },
+-  { href: "/products", label: "Productos" },
+-  { href: "/categories", label: "Categorías" },
+-  { href: "/branches", label: "Sucursales" },
+-  { href: "/users", label: "Usuarios" },
+-  { href: "/settings", label: "Configuración" },
++const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey }[] = [
++  { href: "/pos", label: "Punto de Venta", permission: PERMISSIONS.SALES_CREATE },
++  { href: "/kitchen", label: "Cocina", permission: PERMISSIONS.KITCHEN_VIEW },
++  { href: "/dashboard", label: "Dashboard", permission: PERMISSIONS.REPORTS_VIEW },
++  { href: "/cash", label: "Caja", permission: PERMISSIONS.CASH_OPEN },
++  { href: "/reports", label: "Reportes", permission: PERMISSIONS.REPORTS_VIEW },
++  { href: "/sales-history", label: "Historial de ventas", permission: PERMISSIONS.REPORTS_VIEW },
++  { href: "/audit-log", label: "Auditoría", permission: PERMISSIONS.SETTINGS_MANAGE },
++  { href: "/inventory", label: "Inventario", permission: PERMISSIONS.INVENTORY_MANAGE },
++  { href: "/products", label: "Productos", permission: PERMISSIONS.PRODUCTS_MANAGE },
++  { href: "/categories", label: "Categorías", permission: PERMISSIONS.CATEGORIES_MANAGE },
++  { href: "/branches", label: "Sucursales", permission: PERMISSIONS.BRANCHES_MANAGE },
++  { href: "/users", label: "Usuarios", permission: PERMISSIONS.USERS_MANAGE },
++  { href: "/settings", label: "Configuración", permission: PERMISSIONS.SETTINGS_MANAGE },
+ ];
+ 
+ export default async function CompanyLayout({ children }: { children: React.ReactNode }) {
+@@ -29,26 +30,36 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+ 
+   // El nav en sí no reemplaza el gating real (page.tsx de cada ruta valida
+   // hasFeature/hasPermission de nuevo) — esto es solo para no mostrar un
+-  // link a algo que la empresa no tiene contratado.
++  // link a algo que la empresa no tiene contratado, o que este usuario no
++  // puede abrir por su rol (mesero/cajero no ven Reportes ni Dashboard,
++  // cocinero solo ve Cocina, etc.).
+   const tablesEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.GESTION_MESAS);
+   const dashboardEmpresarialEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.DASHBOARD_EMPRESARIAL);
+ 
+-  let navItems = tablesEnabled
+-    ? [BASE_NAV_ITEMS[0], { href: "/tables", label: "Mesas" }, ...BASE_NAV_ITEMS.slice(1)]
++  let navItems: { href: string; label: string; permission?: PermissionKey }[] = tablesEnabled
++    ? [
++        BASE_NAV_ITEMS[0],
++        { href: "/tables", label: "Mesas", permission: PERMISSIONS.TABLES_MANAGE },
++        ...BASE_NAV_ITEMS.slice(1),
++      ]
+     : BASE_NAV_ITEMS;
+ 
+-  if (dashboardEmpresarialEnabled && session.user.roleName === "ADMIN_EMPRESA") {
++  if (dashboardEmpresarialEnabled && hasPermission(session.user.permissions, PERMISSIONS.REPORTS_VIEW)) {
+     const dashboardIndex = navItems.findIndex((item) => item.href === "/dashboard");
+     navItems = [
+       ...navItems.slice(0, dashboardIndex + 1),
+-      { href: "/dashboard-empresarial", label: "Dashboard empresarial" },
++      { href: "/dashboard-empresarial", label: "Dashboard empresarial", permission: PERMISSIONS.REPORTS_VIEW },
+       ...navItems.slice(dashboardIndex + 1),
+     ];
+   }
+ 
++  const visibleNavItems = navItems.filter(
++    (item) => !item.permission || hasPermission(session.user.permissions, item.permission)
++  );
++
+   return (
+     <div className="min-h-screen flex">
+-      <SidebarNav items={navItems} brand="Mi Restaurante" userName={session.user.name ?? ""} />
++      <SidebarNav items={visibleNavItems} brand="Mi Restaurante" userName={session.user.name ?? ""} />
+       <main className="flex-1 p-8 bg-paper">{children}</main>
+     </div>
+   );
+diff --git a/src/app/(company)/products/page.tsx b/src/app/(company)/products/page.tsx
+index c055d8e..af37010 100644
+--- a/src/app/(company)/products/page.tsx
++++ b/src/app/(company)/products/page.tsx
+@@ -1,12 +1,20 @@
++import { redirect } from "next/navigation";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+ import { productsService } from "@/modules/products/service";
+ import { categoriesService } from "@/modules/categories/service";
+ import { ProductsTable } from "./products-table";
+ 
+ export default async function ProductsPage() {
+   const session = await getServerSession(authOptions);
+-  const companyId = session!.user.companyId!;
++  if (!session?.user?.companyId) redirect("/login");
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.PRODUCTS_MANAGE)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++
++  const companyId = session.user.companyId;
+ 
+   const [products, categories] = await Promise.all([
+     productsService.list(companyId),
+diff --git a/src/app/(company)/reports/page.tsx b/src/app/(company)/reports/page.tsx
+index f205d89..1717bf0 100644
+--- a/src/app/(company)/reports/page.tsx
++++ b/src/app/(company)/reports/page.tsx
+@@ -1,6 +1,17 @@
++import { redirect } from "next/navigation";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+ import { ReportsClient } from "./reports-client";
+ 
+-export default function ReportsPage() {
++export default async function ReportsPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.REPORTS_VIEW)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++
+   return (
+     <div>
+       <h1 className="font-display text-3xl font-semibold mb-1">Reportes</h1>
+diff --git a/src/app/(company)/sales-history/page.tsx b/src/app/(company)/sales-history/page.tsx
+index 878da3e..9b378b8 100644
+--- a/src/app/(company)/sales-history/page.tsx
++++ b/src/app/(company)/sales-history/page.tsx
+@@ -1,6 +1,17 @@
++import { redirect } from "next/navigation";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+ import { SalesHistoryClient } from "./sales-history-client";
+ 
+-export default function SalesHistoryPage() {
++export default async function SalesHistoryPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.REPORTS_VIEW)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++
+   return (
+     <div>
+       <h1 className="font-display text-3xl font-semibold mb-1">Historial de ventas</h1>
+diff --git a/src/app/(company)/users/page.tsx b/src/app/(company)/users/page.tsx
+index 04587a8..64c8913 100644
+--- a/src/app/(company)/users/page.tsx
++++ b/src/app/(company)/users/page.tsx
+@@ -1,12 +1,20 @@
++import { redirect } from "next/navigation";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+ import { usersService } from "@/modules/users/service";
+ import { prisma } from "@/lib/prisma";
+ import { UsersTable } from "./users-table";
+ 
+ export default async function UsersPage() {
+   const session = await getServerSession(authOptions);
+-  const companyId = session!.user.companyId!;
++  if (!session?.user?.companyId) redirect("/login");
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.USERS_MANAGE)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++
++  const companyId = session.user.companyId;
+ 
+   const [users, roles, subscription] = await Promise.all([
+     usersService.list(companyId),
+diff --git a/src/app/(company)/users/users-table.tsx b/src/app/(company)/users/users-table.tsx
+index 642fe41..1d6dfff 100644
+--- a/src/app/(company)/users/users-table.tsx
++++ b/src/app/(company)/users/users-table.tsx
+@@ -15,10 +15,11 @@ type UserRow = {
+ };
+ 
+ const ROLE_LABELS: Record<string, string> = {
+-  ADMIN_EMPRESA: "Admin Empresa",
++  ADMIN_EMPRESA: "Administrador",
+   GERENTE: "Gerente",
+   CAJERO: "Cajero",
+   MESERO: "Mesero",
++  COCINERO: "Cocinero",
+ };
+ 
+ export function UsersTable({ initialUsers, roles }: { initialUsers: UserRow[]; roles: Role[] }) {
+diff --git a/src/app/api/kitchen/orders/[id]/route.ts b/src/app/api/kitchen/orders/[id]/route.ts
+index 853781f..73b16de 100644
+--- a/src/app/api/kitchen/orders/[id]/route.ts
++++ b/src/app/api/kitchen/orders/[id]/route.ts
+@@ -11,9 +11,16 @@ export async function PATCH(_req: Request, { params }: { params: { id: string }
+     return NextResponse.json({ error: "Tu plan actual no incluye la Pantalla de Cocina" }, { status: 403 });
+   }
+ 
++  // El id de un ticket es "orderId:roundNumber" (ver kitchenService.listActive)
++  const [orderId, roundNumberStr] = params.id.split(":");
++  const roundNumber = Number(roundNumberStr);
++  if (!orderId || !roundNumberStr || Number.isNaN(roundNumber)) {
++    return NextResponse.json({ error: "Ticket inválido" }, { status: 400 });
++  }
++
+   try {
+-    const order = await kitchenService.advanceStatus(companyId, params.id);
+-    return NextResponse.json({ order });
++    const ticket = await kitchenService.advanceRound(companyId, orderId, roundNumber);
++    return NextResponse.json({ ticket });
+   } catch (err) {
+     const message = err instanceof Error ? err.message : "No se pudo actualizar el pedido";
+     return NextResponse.json({ error: message }, { status: 400 });
+diff --git a/src/app/api/kitchen/orders/route.ts b/src/app/api/kitchen/orders/route.ts
+index e7b1710..6335b9e 100644
+--- a/src/app/api/kitchen/orders/route.ts
++++ b/src/app/api/kitchen/orders/route.ts
+@@ -14,6 +14,7 @@ export async function GET() {
+   const branchId = await resolveBranchId(ctx, companyId);
+   if (!branchId) return NextResponse.json({ error: "Sin sucursales configuradas" }, { status: 400 });
+ 
+-  const orders = await kitchenService.listActive(branchId);
+-  return NextResponse.json({ orders });
++  // "tickets": una ronda de una orden, no la orden completa — ver kitchenService.listActive
++  const tickets = await kitchenService.listActive(branchId);
++  return NextResponse.json({ tickets });
+ }
+diff --git a/src/app/kitchen/kitchen-client.tsx b/src/app/kitchen/kitchen-client.tsx
+index 983d484..0124b15 100644
+--- a/src/app/kitchen/kitchen-client.tsx
++++ b/src/app/kitchen/kitchen-client.tsx
+@@ -3,23 +3,28 @@
+ import { useEffect, useState } from "react";
+ import Link from "next/link";
+ 
+-type OrderItem = { id: string; quantity: number; product: { name: string } };
+-type Order = {
+-  id: string;
++type Item = { id: string; quantity: number; product: { name: string } };
++// Un "ticket" es una RONDA de una orden (no la orden completa) — así una
++// mesa con cuenta abierta puede tener varios tickets activos a la vez, cada
++// uno con su propio avance, sin que uno reviva a los demás.
++type Ticket = {
++  id: string; // "orderId:roundNumber"
+   orderNumber: number;
++  roundNumber: number;
++  tableName: string | null;
+   status: "PENDING" | "IN_PREPARATION" | "READY";
+   createdAt: string;
+-  items: OrderItem[];
+-  user: { name: string };
++  items: Item[];
++  userName: string;
+ };
+ 
+-const COLUMNS: { status: Order["status"]; label: string; accent: string }[] = [
++const COLUMNS: { status: Ticket["status"]; label: string; accent: string }[] = [
+   { status: "PENDING", label: "Pendiente", accent: "border-ember" },
+   { status: "IN_PREPARATION", label: "En preparación", accent: "border-marigold" },
+   { status: "READY", label: "Listo", accent: "border-sage" },
+ ];
+ 
+-const ACTION_LABEL: Record<Order["status"], string> = {
++const ACTION_LABEL: Record<Ticket["status"], string> = {
+   PENDING: "Empezar a preparar",
+   IN_PREPARATION: "Marcar listo",
+   READY: "Entregar",
+@@ -31,12 +36,12 @@ function minutesAgo(dateStr: string) {
+ }
+ 
+ export function KitchenClient() {
+-  const [orders, setOrders] = useState<Order[]>([]);
++  const [tickets, setTickets] = useState<Ticket[]>([]);
+   const [loading, setLoading] = useState(true);
+ 
+   async function load() {
+     const res = await fetch("/api/kitchen/orders");
+-    if (res.ok) setOrders((await res.json()).orders);
++    if (res.ok) setTickets((await res.json()).tickets);
+     setLoading(false);
+   }
+ 
+@@ -46,15 +51,15 @@ export function KitchenClient() {
+     return () => clearInterval(interval);
+   }, []);
+ 
+-  async function advance(orderId: string) {
++  async function advance(ticketId: string) {
+     // Actualización optimista: mueve la tarjeta de inmediato en pantalla,
+     // sin esperar la respuesta del servidor, para que se sienta instantáneo.
+-    setOrders((prev) => prev.filter((o) => o.id !== orderId || nextStatus(o.status) !== "DELIVERED"));
+-    await fetch(`/api/kitchen/orders/${orderId}`, { method: "PATCH" });
++    setTickets((prev) => prev.filter((t) => t.id !== ticketId || nextStatus(t.status) !== "DELIVERED"));
++    await fetch(`/api/kitchen/orders/${ticketId}`, { method: "PATCH" });
+     load();
+   }
+ 
+-  function nextStatus(status: Order["status"]) {
++  function nextStatus(status: Ticket["status"]) {
+     return status === "PENDING" ? "IN_PREPARATION" : status === "IN_PREPARATION" ? "READY" : "DELIVERED";
+   }
+ 
+@@ -75,34 +80,40 @@ export function KitchenClient() {
+       ) : (
+         <div className="flex-1 grid grid-cols-3 gap-4 p-4 overflow-hidden">
+           {COLUMNS.map((col) => {
+-            const columnOrders = orders.filter((o) => o.status === col.status);
++            const columnTickets = tickets.filter((t) => t.status === col.status);
+             return (
+               <div key={col.status} className="flex flex-col overflow-hidden">
+                 <p className="text-white/70 text-sm font-medium uppercase tracking-wide mb-3 px-1">
+-                  {col.label} <span className="text-white/40">({columnOrders.length})</span>
++                  {col.label} <span className="text-white/40">({columnTickets.length})</span>
+                 </p>
+                 <div className="flex-1 overflow-y-auto space-y-3">
+-                  {columnOrders.length === 0 ? (
++                  {columnTickets.length === 0 ? (
+                     <p className="text-white/30 text-sm px-1">Sin pedidos</p>
+                   ) : (
+-                    columnOrders.map((order) => (
++                    columnTickets.map((ticket) => (
+                       <button
+-                        key={order.id}
+-                        onClick={() => advance(order.id)}
++                        key={ticket.id}
++                        onClick={() => advance(ticket.id)}
+                         className={`w-full text-left bg-ink-800 border-l-4 ${col.accent} rounded-md p-4 active:scale-[0.98] transition-transform`}
+                       >
+                         <div className="flex items-center justify-between mb-2">
+-                          <p className="font-display text-xl font-semibold text-white">#{order.orderNumber}</p>
+-                          <p className="text-xs text-white/40 font-mono">{minutesAgo(order.createdAt)} min</p>
++                          <p className="font-display text-xl font-semibold text-white">
++                            #{ticket.orderNumber}
++                            {ticket.roundNumber > 1 && (
++                              <span className="text-marigold text-sm font-mono ml-1.5">Ronda {ticket.roundNumber}</span>
++                            )}
++                          </p>
++                          <p className="text-xs text-white/40 font-mono">{minutesAgo(ticket.createdAt)} min</p>
+                         </div>
++                        {ticket.tableName && <p className="text-xs text-white/50 mb-2">{ticket.tableName}</p>}
+                         <ul className="space-y-1 mb-3">
+-                          {order.items.map((item) => (
++                          {ticket.items.map((item) => (
+                             <li key={item.id} className="text-sm text-white/90">
+                               <span className="font-mono text-marigold">{item.quantity}x</span> {item.product.name}
+                             </li>
+                           ))}
+                         </ul>
+-                        <p className="text-xs text-white/40 mb-2">{order.user.name}</p>
++                        <p className="text-xs text-white/40 mb-2">{ticket.userName}</p>
+                         <p className="text-xs font-medium text-white/70 bg-white/10 rounded px-2 py-1.5 text-center">
+                           Tocar para: {ACTION_LABEL[col.status]}
+                         </p>
+diff --git a/src/app/kitchen/page.tsx b/src/app/kitchen/page.tsx
+index d492f52..006c72b 100644
+--- a/src/app/kitchen/page.tsx
++++ b/src/app/kitchen/page.tsx
+@@ -1,6 +1,7 @@
+ import { redirect } from "next/navigation";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+ import { kitchenService } from "@/modules/kitchen/service";
+ import { KitchenClient } from "./kitchen-client";
+ import Link from "next/link";
+@@ -9,6 +10,10 @@ export default async function KitchenPage() {
+   const session = await getServerSession(authOptions);
+   if (!session?.user?.companyId) redirect("/login");
+ 
++  if (!hasPermission(session.user.permissions, PERMISSIONS.KITCHEN_VIEW)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++
+   const enabled = await kitchenService.isEnabledForCompany(session.user.companyId);
+ 
+   if (!enabled) {
+diff --git a/src/app/redirect-after-login/page.tsx b/src/app/redirect-after-login/page.tsx
+index 3ccb28e..ae7608d 100644
+--- a/src/app/redirect-after-login/page.tsx
++++ b/src/app/redirect-after-login/page.tsx
+@@ -1,6 +1,7 @@
+ import { redirect } from "next/navigation";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
++import { getHomeRoute } from "@/lib/permissions";
+ 
+ export default async function RedirectAfterLogin() {
+   const session = await getServerSession(authOptions);
+@@ -13,5 +14,8 @@ export default async function RedirectAfterLogin() {
+     redirect("/plataforma/dashboard");
+   }
+ 
+-  redirect("/dashboard");
++  // Antes mandaba a todos a /dashboard, pero un Mesero/Cajero/Cocinero ya
++  // no tiene acceso ahí (sin REPORTS_VIEW) — cada quien entra a la primera
++  // pantalla que sí puede usar.
++  redirect(getHomeRoute(session.user.permissions));
+ }
+diff --git a/src/lib/permissions.ts b/src/lib/permissions.ts
+index f366bc4..89ac4c0 100644
+--- a/src/lib/permissions.ts
++++ b/src/lib/permissions.ts
+@@ -21,51 +21,56 @@ export const PERMISSIONS = {
+   SETTINGS_MANAGE: "settings.manage",
+   HARDWARE_FINANCING_MANAGE: "hardware_financing.manage", // solo SUPER_ADMIN: crear/liquidar/reestructurar financiamientos
+   TABLES_MANAGE: "tables.manage", // requiere además la feature de plan "gestion_mesas" — ver hasFeature()
++  KITCHEN_VIEW: "kitchen.view", // ver/avanzar comandas en la Pantalla de Cocina
+ } as const;
+ 
+ export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
+ 
+-/** Matriz por defecto usada únicamente en el seed inicial. */
++/**
++ * Matriz por defecto usada en el seed. Se puede re-correr (`npm run
++ * prisma:seed`) sin miedo: el seed hace upsert de permisos por rol, nunca
++ * quita los que ya no aparecen aquí, así que ampliar un rol es seguro.
++ *
++ * Roles (acordado con Jose, Sept 2026):
++ * - Administrador (ADMIN_EMPRESA) y Gerente: mismos permisos, acceso general.
++ * - Mesero y Cajero: mismos permisos, solo vender (POS + caja + mesas), sin
++ *   reportes ni dashboard.
++ * - Cocinero: solo Pantalla de Cocina.
++ */
++const ADMIN_PERMISSIONS: PermissionKey[] = [
++  PERMISSIONS.BRANCHES_MANAGE,
++  PERMISSIONS.USERS_MANAGE,
++  PERMISSIONS.PRODUCTS_MANAGE,
++  PERMISSIONS.CATEGORIES_MANAGE,
++  PERMISSIONS.SALES_CREATE,
++  PERMISSIONS.SALES_VIEW,
++  PERMISSIONS.SALES_CANCEL,
++  PERMISSIONS.CASH_OPEN,
++  PERMISSIONS.CASH_CLOSE,
++  PERMISSIONS.CASH_MOVEMENT,
++  PERMISSIONS.INVENTORY_MANAGE,
++  PERMISSIONS.REPORTS_VIEW,
++  PERMISSIONS.SETTINGS_MANAGE,
++  PERMISSIONS.TABLES_MANAGE,
++  PERMISSIONS.KITCHEN_VIEW,
++];
++
++const VENTAS_PERMISSIONS: PermissionKey[] = [
++  PERMISSIONS.SALES_CREATE,
++  PERMISSIONS.SALES_VIEW,
++  PERMISSIONS.CASH_OPEN,
++  PERMISSIONS.CASH_CLOSE,
++  PERMISSIONS.CASH_MOVEMENT,
++  PERMISSIONS.TABLES_MANAGE,
++];
++
+ export const DEFAULT_ROLE_PERMISSIONS: Record<string, PermissionKey[]> = {
+   SUPER_ADMIN: Object.values(PERMISSIONS), // todo, incluido COMPANIES_MANAGE
+-  ADMIN_EMPRESA: [
+-    PERMISSIONS.BRANCHES_MANAGE,
+-    PERMISSIONS.USERS_MANAGE,
+-    PERMISSIONS.PRODUCTS_MANAGE,
+-    PERMISSIONS.CATEGORIES_MANAGE,
+-    PERMISSIONS.SALES_CREATE,
+-    PERMISSIONS.SALES_VIEW,
+-    PERMISSIONS.SALES_CANCEL,
+-    PERMISSIONS.CASH_OPEN,
+-    PERMISSIONS.CASH_CLOSE,
+-    PERMISSIONS.CASH_MOVEMENT,
+-    PERMISSIONS.INVENTORY_MANAGE,
+-    PERMISSIONS.REPORTS_VIEW,
+-    PERMISSIONS.SETTINGS_MANAGE,
+-    PERMISSIONS.TABLES_MANAGE,
+-  ],
+-  GERENTE: [
+-    PERMISSIONS.PRODUCTS_MANAGE,
+-    PERMISSIONS.CATEGORIES_MANAGE,
+-    PERMISSIONS.SALES_CREATE,
+-    PERMISSIONS.SALES_VIEW,
+-    PERMISSIONS.SALES_CANCEL,
+-    PERMISSIONS.CASH_OPEN,
+-    PERMISSIONS.CASH_CLOSE,
+-    PERMISSIONS.CASH_MOVEMENT,
+-    PERMISSIONS.INVENTORY_MANAGE,
+-    PERMISSIONS.REPORTS_VIEW,
+-    PERMISSIONS.TABLES_MANAGE,
+-  ],
+-  CAJERO: [
+-    PERMISSIONS.SALES_CREATE,
+-    PERMISSIONS.SALES_VIEW,
+-    PERMISSIONS.CASH_OPEN,
+-    PERMISSIONS.CASH_CLOSE,
+-    PERMISSIONS.CASH_MOVEMENT,
+-    PERMISSIONS.TABLES_MANAGE,
+-  ],
+-  MESERO: [PERMISSIONS.SALES_CREATE, PERMISSIONS.SALES_VIEW, PERMISSIONS.TABLES_MANAGE],
++  ADMIN_EMPRESA: ADMIN_PERMISSIONS,
++  GERENTE: ADMIN_PERMISSIONS,
++  CAJERO: VENTAS_PERMISSIONS,
++  MESERO: VENTAS_PERMISSIONS,
++  COCINERO: [PERMISSIONS.KITCHEN_VIEW],
+ };
+ 
+ export function hasPermission(
+@@ -74,3 +79,16 @@ export function hasPermission(
+ ): boolean {
+   return userPermissions.includes(required);
+ }
++
++/**
++ * A dónde mandar a alguien que intentó entrar a una página para la que no
++ * tiene permiso. No siempre puede ser "/dashboard" — un Cocinero no tiene
++ * REPORTS_VIEW, así que caería en un loop de redirección si esa fuera la
++ * meta fija. Cada página gateada debe usar esto en vez de un href fijo.
++ */
++export function getHomeRoute(userPermissions: string[]): string {
++  if (hasPermission(userPermissions, PERMISSIONS.REPORTS_VIEW)) return "/dashboard";
++  if (hasPermission(userPermissions, PERMISSIONS.SALES_CREATE)) return "/pos";
++  if (hasPermission(userPermissions, PERMISSIONS.KITCHEN_VIEW)) return "/kitchen";
++  return "/login";
++}
+diff --git a/src/modules/kitchen/service.ts b/src/modules/kitchen/service.ts
+index 95ae29f..4366f43 100644
+--- a/src/modules/kitchen/service.ts
++++ b/src/modules/kitchen/service.ts
+@@ -9,36 +9,104 @@ const NEXT_STATUS: Record<string, string> = {
+ };
+ 
+ export const kitchenService = {
++  /**
++   * Cada "ticket" que ve cocina es una RONDA (orderId + roundNumber), no la
++   * orden completa. Así, en una mesa con cuenta abierta, una ronda nueva no
++   * vuelve a mostrar los productos de rondas anteriores ya entregadas — cada
++   * ronda vive y avanza de estatus por su cuenta. Mostrador siempre tiene
++   * una sola ronda (roundNumber = 1).
++   */
+   async listActive(branchId: string) {
+-    return prisma.order.findMany({
++    const items = await prisma.orderItem.findMany({
+       where: {
+-        branchId,
+         status: { in: [...ACTIVE_STATUSES] },
+-        // No manda a cocina una orden de Mercado Pago cuyo cobro todavía no
+-        // se confirma — evita que se empiece a preparar algo que el cliente
+-        // podría no llegar a pagar. No afecta CASH/CARD/TRANSFER/OTHER,
+-        // que siempre nacen ya aprobados (ver Payment.status default).
+-        payments: { none: { method: { in: ["MERCADOPAGO", "MERCADOPAGO_TERMINAL"] }, status: "PENDING" } },
+-        // Una mesa recién abierta (Caja tipo Mesa) crea la orden antes de
+-        // tener productos — no debe aparecer en cocina hasta la primera ronda.
+-        items: { some: {} },
++        order: {
++          branchId,
++          // No manda a cocina una orden de Mercado Pago cuyo cobro todavía
++          // no se confirma — evita que se empiece a preparar algo que el
++          // cliente podría no llegar a pagar. No afecta CASH/CARD/TRANSFER/
++          // OTHER, que siempre nacen ya aprobados (ver Payment.status default).
++          payments: { none: { method: { in: ["MERCADOPAGO", "MERCADOPAGO_TERMINAL"] }, status: "PENDING" } },
++        },
+       },
+       include: {
+-        items: { include: { product: true } },
+-        user: { select: { name: true } },
++        product: true,
++        order: {
++          select: {
++            id: true,
++            orderNumber: true,
++            user: { select: { name: true } },
++            table: { select: { name: true } },
++          },
++        },
+       },
+-      orderBy: { createdAt: "asc" },
++      orderBy: [{ createdAt: "asc" }],
+     });
++
++    type TicketItem = (typeof items)[number];
++    type Ticket = {
++      id: string; // `${orderId}:${roundNumber}` — lo que usa el botón de avanzar
++      orderId: string;
++      orderNumber: number;
++      roundNumber: number;
++      tableName: string | null;
++      userName: string;
++      status: string;
++      createdAt: Date;
++      items: TicketItem[];
++    };
++
++    const ticketsByKey = new Map<string, Ticket>();
++    for (const item of items) {
++      const key = `${item.orderId}:${item.roundNumber}`;
++      let ticket = ticketsByKey.get(key);
++      if (!ticket) {
++        ticket = {
++          id: key,
++          orderId: item.orderId,
++          orderNumber: item.order.orderNumber,
++          roundNumber: item.roundNumber,
++          tableName: item.order.table?.name ?? null,
++          userName: item.order.user.name,
++          status: item.status,
++          createdAt: item.createdAt,
++          items: [],
++        };
++        ticketsByKey.set(key, ticket);
++      }
++      ticket.items.push(item);
++      // Todos los renglones de una misma ronda siempre avanzan juntos (ver
++      // advanceRound), pero si alguno se quedó atrás por cualquier motivo,
++      // el ticket se queda en el estatus menos avanzado para no perderlo.
++      if (ACTIVE_STATUSES.indexOf(item.status as (typeof ACTIVE_STATUSES)[number]) <
++        ACTIVE_STATUSES.indexOf(ticket.status as (typeof ACTIVE_STATUSES)[number])) {
++        ticket.status = item.status;
++      }
++    }
++
++    return Array.from(ticketsByKey.values()).sort(
++      (a, b) => a.createdAt.getTime() - b.createdAt.getTime()
++    );
+   },
+ 
+-  async advanceStatus(companyId: string, orderId: string) {
++  /** Avanza de estatus TODOS los renglones de una ronda juntos (un ticket = una acción). */
++  async advanceRound(companyId: string, orderId: string, roundNumber: number) {
+     const order = await prisma.order.findFirst({ where: { id: orderId, companyId } });
+     if (!order) throw new Error("Pedido no encontrado");
+ 
+-    const next = NEXT_STATUS[order.status];
+-    if (!next) throw new Error("Este pedido ya no puede avanzar de estatus");
++    const roundItems = await prisma.orderItem.findMany({ where: { orderId, roundNumber } });
++    if (roundItems.length === 0) throw new Error("Ronda no encontrada");
++
++    const current = roundItems[0].status;
++    const next = NEXT_STATUS[current];
++    if (!next) throw new Error("Esta ronda ya no puede avanzar de estatus");
++
++    await prisma.orderItem.updateMany({
++      where: { orderId, roundNumber },
++      data: { status: next as never },
++    });
+ 
+-    return prisma.order.update({ where: { id: orderId }, data: { status: next as never } });
++    return { orderId, roundNumber, status: next };
+   },
+ 
+   /** La Pantalla de Cocina está disponible en todos los planes — la diferenciación de precio es por capacidad (usuarios/sucursales/cajas), no por funciones. El costo de implementación (hardware, instalación) se cotiza aparte del plan de software. */
+diff --git a/src/modules/tableTabs/service.ts b/src/modules/tableTabs/service.ts
+index 35fb019..9c0f8c7 100644
+--- a/src/modules/tableTabs/service.ts
++++ b/src/modules/tableTabs/service.ts
+@@ -93,15 +93,36 @@ export const tableTabsService = {
+     type MinimalProduct = { id: string; price: number | string };
+     const productMap = new Map((products as unknown as MinimalProduct[]).map((p) => [p.id, p]));
+ 
++    // Cada ronda de una cuenta abierta es su propio ticket de cocina, para
++    // no volver a mandar a preparar lo que ya se despachó en rondas
++    // anteriores (antes se reabría el status de TODA la orden en cada
++    // ronda nueva, y cocina veía duplicados). El número de ronda es
++    // consecutivo dentro de esta orden.
++    const maxRound = await prisma.orderItem.aggregate({
++      where: { orderId },
++      _max: { roundNumber: true },
++    });
++    const roundNumber = (maxRound._max.roundNumber ?? 0) + 1;
++
+     let roundSubtotal = 0;
+     const orderItemsData = input.items.map((item) => {
+       const product = productMap.get(item.productId)!;
+       const unitPrice = Number(product.price);
+       const lineTotal = unitPrice * item.quantity;
+       roundSubtotal += lineTotal;
+-      return { productId: product.id, quantity: item.quantity, unitPriceAtSale: unitPrice, lineTotal };
++      return {
++        productId: product.id,
++        quantity: item.quantity,
++        unitPriceAtSale: unitPrice,
++        lineTotal,
++        roundNumber,
++        status: "PENDING" as const,
++      };
+     });
+ 
++    // El total de la cuenta sigue sumando TODAS las rondas (eso ya
++    // funcionaba bien) — lo único que cambia es que cocina ya no vuelve a
++    // ver las rondas previas.
+     const newSubtotal = Number(order.subtotal) + roundSubtotal;
+ 
+     const updated = await prisma.order.update({
+@@ -110,9 +131,6 @@ export const tableTabsService = {
+         items: { create: orderItemsData },
+         subtotal: newSubtotal,
+         total: newSubtotal - Number(order.discount),
+-        // Llegó comida nueva a la mesa: reabre el status para que cocina la
+-        // vea de nuevo, aunque ya hubiera entregado rondas anteriores.
+-        status: "PENDING",
+       },
+       include: { items: { include: { product: true } } },
+     });
+-- 
+2.43.0
+

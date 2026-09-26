@@ -1,12 +1,20 @@
+import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { Card, StatusBadge } from "@/components/ui";
 
 export default async function BranchesPage() {
   const session = await getServerSession(authOptions);
+  if (!session?.user?.companyId) redirect("/login");
+
+  if (!hasPermission(session.user.permissions, PERMISSIONS.BRANCHES_MANAGE)) {
+    redirect(getHomeRoute(session.user.permissions));
+  }
+
   const branches = await prisma.branch.findMany({
-    where: { companyId: session!.user.companyId! },
+    where: { companyId: session.user.companyId },
     orderBy: { createdAt: "asc" },
   });
   type BranchRow = (typeof branches)[number];

@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
 import { hasFeature } from "@/lib/feature-gating";
 import { FEATURE_KEYS } from "@/lib/plan-features";
 import { DashboardEmpresarialClient } from "./dashboard-empresarial-client";
@@ -9,6 +10,14 @@ import Link from "next/link";
 export default async function DashboardEmpresarialPage() {
   const session = await getServerSession(authOptions);
   if (!session?.user?.companyId) redirect("/login");
+
+  // Antes solo estaba "gateado" por el nombre del rol en el link del menú
+  // (layout.tsx) — la página en sí no revisaba nada, así que cualquiera
+  // que entrara directo a la URL la veía. Ahora sí valida el permiso real,
+  // igual que el resto de páginas sensibles.
+  if (!hasPermission(session.user.permissions, PERMISSIONS.REPORTS_VIEW)) {
+    redirect(getHomeRoute(session.user.permissions));
+  }
 
   const enabled = await hasFeature(session.user.companyId, FEATURE_KEYS.DASHBOARD_EMPRESARIAL);
 

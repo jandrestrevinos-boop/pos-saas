@@ -25,10 +25,11 @@ type Company = {
 };
 
 const ROLE_LABELS: Record<string, string> = {
-  ADMIN_EMPRESA: "Admin Empresa",
+  ADMIN_EMPRESA: "Administrador",
   GERENTE: "Gerente",
   CAJERO: "Cajero",
   MESERO: "Mesero",
+  COCINERO: "Cocinero",
 };
 
 export function CompaniesTable({ initialCompanies, plans, roles }: { initialCompanies: Company[]; plans: Plan[]; roles: Role[] }) {

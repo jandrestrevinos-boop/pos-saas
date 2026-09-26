@@ -1,5 +1,7 @@
+import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { StatCard, Button } from "@/components/ui";
 import { formatMxn } from "@/lib/format";
@@ -8,7 +10,13 @@ import { MonthlyRevenueChart } from "./monthly-revenue-chart";
 
 export default async function CompanyDashboard() {
   const session = await getServerSession(authOptions);
-  const companyId = session!.user.companyId!;
+  if (!session?.user?.companyId) redirect("/login");
+
+  if (!hasPermission(session.user.permissions, PERMISSIONS.REPORTS_VIEW)) {
+    redirect(getHomeRoute(session.user.permissions));
+  }
+
+  const companyId = session.user.companyId;
 
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);

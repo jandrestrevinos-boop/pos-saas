@@ -422,8 +422,26 @@ model OrderItem {
   unitPriceAtSale Decimal @db.Decimal(10, 2) // precio congelado al momento de la venta
   lineTotal       Decimal @db.Decimal(10, 2)
 
+  // Estatus de cocina POR RENGLÓN, no de la orden completa. Antes cocina
+  // dependía de Order.status, así que cuando una cuenta abierta (mesa)
+  // recibía una ronda nueva, se reabría el status de TODA la orden y
+  // cocina volvía a ver los productos de rondas anteriores ya entregadas
+  // como si fueran pedido nuevo (duplicado). Ahora cada renglón avanza
+  // por su cuenta: PENDING -> IN_PREPARATION -> READY -> DELIVERED.
+  status      OrderStatus @default(PENDING)
+  // Todos los renglones mandados a cocina juntos en una misma "ronda"
+  // comparten este número (1 = primera ronda). En Mostrador siempre es 1.
+  // En una mesa con cuenta abierta, cada vez que se agregan productos
+  // nuevos se les asigna el siguiente número — así cocina los ve como un
+  // ticket aparte, sin tocar los de rondas previas. El cobro sigue siendo
+  // uno solo por toda la cuenta (Order.subtotal ya suma todas las rondas).
+  roundNumber Int         @default(1)
+  createdAt   DateTime    @default(now()) // hora de esta ronda, no la de apertura de la cuenta
+
   modifiers OrderItemModifier[]
 
+  @@index([orderId, roundNumber])
+  @@index([status])
   @@map("order_items")
 }
 

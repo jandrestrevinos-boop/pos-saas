@@ -1,0 +1,30 @@
+From ae0e7b1786bb1d8ee2f43524a9d2dd9f9b33ee64 Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Sat, 26 Sep 2026 16:10:04 +0000
+Subject: [PATCH] Etiqueta 'Cocinero' en el selector de roles del panel Super
+ Admin (Empresas)
+
+---
+ src/app/plataforma/companies/companies-table.tsx | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/app/plataforma/companies/companies-table.tsx b/src/app/plataforma/companies/companies-table.tsx
+index 21c6010..f97e55f 100644
+--- a/src/app/plataforma/companies/companies-table.tsx
++++ b/src/app/plataforma/companies/companies-table.tsx
+@@ -25,10 +25,11 @@ type Company = {
+ };
+ 
+ const ROLE_LABELS: Record<string, string> = {
+-  ADMIN_EMPRESA: "Admin Empresa",
++  ADMIN_EMPRESA: "Administrador",
+   GERENTE: "Gerente",
+   CAJERO: "Cajero",
+   MESERO: "Mesero",
++  COCINERO: "Cocinero",
+ };
+ 
+ export function CompaniesTable({ initialCompanies, plans, roles }: { initialCompanies: Company[]; plans: Plan[]; roles: Role[] }) {
+-- 
+2.43.0
+

@@ -14,6 +14,7 @@ export async function GET() {
   const branchId = await resolveBranchId(ctx, companyId);
   if (!branchId) return NextResponse.json({ error: "Sin sucursales configuradas" }, { status: 400 });
 
-  const orders = await kitchenService.listActive(branchId);
-  return NextResponse.json({ orders });
+  // "tickets": una ronda de una orden, no la orden completa — ver kitchenService.listActive
+  const tickets = await kitchenService.listActive(branchId);
+  return NextResponse.json({ tickets });
 }

@@ -1,9 +1,16 @@
+import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
 import { CashClient } from "./cash-client";
 
 export default async function CashPage() {
   const session = await getServerSession(authOptions);
+  if (!session?.user?.companyId) redirect("/login");
+
+  if (!hasPermission(session.user.permissions, PERMISSIONS.CASH_OPEN)) {
+    redirect(getHomeRoute(session.user.permissions));
+  }
 
   return (
     <div>
