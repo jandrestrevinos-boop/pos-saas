@@ -15,6 +15,8 @@ type Product = {
   isActive: boolean;
   category: { name: string };
   categoryId: string;
+  tracksInventory: boolean;
+  stock: number;
 };
 
 function marginPercent(price: string, cost: string | null): string {
@@ -38,7 +40,15 @@ export function ProductsTable({
   const [editing, setEditing] = useState<Product | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [form, setForm] = useState({ name: "", categoryId: categories[0]?.id ?? "", price: "", cost: "", sku: "" });
+  const [form, setForm] = useState({
+    name: "",
+    categoryId: categories[0]?.id ?? "",
+    price: "",
+    cost: "",
+    sku: "",
+    tracksInventory: false,
+    stock: "",
+  });
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -68,7 +78,15 @@ export function ProductsTable({
       const category = categories.find((c) => c.id === form.categoryId)!;
       setProducts((prev) => [{ ...(data.product as Product), category }, ...prev]);
       setModalOpen(false);
-      setForm({ name: "", categoryId: categories[0]?.id ?? "", price: "", cost: "", sku: "" });
+      setForm({
+        name: "",
+        categoryId: categories[0]?.id ?? "",
+        price: "",
+        cost: "",
+        sku: "",
+        tracksInventory: false,
+        stock: "",
+      });
     } catch {
       setError("No se pudo conectar con el servidor. Revisa tu conexión e intenta de nuevo.");
     } finally {
@@ -107,6 +125,7 @@ export function ProductsTable({
                 <th className="px-5 py-3 font-medium">Precio</th>
                 <th className="px-5 py-3 font-medium">Costo</th>
                 <th className="px-5 py-3 font-medium">Margen</th>
+                <th className="px-5 py-3 font-medium">Inventario</th>
                 <th className="px-5 py-3 font-medium">Estado</th>
                 <th className="px-5 py-3 font-medium"></th>
               </tr>
@@ -119,6 +138,9 @@ export function ProductsTable({
                   <td className="px-5 py-3 font-mono">{formatMxn(p.price)}</td>
                   <td className="px-5 py-3 font-mono text-muted">{p.cost ? formatMxn(p.cost) : "—"}</td>
                   <td className="px-5 py-3 font-mono">{marginPercent(p.price, p.cost)}</td>
+                  <td className="px-5 py-3 font-mono">
+                    {p.tracksInventory ? p.stock : <span className="text-muted">No controla</span>}
+                  </td>
                   <td className="px-5 py-3">
                     <StatusBadge status={p.isActive ? "active" : "inactive"} label={p.isActive ? "Activo" : "Inactivo"} />
                   </td>
@@ -194,6 +216,31 @@ export function ProductsTable({
             />
           </Field>
 
+          <Field label="Control de inventario">
+            <label className="flex items-center gap-2 text-sm font-normal">
+              <input
+                type="checkbox"
+                checked={form.tracksInventory}
+                onChange={(e) => setForm({ ...form, tracksInventory: e.target.checked })}
+              />
+              Descontar existencias automáticamente al vender este producto
+            </label>
+          </Field>
+
+          {form.tracksInventory && (
+            <Field label="Existencias iniciales">
+              <input
+                type="number"
+                step="1"
+                min="0"
+                className={inputClass}
+                value={form.stock}
+                onChange={(e) => setForm({ ...form, stock: e.target.value })}
+                placeholder="50"
+              />
+            </Field>
+          )}
+
           {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
 
           <div className="flex justify-end gap-2">
@@ -239,6 +286,8 @@ function EditProductModal({
     price: product.price,
     cost: product.cost ?? "",
     sku: product.sku ?? "",
+    tracksInventory: product.tracksInventory ?? false,
+    stock: String(product.stock ?? 0),
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -319,6 +368,30 @@ function EditProductModal({
         <Field label="SKU (opcional)">
           <input className={inputClass} value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} />
         </Field>
+
+        <Field label="Control de inventario">
+          <label className="flex items-center gap-2 text-sm font-normal">
+            <input
+              type="checkbox"
+              checked={form.tracksInventory}
+              onChange={(e) => setForm({ ...form, tracksInventory: e.target.checked })}
+            />
+            Descontar existencias automáticamente al vender este producto
+          </label>
+        </Field>
+
+        {form.tracksInventory && (
+          <Field label="Existencias">
+            <input
+              type="number"
+              step="1"
+              min="0"
+              className={inputClass}
+              value={form.stock}
+              onChange={(e) => setForm({ ...form, stock: e.target.value })}
+            />
+          </Field>
+        )}
 
         {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
 
