@@ -64,6 +64,7 @@ export async function POST(req: NextRequest) {
             messageId,
             whatsappPhoneNumberId: config.phoneNumberId,
             whatsappAccessToken: config.accessToken,
+            welcomeMessage: config.welcomeMessage,
           });
         }
       }

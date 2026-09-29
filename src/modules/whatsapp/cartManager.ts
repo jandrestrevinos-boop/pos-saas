@@ -24,7 +24,8 @@ export const cartManager = {
         throw new Error(`Producto ${item.productId} no existe`);
       }
 
-      if (product.stock < item.quantity) {
+      // Solo se valida stock si el producto realmente controla inventario.
+      if (product.tracksInventory && product.stock < item.quantity) {
         throw new Error(`Stock insuficiente`);
       }
 
