@@ -31,6 +31,17 @@ export const saleSchema = z
 
 export type SaleInput = z.infer<typeof saleSchema>;
 
+// Cobro de un pedido que YA existe (caso de hoy: pedidos que llegaron por
+// WhatsApp sin pago adjunto). No incluye MERCADOPAGO/MERCADOPAGO_TERMINAL
+// aquí — esos flujos van por su propio webhook de confirmación, no por
+// un cobro manual en el mostrador.
+export const payExistingOrderSchema = z.object({
+  paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER"]),
+  cashReceived: z.coerce.number().min(0).optional(),
+});
+
+export type PayExistingOrderInput = z.infer<typeof payExistingOrderSchema>;
+
 export const salesService = {
   async create(companyId: string, branchId: string, userId: string, input: SaleInput) {
     // 1. Trae los productos reales de la base de datos — el precio y nombre
@@ -153,6 +164,96 @@ export const salesService = {
     } catch {
       // Igual que en create(): el inventario no debe bloquear que el pago quede confirmado.
     }
+  },
+
+  /**
+   * Pedidos que llegaron por WhatsApp y ya están en cocina, pero todavía
+   * nadie ha pagado en el mostrador — orderCreator.ts (módulo de WhatsApp)
+   * los crea SIN ningún Payment adjunto, a diferencia de una venta normal
+   * del POS que siempre nace con su pago ya resuelto. Por eso "pendiente
+   * de pago" aquí es simplemente: tiene whatsAppCart Y no tiene ningún
+   * Payment con status APPROVED — sin necesidad de ninguna columna nueva.
+   */
+  async listPendingWhatsAppOrders(companyId: string, branchId: string) {
+    return prisma.order.findMany({
+      where: {
+        companyId,
+        branchId,
+        status: { not: "CANCELED" },
+        whatsAppCart: { isNot: null },
+        payments: { none: { status: "APPROVED" } },
+      },
+      include: {
+        items: { include: { product: { select: { name: true } } } },
+        whatsAppCart: { include: { session: { select: { phoneNumber: true } } } },
+      },
+      orderBy: { createdAt: "asc" },
+    });
+  },
+
+  /**
+   * Cobra un pedido que ya existe (típicamente uno de WhatsApp que llegó
+   * sin pago). Reutiliza las mismas reglas de validación de efectivo/cambio
+   * que create(), pero en vez de crear una orden nueva, le adjunta el pago
+   * a la que ya está en cocina — el inventario se descuenta hasta este
+   * momento, no cuando se generó el pedido.
+   */
+  async payExistingOrder(
+    companyId: string,
+    branchId: string,
+    userId: string,
+    orderId: string,
+    input: PayExistingOrderInput
+  ) {
+    const order = await prisma.order.findFirst({
+      where: { id: orderId, companyId, branchId },
+      include: { items: true, payments: true },
+    });
+    if (!order) throw new Error("Pedido no encontrado");
+    if (order.status === "CANCELED") throw new Error("Este pedido fue cancelado");
+    if (order.payments.some((p) => p.status === "APPROVED")) {
+      throw new Error("Este pedido ya fue pagado");
+    }
+
+    const total = Number(order.total);
+
+    if (input.paymentMethod === "CASH") {
+      if (input.cashReceived === undefined || input.cashReceived < total) {
+        throw new Error("El efectivo recibido no puede ser menor al total");
+      }
+    }
+
+    const change =
+      input.paymentMethod === "CASH" && input.cashReceived !== undefined
+        ? input.cashReceived - total
+        : undefined;
+
+    await prisma.payment.create({
+      data: {
+        orderId: order.id,
+        method: input.paymentMethod,
+        status: "APPROVED",
+        amount: total,
+        cashReceived: input.cashReceived,
+        change,
+      },
+    });
+
+    const { inventoryService } = await import("@/modules/inventory/service");
+    try {
+      await inventoryService.deductForSale(
+        branchId,
+        userId,
+        order.items.map((i) => ({ productId: i.productId, quantity: i.quantity }))
+      );
+    } catch {
+      // Igual que en create(): el inventario no debe bloquear un cobro ya realizado.
+    }
+
+    return prisma.order.findUnique({
+      where: { id: order.id },
+      include: { items: { include: { product: true } }, payments: true },
+    });
   },
 
   async listToday(companyId: string, branchId?: string) {

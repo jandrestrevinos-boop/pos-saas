@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button, Card } from "@/components/ui";
 import { Modal, Field, inputClass } from "@/components/ui/modal";
 import { formatMxn } from "@/lib/format";
@@ -33,12 +33,200 @@ export function CashClient({ userName }: { userName: string }) {
 
   if (loading) return <p className="text-sm text-muted">Cargando...</p>;
 
-  if (!status?.open) {
-    return <OpenRegisterForm onOpened={refresh} />;
+  return (
+    <div>
+      <WhatsAppPendingOrders />
+
+      {!status?.open ? <OpenRegisterForm onOpened={refresh} /> : <OpenRegisterView status={status} userName={userName} onChange={refresh} />}
+    </div>
+  );
+}
+
+// ---------- Pedidos de WhatsApp pendientes de pago ----------
+
+type PendingOrderItem = { id: string; quantity: number; product: { name: string } };
+type PendingOrder = {
+  id: string;
+  total: string;
+  createdAt: string;
+  items: PendingOrderItem[];
+  whatsAppCart: { session: { phoneNumber: string } } | null;
+};
+
+function WhatsAppPendingOrders() {
+  const [orders, setOrders] = useState<PendingOrder[]>([]);
+  const [paying, setPaying] = useState<PendingOrder | null>(null);
+  const [flash, setFlash] = useState(false);
+  const knownIds = useRef<Set<string>>(new Set());
+  const firstLoad = useRef(true);
+
+  async function poll() {
+    try {
+      const res = await fetch("/api/whatsapp/pending-orders");
+      if (!res.ok) return;
+      const data = await res.json();
+      const list: PendingOrder[] = data.orders ?? [];
+
+      const newOnes = list.filter((o) => !knownIds.current.has(o.id));
+      if (!firstLoad.current && newOnes.length > 0) {
+        setFlash(true);
+        setTimeout(() => setFlash(false), 2500);
+      }
+      firstLoad.current = false;
+      knownIds.current = new Set(list.map((o) => o.id));
+
+      setOrders(list);
+    } catch {
+      // silencioso — se reintenta en el siguiente ciclo, no vale la pena
+      // interrumpir al cajero por un fallo de red pasajero
+    }
   }
 
-  return <OpenRegisterView status={status} userName={userName} onChange={refresh} />;
+  useEffect(() => {
+    poll();
+    const interval = setInterval(poll, 6000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (orders.length === 0) return null;
+
+  return (
+    <Card
+      className={`p-5 mb-6 border-2 transition-colors duration-500 ${
+        flash ? "border-ember bg-ember/10 animate-pulse" : "border-ember/40"
+      }`}
+    >
+      <div className="flex items-center justify-between mb-3">
+        <p className="font-display text-lg font-semibold">📱 Pedidos de WhatsApp por cobrar</p>
+        <span className="text-xs font-medium bg-ember/15 text-ember-dark px-2 py-0.5 rounded-full">
+          {orders.length}
+        </span>
+      </div>
+      <div className="space-y-2">
+        {orders.map((o) => (
+          <div key={o.id} className="flex items-center justify-between bg-ink-100 rounded-md px-4 py-3">
+            <div>
+              <p className="text-sm font-medium">
+                {o.items.map((i) => `${i.quantity}× ${i.product.name}`).join(", ")}
+              </p>
+              <p className="text-xs text-muted">
+                {o.whatsAppCart?.session.phoneNumber ?? "Cliente"} · hace{" "}
+                {Math.max(1, Math.round((Date.now() - new Date(o.createdAt).getTime()) / 60000))} min
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="font-mono font-semibold">{formatMxn(o.total)}</span>
+              <Button onClick={() => setPaying(o)}>Cobrar</Button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {paying && (
+        <PayOrderModal
+          order={paying}
+          onClose={() => setPaying(null)}
+          onPaid={() => {
+            setPaying(null);
+            poll();
+          }}
+        />
+      )}
+    </Card>
+  );
 }
+
+function PayOrderModal({ order, onClose, onPaid }: { order: PendingOrder; onClose: () => void; onPaid: () => void }) {
+  const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER">("CASH");
+  const [cashReceived, setCashReceived] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const total = Number(order.total);
+  const received = parseFloat(cashReceived) || 0;
+  const change = method === "CASH" ? received - total : 0;
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    setError("");
+
+    const res = await fetch(`/api/whatsapp/pending-orders/${order.id}/pay`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        paymentMethod: method,
+        cashReceived: method === "CASH" ? received : undefined,
+      }),
+    });
+    const data = await res.json();
+    setSaving(false);
+    if (!res.ok) {
+      setError(data.error ?? "No se pudo cobrar el pedido");
+      return;
+    }
+    onPaid();
+  }
+
+  return (
+    <Modal open onClose={onClose} title="Cobrar pedido de WhatsApp">
+      <div className="mb-4 bg-ink-100 rounded-md p-4">
+        {order.items.map((i) => (
+          <p key={i.id} className="text-sm">
+            {i.quantity}× {i.product.name}
+          </p>
+        ))}
+        <p className="font-mono text-xl font-semibold mt-2">{formatMxn(order.total)}</p>
+      </div>
+
+      <form onSubmit={handleSubmit}>
+        <Field label="Método de pago">
+          <select className={inputClass} value={method} onChange={(e) => setMethod(e.target.value as typeof method)}>
+            <option value="CASH">Efectivo</option>
+            <option value="CARD">Tarjeta</option>
+            <option value="TRANSFER">Transferencia</option>
+            <option value="OTHER">Otro</option>
+          </select>
+        </Field>
+
+        {method === "CASH" && (
+          <Field label="Efectivo recibido (MXN)">
+            <input
+              required
+              type="number"
+              min="0"
+              step="0.01"
+              autoFocus
+              className={inputClass}
+              value={cashReceived}
+              onChange={(e) => setCashReceived(e.target.value)}
+              placeholder={total.toFixed(2)}
+            />
+          </Field>
+        )}
+
+        {method === "CASH" && cashReceived && (
+          <p className={`text-sm mb-4 ${change >= 0 ? "text-sage" : "text-ember-dark"}`}>
+            {change >= 0 ? `Cambio: ${formatMxn(change)}` : "El efectivo recibido no alcanza"}
+          </p>
+        )}
+
+        {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
+
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="secondary" onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button type="submit" disabled={saving}>
+            {saving ? "Cobrando..." : "Confirmar cobro"}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// ---------- Apertura / turno de caja (sin cambios de lógica) ----------
 
 function OpenRegisterForm({ onOpened }: { onOpened: () => void }) {
   const [openingCash, setOpeningCash] = useState("");
