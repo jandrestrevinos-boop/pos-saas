@@ -81,6 +81,17 @@ export const cartManager = {
     }
   },
 
+  /**
+   * IMPORTANTE: no se suma ningún impuesto extra aquí. El resto del
+   * sistema (salesService.create, ventas normales del POS) trata el
+   * precio de cada producto como el precio FINAL que paga el cliente
+   * (tax: 0 siempre) — así están cargados los precios en /products hoy.
+   * Antes este método sumaba un 16% adicional que nadie pidió, así que
+   * un pedido de WhatsApp cobraba 16% más que el mismo pedido hecho en
+   * el mostrador para los mismos productos. Si algún día se necesita
+   * IVA desglosado de verdad, debe activarse aquí Y en salesService.create
+   * a la vez, nunca solo en uno de los dos.
+   */
   async updateTotals(cartId: string) {
     try {
       const items = await prisma.whatsAppCartItem.findMany({
@@ -88,15 +99,13 @@ export const cartManager = {
       });
 
       const subtotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
-      const tax = subtotal * 0.16;
-      const total = subtotal + tax;
 
       return await prisma.whatsAppCart.update({
         where: { id: cartId },
         data: {
           subtotal,
-          tax,
-          total,
+          tax: 0,
+          total: subtotal,
         },
       });
     } catch (error) {
@@ -143,16 +152,14 @@ export const cartManager = {
       }
 
       const newSubtotal = cart.subtotal - discountAmount;
-      const newTax = newSubtotal * 0.16;
-      const newTotal = newSubtotal + newTax;
 
       return await prisma.whatsAppCart.update({
         where: { id: cartId },
         data: {
           discount: discountAmount,
           subtotal: newSubtotal,
-          tax: newTax,
-          total: newTotal,
+          tax: 0,
+          total: newSubtotal,
         },
       });
     } catch (error) {
