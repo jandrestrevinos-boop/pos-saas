@@ -36,14 +36,15 @@ export const orderCreator = {
         throw new Error("No hay usuario en la compañía para atribuir la orden");
       }
 
-      const ticketNumber = `TKT${Date.now()}`;
-
       const newOrder = await prisma.order.create({
         data: {
           branchId,
           companyId,
           userId: user.id,
-          localId: ticketNumber,
+          // Identificador interno para soporte offline del POS — NO es el
+          // número que ve el cliente ni el staff. Mismo patrón que usa
+          // salesService.create para ventas normales del mostrador.
+          localId: crypto.randomUUID(),
           status: "PENDING",
           orderType: "PARA_LLEVAR",
           // Totales reales del carrito — ya vienen calculados por
@@ -65,7 +66,12 @@ export const orderCreator = {
 
       return {
         id: newOrder.id,
-        ticketNumber: newOrder.localId,
+        // orderNumber es el consecutivo real que también ve el cocinero
+        // en la Pantalla de Cocina y el cajero al cobrar — antes aquí se
+        // inventaba un número aparte ("TKT" + hora del servidor) que no
+        // coincidía con nada más en el sistema, así que el cliente no
+        // podía usarlo para que lo identificaran en el mostrador.
+        ticketNumber: String(newOrder.orderNumber),
         total: Number(newOrder.total),
         status: newOrder.status,
         createdAt: newOrder.createdAt,

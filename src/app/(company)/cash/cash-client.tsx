@@ -47,6 +47,7 @@ export function CashClient({ userName }: { userName: string }) {
 type PendingOrderItem = { id: string; quantity: number; product: { name: string } };
 type PendingOrder = {
   id: string;
+  orderNumber: number;
   total: string;
   createdAt: string;
   items: PendingOrderItem[];
@@ -107,6 +108,7 @@ function WhatsAppPendingOrders() {
           <div key={o.id} className="flex items-center justify-between bg-ink-100 rounded-md px-4 py-3">
             <div>
               <p className="text-sm font-medium">
+                <span className="font-mono text-ember-dark">#{o.orderNumber}</span> ·{" "}
                 {o.items.map((i) => `${i.quantity}× ${i.product.name}`).join(", ")}
               </p>
               <p className="text-xs text-muted">
