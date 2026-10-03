@@ -5,6 +5,8 @@ import { SidebarNav } from "@/components/sidebar-nav";
 import { hasFeature } from "@/lib/feature-gating";
 import { FEATURE_KEYS } from "@/lib/plan-features";
 import { hasPermission, PERMISSIONS, type PermissionKey } from "@/lib/permissions";
+import { requireBillingAccess } from "@/lib/billing-gate";
+import Link from "next/link";
 
 const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey }[] = [
   { href: "/pos", label: "Punto de Venta", permission: PERMISSIONS.SALES_CREATE },
@@ -27,6 +29,11 @@ export default async function CompanyLayout({ children }: { children: React.Reac
   if (!session?.user || !session.user.companyId) {
     redirect("/login");
   }
+
+  // Candado de cobro: demo / periodo pagado vencido (+ gracia) => /facturacion.
+  const billing = await requireBillingAccess(session.user.companyId);
+  const showBillingBanner =
+    billing.state === "GRACE" || (billing.state === "DEMO" && billing.daysLeft !== null && billing.daysLeft <= 5);
 
   // El nav en sí no reemplaza el gating real (page.tsx de cada ruta valida
   // hasFeature/hasPermission de nuevo) — esto es solo para no mostrar un
@@ -60,7 +67,26 @@ export default async function CompanyLayout({ children }: { children: React.Reac
   return (
     <div className="min-h-screen flex">
       <SidebarNav items={visibleNavItems} brand="Mi Restaurante" userName={session.user.name ?? ""} />
-      <main className="flex-1 p-8 bg-paper">{children}</main>
+      <main className="flex-1 p-8 bg-paper">
+        {showBillingBanner && (
+          <div className="mb-6 rounded-md border border-marigold/40 bg-marigold/10 px-4 py-3 text-sm">
+            {billing.state === "GRACE" ? (
+              <span>
+                Tu plan venció. Tienes <strong>{billing.graceDaysLeft} {billing.graceDaysLeft === 1 ? "día" : "días"}</strong> para
+                regularizar tu pago antes de que se bloquee el acceso.{" "}
+              </span>
+            ) : (
+              <span>
+                Tu demo termina en <strong>{billing.daysLeft} {billing.daysLeft === 1 ? "día" : "días"}</strong>.{" "}
+              </span>
+            )}
+            <Link href="/facturacion" className="underline font-medium">
+              Ir a facturación
+            </Link>
+          </div>
+        )}
+        {children}
+      </main>
     </div>
   );
 }

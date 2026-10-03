@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { z } from "zod";
 import { hardwareFinancingService } from "@/modules/hardwareFinancing/service";
 import { platformSettingsService } from "@/modules/platformSettings/service";
+import { addDays } from "@/lib/billing";
 
 export const createCompanySchema = z.object({
   name: z.string().min(2, "El nombre es obligatorio"),
@@ -29,6 +30,9 @@ export const companiesService = {
     const plan = await prisma.plan.findUnique({ where: { id: input.planId } });
     if (!plan) throw new Error("El plan seleccionado no existe");
 
+    const settings = await platformSettingsService.get();
+    const trialEndsAt = addDays(new Date(), settings.defaultTrialDays);
+
     return prisma.company.create({
       data: {
         name: input.name,
@@ -40,6 +44,7 @@ export const companiesService = {
           create: {
             planId: plan.id,
             status: "TRIALING",
+            trialEndsAt,
             license: {
               create: {
                 allowedBranches: plan.maxBranches,

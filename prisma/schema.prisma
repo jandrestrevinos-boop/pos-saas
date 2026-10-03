@@ -37,6 +37,12 @@ model Company {
   hardwareFinancings HardwareFinancing[]
   mercadoPagoAccount MercadoPagoAccount?
 
+  // Interruptor comercial (lo activa Jose por empresa desde Super Admin):
+  // solo una empresa con esto en true puede tener financiamientos de hardware.
+  hardwareFinancingEnabled Boolean @default(false)
+
+  subscriptionPayments SubscriptionPayment[]
+
   @@map("companies")
 }
 
@@ -78,6 +84,12 @@ model PlatformSettings {
   // el saldo/calendario/historial de financiamiento se conserva intacto,
   // solo deja de bloquear la cancelaci\u00f3n.
   blockCancellationWithPendingFinancing Boolean @default(true)
+
+  // Cobro de la suscripción de TAPI: duración del demo para empresas nuevas
+  // y días de gracia después de que vence el demo / el periodo pagado
+  // antes de bloquear el acceso.
+  defaultTrialDays Int @default(14)
+  graceDays        Int @default(5)
 
   updatedAt DateTime @updatedAt
 
@@ -191,7 +203,13 @@ model Subscription {
   customPriceMxn Decimal? @db.Decimal(10, 2) 
   customFeatures String[] @default([])
 
-  license License?
+  // Cobro mensual. renewalDate = "pagado hasta" (fin del periodo pagado).
+  trialEndsAt     DateTime? // fin del demo (solo aplica mientras status = TRIALING)
+  mpPreapprovalId String?   @unique // suscripción recurrente en la cuenta de Mercado Pago de Jose
+  payerEmail      String?
+
+  license  License?
+  payments SubscriptionPayment[]
 
   @@map("subscriptions")
 }
@@ -213,6 +231,42 @@ model License {
   createdAt           DateTime @default(now())
 
   @@map("licenses")
+}
+
+enum SubscriptionPaymentMethod {
+  MERCADOPAGO
+  MANUAL
+}
+
+enum SubscriptionPaymentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REFUNDED
+}
+
+/// Cobro mensual de la suscripción de TAPI (software). Independiente de
+/// HardwareFinancingPayment. Historial + idempotencia del webhook.
+model SubscriptionPayment {
+  id             String       @id @default(uuid())
+  companyId      String
+  company        Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  subscriptionId String
+  subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  amountMxn   Decimal                   @db.Decimal(10, 2)
+  status      SubscriptionPaymentStatus @default(PENDING)
+  method      SubscriptionPaymentMethod @default(MERCADOPAGO)
+  mpPaymentId String?                   @unique
+
+  periodStart DateTime?
+  periodEnd   DateTime?
+  paidAt      DateTime?
+  note        String?
+  createdAt   DateTime  @default(now())
+
+  @@index([companyId, createdAt])
+  @@map("subscription_payments")
 }
 
 // ------------------------------------------------------------

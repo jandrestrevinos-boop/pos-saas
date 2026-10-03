@@ -11,7 +11,7 @@ export const platformSettingsService = {
     return prisma.platformSettings.create({ data: {} });
   },
 
-  async update(data: { blockCancellationWithPendingFinancing?: boolean }) {
+  async update(data: { blockCancellationWithPendingFinancing?: boolean; defaultTrialDays?: number; graceDays?: number }) {
     const current = await platformSettingsService.get();
     return prisma.platformSettings.update({ where: { id: current.id }, data });
   },

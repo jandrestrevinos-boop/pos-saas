@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Button, Card } from "@/components/ui";
 
-type Settings = { id: string; blockCancellationWithPendingFinancing: boolean };
+type Settings = { id: string; blockCancellationWithPendingFinancing: boolean; defaultTrialDays: number; graceDays: number };
 
 export function SettingsClient({ initialSettings }: { initialSettings: Settings }) {
   const [settings, setSettings] = useState(initialSettings);
@@ -23,7 +23,56 @@ export function SettingsClient({ initialSettings }: { initialSettings: Settings 
     }
   }
 
+  const [trialDays, setTrialDays] = useState(String(initialSettings.defaultTrialDays));
+  const [graceDays, setGraceDays] = useState(String(initialSettings.graceDays));
+  const [savingBilling, setSavingBilling] = useState(false);
+  const [billingMsg, setBillingMsg] = useState("");
+
+  async function saveBilling() {
+    setSavingBilling(true);
+    setBillingMsg("");
+    const res = await fetch("/api/platform-settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ defaultTrialDays: Number(trialDays), graceDays: Number(graceDays) }),
+    });
+    setSavingBilling(false);
+    if (res.ok) {
+      const data = await res.json();
+      setSettings(data.settings);
+      setBillingMsg("Guardado");
+    } else {
+      const data = await res.json();
+      setBillingMsg(data.error ?? "No se pudo guardar");
+    }
+  }
+
   return (
+    <div className="space-y-6">
+    <Card className="p-6 max-w-xl">
+      <p className="font-display text-lg font-semibold mb-1">Cobro de la suscripción</p>
+      <p className="text-sm text-muted mb-4">
+        Duración del demo para las empresas que des de alta a partir de ahora, y cuántos días de gracia tienen después de
+        que vence el demo o el periodo pagado antes de que se les bloquee el acceso.
+      </p>
+      <div className="grid grid-cols-2 gap-4 mb-4">
+        <label className="block text-sm">
+          <span className="block font-medium mb-1.5">Días de demo</span>
+          <input className="w-full rounded-md border border-line bg-paper px-3 py-2 text-sm" type="number" min={1} max={365} value={trialDays} onChange={(e) => setTrialDays(e.target.value)} />
+        </label>
+        <label className="block text-sm">
+          <span className="block font-medium mb-1.5">Días de gracia</span>
+          <input className="w-full rounded-md border border-line bg-paper px-3 py-2 text-sm" type="number" min={0} max={60} value={graceDays} onChange={(e) => setGraceDays(e.target.value)} />
+        </label>
+      </div>
+      <div className="flex items-center gap-3">
+        <Button type="button" onClick={saveBilling} disabled={savingBilling}>
+          Guardar
+        </Button>
+        {billingMsg && <span className="text-sm text-muted">{billingMsg}</span>}
+      </div>
+    </Card>
+
     <Card className="p-6 max-w-xl">
       <p className="font-display text-lg font-semibold mb-1">Cancelación de suscripción vs. financiamiento de hardware</p>
       <p className="text-sm text-muted mb-4">
@@ -44,5 +93,6 @@ export function SettingsClient({ initialSettings }: { initialSettings: Settings 
         </span>
       </label>
     </Card>
+    </div>
   );
 }

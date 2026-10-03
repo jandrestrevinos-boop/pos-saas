@@ -1,12 +1,14 @@
 import { companiesService } from "@/modules/companies/service";
 import { CompaniesTable } from "./companies-table";
 import { prisma } from "@/lib/prisma";
+import { platformSettingsService } from "@/modules/platformSettings/service";
 
 export default async function CompaniesPage() {
-  const [companies, plans, roles] = await Promise.all([
+  const [companies, plans, roles, settings] = await Promise.all([
     companiesService.list(),
     prisma.plan.findMany({ orderBy: { priceMxn: "asc" } }),
     prisma.role.findMany({ where: { name: { not: "SUPER_ADMIN" } }, orderBy: { name: "asc" } }),
+    platformSettingsService.get(),
   ]);
 
   return (
@@ -22,6 +24,7 @@ export default async function CompaniesPage() {
         initialCompanies={JSON.parse(JSON.stringify(companies))}
         plans={JSON.parse(JSON.stringify(plans))}
         roles={JSON.parse(JSON.stringify(roles))}
+        graceDays={settings.graceDays}
       />
     </div>
   );

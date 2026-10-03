@@ -4,7 +4,9 @@ import { platformSettingsService } from "@/modules/platformSettings/service";
 import { z } from "zod";
 
 const updateSchema = z.object({
-  blockCancellationWithPendingFinancing: z.boolean(),
+  blockCancellationWithPendingFinancing: z.boolean().optional(),
+  defaultTrialDays: z.coerce.number().int().min(1).max(365).optional(),
+  graceDays: z.coerce.number().int().min(0).max(60).optional(),
 });
 
 export async function GET() {

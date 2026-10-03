@@ -5,6 +5,7 @@ import { Button, Card, StatusBadge } from "@/components/ui";
 import { Modal, Field, inputClass } from "@/components/ui/modal";
 import { formatMxn } from "@/lib/format";
 import { FEATURE_CATALOG } from "@/lib/plan-features";
+import { computeBillingAccess } from "@/lib/billing";
 // FEATURE_CATALOG ahora es [{ key, label, status }] — customFeatures y
 // plan.features guardan `key`, la UI muestra `label`.
 
@@ -21,6 +22,9 @@ type Company = {
     useCustomPlan?: boolean;
     customPriceMxn?: string | null;
     customFeatures?: string[];
+    status?: "TRIALING" | "ACTIVE" | "PAST_DUE" | "CANCELED";
+    trialEndsAt?: string | null;
+    renewalDate?: string | null;
   } | null;
 };
 
@@ -32,11 +36,53 @@ const ROLE_LABELS: Record<string, string> = {
   COCINERO: "Cocinero",
 };
 
-export function CompaniesTable({ initialCompanies, plans, roles }: { initialCompanies: Company[]; plans: Plan[]; roles: Role[] }) {
+function fmtShort(iso: string | null | undefined) {
+  if (!iso) return "";
+  return new Date(iso).toLocaleDateString("es-MX", { day: "numeric", month: "short", year: "numeric" });
+}
+
+function billingSummary(c: Company, graceDays: number): { label: string; tone: "ok" | "warn" | "bad" | "muted" } {
+  if (c.status !== "ACTIVE") return { label: "—", tone: "muted" };
+  const sub = c.subscription;
+  const access = computeBillingAccess({
+    companyStatus: c.status,
+    subscription: sub?.status
+      ? {
+          status: sub.status,
+          trialEndsAt: sub.trialEndsAt ? new Date(sub.trialEndsAt) : null,
+          renewalDate: sub.renewalDate ? new Date(sub.renewalDate) : null,
+        }
+      : null,
+    graceDays,
+  });
+  if (access.state === "DEMO") {
+    return access.endsAt
+      ? { label: `Demo hasta ${fmtShort(sub?.trialEndsAt)}`, tone: access.daysLeft !== null && access.daysLeft <= 3 ? "warn" : "muted" }
+      : { label: "Demo sin fecha", tone: "warn" };
+  }
+  if (access.state === "ACTIVE") {
+    return access.endsAt ? { label: `Pagado hasta ${fmtShort(sub?.renewalDate)}`, tone: "ok" } : { label: "Activa (sin fecha)", tone: "muted" };
+  }
+  if (access.state === "GRACE") return { label: `En gracia (${access.graceDaysLeft} d)`, tone: "warn" };
+  return { label: "Bloqueada por pago", tone: "bad" };
+}
+
+export function CompaniesTable({
+  initialCompanies,
+  plans,
+  roles,
+  graceDays,
+}: {
+  initialCompanies: Company[];
+  plans: Plan[];
+  roles: Role[];
+  graceDays: number;
+}) {
   const [companies, setCompanies] = useState(initialCompanies);
   const [modalOpen, setModalOpen] = useState(false);
   const [usersCompany, setUsersCompany] = useState<Company | null>(null);
   const [planCompany, setPlanCompany] = useState<Company | null>(null);
+  const [billingCompany, setBillingCompany] = useState<Company | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [form, setForm] = useState({ name: "", branchName: "Principal", planId: plans[0]?.id ?? "" });
@@ -141,6 +187,7 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
                 <th className="px-5 py-3 font-medium">Sucursales</th>
                 <th className="px-5 py-3 font-medium">Usuarios</th>
                 <th className="px-5 py-3 font-medium">Estado</th>
+                <th className="px-5 py-3 font-medium">Cobro</th>
                 <th className="px-5 py-3 font-medium"></th>
               </tr>
             </thead>
@@ -161,10 +208,23 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
                       label={c.status === "ACTIVE" ? "Activa" : c.status === "SUSPENDED" ? "Suspendida" : "Cancelada"}
                     />
                   </td>
+                  <td className="px-5 py-3 text-xs">
+                    {(() => {
+                      const b = billingSummary(c, graceDays);
+                      const color =
+                        b.tone === "ok" ? "text-sage" : b.tone === "warn" ? "text-marigold" : b.tone === "bad" ? "text-ember-dark" : "text-muted";
+                      return <span className={`${color} font-medium`}>{b.label}</span>;
+                    })()}
+                  </td>
                   <td className="px-5 py-3 text-right space-x-1">
                     <Button variant="ghost" onClick={() => setUsersCompany(c)}>
                       Usuarios
                     </Button>
+                    {c.status !== "CANCELLED" && (
+                      <Button variant="ghost" onClick={() => setBillingCompany(c)}>
+                        Cobro
+                      </Button>
+                    )}
                     {c.status !== "CANCELLED" && (
                       <Button variant="ghost" onClick={() => toggleStatus(c)}>
                         {c.status === "ACTIVE" ? "Suspender" : "Activar"}
@@ -244,6 +304,21 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
           }
         />
       )}
+      {billingCompany && (
+        <BillingModal
+          company={billingCompany}
+          graceDays={graceDays}
+          onClose={() => setBillingCompany(null)}
+          onChanged={(patch) => {
+            setCompanies((prev) =>
+              prev.map((c) =>
+                c.id === billingCompany.id && c.subscription ? { ...c, subscription: { ...c.subscription, ...patch } } : c
+              )
+            );
+            setBillingCompany(null);
+          }}
+        />
+      )}
       {planCompany && (
         <ChangePlanModal
           company={planCompany}
@@ -251,7 +326,9 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
           onClose={() => setPlanCompany(null)}
           onChanged={(planName) => {
             setCompanies((prev) =>
-              prev.map((c) => (c.id === planCompany.id ? { ...c, subscription: { plan: { name: planName } } } : c))
+              prev.map((c) =>
+                c.id === planCompany.id ? { ...c, subscription: { ...(c.subscription ?? {}), plan: { name: planName } } } : c
+              )
             );
             setPlanCompany(null);
           }}
@@ -622,6 +699,103 @@ function CompanyUsersModal({
           )}
         </>
       )}
+    </Modal>
+  );
+}
+function BillingModal({
+  company,
+  graceDays,
+  onClose,
+  onChanged,
+}: {
+  company: Company;
+  graceDays: number;
+  onClose: () => void;
+  onChanged: (patch: { status?: "TRIALING" | "ACTIVE" | "PAST_DUE" | "CANCELED"; trialEndsAt?: string | null; renewalDate?: string | null }) => void;
+}) {
+  const summary = billingSummary(company, graceDays);
+  const isTrial = company.subscription?.status === "TRIALING";
+
+  const [days, setDays] = useState("7");
+  const [months, setMonths] = useState("1");
+  const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function send(body: Record<string, unknown>) {
+    setBusy(true);
+    setError("");
+    const res = await fetch(`/api/companies/${company.id}/billing`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    setBusy(false);
+    if (!res.ok) {
+      setError(data.error ?? "No se pudo completar la acción");
+      return null;
+    }
+    return data as { trialEndsAt?: string; periodEnd?: string };
+  }
+
+  async function extendTrial() {
+    const data = await send({ action: "extend_trial", days: Number(days) });
+    if (data?.trialEndsAt) onChanged({ trialEndsAt: data.trialEndsAt });
+  }
+
+  async function manualPayment() {
+    const data = await send({
+      action: "manual_payment",
+      months: Number(months),
+      ...(amount.trim() ? { amountMxn: Number(amount) } : {}),
+      ...(note.trim() ? { note: note.trim() } : {}),
+    });
+    if (data?.periodEnd) onChanged({ status: "ACTIVE", renewalDate: data.periodEnd });
+    else if (data) onClose();
+  }
+
+  return (
+    <Modal open onClose={onClose} title={`Cobro — ${company.name}`}>
+      <p className="text-sm mb-1">
+        Estado: <strong>{summary.label}</strong>
+      </p>
+      <p className="text-xs text-muted mb-5">
+        Plan {company.subscription?.plan.name ?? "—"}. Días de gracia después del vencimiento: {graceDays}.
+      </p>
+
+      {isTrial && (
+        <div className="mb-5 pb-5 border-b border-line">
+          <Field label="Extender demo (días)">
+            <input className={inputClass} type="number" min={1} max={365} value={days} onChange={(e) => setDays(e.target.value)} />
+          </Field>
+          <Button type="button" variant="secondary" disabled={busy} onClick={extendTrial}>
+            Extender demo
+          </Button>
+        </div>
+      )}
+
+      <p className="text-sm font-medium mb-3">Registrar pago recibido (SPEI, efectivo…)</p>
+      <Field label="Meses que cubre">
+        <input className={inputClass} type="number" min={1} max={24} value={months} onChange={(e) => setMonths(e.target.value)} />
+      </Field>
+      <Field label="Monto (vacío = precio del plan × meses)">
+        <input className={inputClass} type="number" min={0} step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} />
+      </Field>
+      <Field label="Nota (opcional)">
+        <input className={inputClass} value={note} maxLength={200} onChange={(e) => setNote(e.target.value)} placeholder="Ej. SPEI folio 12345" />
+      </Field>
+
+      {error && <p className="text-sm text-ember-dark mb-3">{error}</p>}
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="secondary" onClick={onClose}>
+          Cerrar
+        </Button>
+        <Button type="button" disabled={busy} onClick={manualPayment}>
+          Registrar pago
+        </Button>
+      </div>
     </Modal>
   );
 }

@@ -10,12 +10,15 @@ import { hasFeature } from "@/lib/feature-gating";
 import { FEATURE_KEYS } from "@/lib/plan-features";
 import { tablesService } from "@/modules/tables/service";
 import { mercadoPagoService } from "@/modules/mercadoPago/service";
+import { requireBillingAccess } from "@/lib/billing-gate";
 import { PosClient } from "./pos-client";
 import Link from "next/link";
 
 export default async function PosPage() {
   const session = await getServerSession(authOptions);
   if (!session?.user?.companyId) redirect("/login");
+
+  await requireBillingAccess(session.user.companyId);
 
   if (!hasPermission(session.user.permissions, PERMISSIONS.SALES_CREATE)) {
     redirect("/dashboard");
