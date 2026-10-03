@@ -24,5 +24,27 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
   }
 
   const plan = await prisma.plan.update({ where: { id: params.id }, data: parsed.data });
+
+  // Los límites reales que se aplican a cada empresa viven en su License
+  // (se copian del plan al crear la empresa o al cambiarle de plan). Si Jose
+  // cambia aquí sucursales/usuarios/cajas, las empresas que ya están en este
+  // plan deben recibir el nuevo límite también; si no, el cambio solo
+  // afectaría a las empresas que se den de alta después.
+  const limitsChanged =
+    parsed.data.maxBranches !== undefined ||
+    parsed.data.maxUsers !== undefined ||
+    parsed.data.maxCashRegisters !== undefined;
+
+  if (limitsChanged) {
+    await prisma.license.updateMany({
+      where: { subscription: { planId: plan.id } },
+      data: {
+        allowedBranches: plan.maxBranches,
+        allowedUsers: plan.maxUsers,
+        allowedCashRegisters: plan.maxCashRegisters,
+      },
+    });
+  }
+
   return NextResponse.json({ plan });
 }

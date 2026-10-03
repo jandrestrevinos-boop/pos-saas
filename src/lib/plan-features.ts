@@ -25,31 +25,59 @@ export interface FeatureDef {
   key: string;
   label: string;
   status: FeatureStatus;
+  /**
+   * true = el código SÍ bloquea esta función a las empresas cuyo plan no la
+   * incluye (hasFeature()). false = la función existe (o no) pero marcarla o
+   * desmarcarla en un plan todavía no cambia lo que la empresa puede hacer;
+   * hoy es solo la promesa comercial. El editor de planes lo muestra.
+   */
+  enforced: boolean;
 }
 
 export const FEATURE_CATALOG: FeatureDef[] = [
-  { key: "menus_por_turno", label: "Menús por turno/hora", status: "planned" },
-  { key: "gestion_mesas", label: "Gestión de mesas", status: "live" },
-  { key: "comandas_cocina", label: "Comandas digitales para cocina", status: "live" },
-  { key: "automatizaciones_avanzadas", label: "Automatizaciones avanzadas", status: "planned" },
-  { key: "integracion_delivery", label: "Integración con delivery (Uber Eats, DoorDash, Rappi)", status: "planned" },
-  { key: "whatsapp_business", label: "WhatsApp Business", status: "partial" },
-  { key: "pagos_integrados", label: "Pagos integrados (tarjetas desde el POS)", status: "partial" },
-  { key: "api_basica", label: "API básica", status: "planned" },
-  { key: "conexion_contpaq_sat", label: "Conexión con Contpaq/SAT", status: "planned" },
-  { key: "dashboard_avanzado", label: "Dashboard avanzado (15+ gráficos)", status: "partial" },
-  { key: "control_acceso_rol", label: "Control de acceso por rol", status: "live" },
-  { key: "auditoria_cajas", label: "Auditoría de cajas", status: "partial" },
-  { key: "soporte_prioritario", label: "Soporte prioritario (4h)", status: "planned" },
-  { key: "inventario_compartido", label: "Inventario compartido entre sucursales", status: "planned" },
-  { key: "transferencias_automaticas", label: "Transferencias automáticas entre sucursales", status: "planned" },
-  { key: "costeo_receta", label: "Costeo por receta", status: "planned" },
-  { key: "dashboard_empresarial", label: "Dashboard empresarial (30+ métricas)", status: "planned" },
-  { key: "reportes_consolidados", label: "Reportes consolidados", status: "planned" },
-  { key: "proyecciones_ia", label: "Proyecciones con IA básica", status: "planned" },
-  { key: "auditoria_avanzada", label: "Auditoría avanzada", status: "partial" },
-  { key: "multi_moneda", label: "Multi-moneda", status: "planned" },
-  { key: "soporte_247", label: "Soporte 24/7 con gestor de cuenta dedicado", status: "planned" },
+  // ── Construidas y bloqueadas por plan ───────────────────────────────
+  { key: "gestion_mesas", label: "Gestión de mesas", status: "live", enforced: true },
+  { key: "pagos_integrados", label: "Pagos integrados (tarjetas desde el POS)", status: "live", enforced: true },
+  { key: "whatsapp_business", label: "WhatsApp Business", status: "live", enforced: true },
+  { key: "dashboard_empresarial", label: "Dashboard empresarial", status: "live", enforced: true },
+
+  // ── Construidas pero disponibles en todos los planes (marcarlas no cambia nada todavía) ──
+  { key: "comandas_cocina", label: "Comandas digitales para cocina", status: "live", enforced: false },
+  { key: "control_acceso_rol", label: "Control de acceso por rol (Permisos por usuario)", status: "live", enforced: false },
+  { key: "auditoria_avanzada", label: "Auditoría avanzada", status: "live", enforced: false },
+  { key: "dashboard", label: "Dashboard", status: "live", enforced: false },
+  { key: "reportes_avanzados", label: "Reportes avanzados", status: "live", enforced: false },
+  { key: "historial_movimientos", label: "Historial de movimientos", status: "live", enforced: false },
+
+  // ── Construidas a medias ────────────────────────────────────────────
+  { key: "inventario_avanzado", label: "Inventario avanzado", status: "partial", enforced: false },
+  { key: "promociones_descuentos", label: "Promociones y descuentos", status: "partial", enforced: false },
+  { key: "multi_sucursal", label: "Multi-sucursal", status: "partial", enforced: false },
+  { key: "dashboard_avanzado", label: "Dashboard avanzado (15+ gráficos)", status: "partial", enforced: false },
+  { key: "auditoria_cajas", label: "Auditoría de cajas", status: "partial", enforced: false },
+
+  // ── Sin construir (hoy solo son promesa comercial) ──────────────────
+  { key: "compras_proveedores", label: "Compras y proveedores", status: "planned", enforced: false },
+  { key: "alertas", label: "Alertas", status: "planned", enforced: false },
+  { key: "exportacion_informacion", label: "Exportación de información", status: "planned", enforced: false },
+  { key: "automatizaciones_basicas", label: "Automatizaciones básicas", status: "planned", enforced: false },
+  { key: "automatizaciones_avanzadas", label: "Automatizaciones avanzadas", status: "planned", enforced: false },
+  { key: "api_basica", label: "API básica", status: "planned", enforced: false },
+  { key: "api_avanzada", label: "API avanzada", status: "planned", enforced: false },
+  { key: "permisos_avanzados", label: "Permisos avanzados", status: "planned", enforced: false },
+  { key: "inventario_compartido", label: "Inventario compartido entre sucursales", status: "planned", enforced: false },
+  { key: "reportes_consolidados", label: "Reportes consolidados", status: "planned", enforced: false },
+  { key: "transferencias_automaticas", label: "Transferencias automáticas entre sucursales", status: "planned", enforced: false },
+  { key: "menus_por_turno", label: "Menús por turno/hora", status: "planned", enforced: false },
+  { key: "integracion_delivery", label: "Integración con delivery (Uber Eats, DoorDash, Rappi)", status: "planned", enforced: false },
+  { key: "conexion_contpaq_sat", label: "Conexión con Contpaq/SAT", status: "planned", enforced: false },
+  { key: "costeo_receta", label: "Costeo por receta", status: "planned", enforced: false },
+  { key: "proyecciones_ia", label: "Proyecciones con IA básica", status: "planned", enforced: false },
+  { key: "multi_moneda", label: "Multi-moneda", status: "planned", enforced: false },
+
+  // ── Servicio humano (no es código, nunca debería bloquear nada) ─────
+  { key: "soporte_prioritario", label: "Soporte prioritario (4h)", status: "planned", enforced: false },
+  { key: "soporte_247", label: "Soporte 24/7 con gestor de cuenta dedicado", status: "planned", enforced: false },
 ];
 
 export const FEATURE_KEYS = FEATURE_CATALOG.reduce(

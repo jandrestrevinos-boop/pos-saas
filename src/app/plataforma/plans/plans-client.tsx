@@ -23,28 +23,49 @@ const PLAN_ACCENTS: Record<string, string> = {
   Empresarial: "border-marigold",
 };
 
-export function PlansClient({ initialPlans }: { initialPlans: Plan[] }) {
-  const [plans, setPlans] = useState(initialPlans);
-  const [editing, setEditing] = useState<Plan | null>(null);
+// Strings viejos de prisma/seed.ts que describen capacidad ("1 sucursal",
+// "Hasta 3 usuarios", "Multi-sucursal", "Cajas ampliadas"...). La tarjeta ya
+// calcula esas líneas desde los números reales del plan (sucursales /
+// usuarios / cajas), así que mostrarlas otra vez las duplicaba. Solo se
+// OCULTAN en pantalla — el dato guardado en la base no se toca.
+const LEGACY_CAPACITY_RE =
+  /^(?:hasta\s+)?\d+\s+(?:sucursal(?:es)?|cajas?|usuarios?)$|^multi-?sucursal$|^cajas ampliadas$|^usuarios ampliados$/i;
 
 function buildDisplayFeatures(plan: Plan): string[] {
   // No tocar lo que ya funciona: cualquier string guardado que no sea una
-  // key del catálogo nuevo (ej. las labels viejas de prisma/seed.ts como
-  // "Auditoría" o "Pantalla de cocina (sin impresora)") se muestra tal cual,
-  // sin filtrarlo. Solo las keys nuevas del catálogo se traducen a su label.
-  const nonCapacity = (plan.features ?? []).map((f) => (VALID_FEATURE_KEYS.has(f) ? featureLabel(f) : f));
+  // key del catálogo (ej. las labels viejas de prisma/seed.ts como
+  // "Auditoría" o "Pantalla de cocina (sin impresora)") se muestra tal cual.
+  // Solo las keys del catálogo se traducen a su label.
+  const nonCapacity = (plan.features ?? [])
+    .map((f) => (VALID_FEATURE_KEYS.has(f) ? featureLabel(f) : f))
+    .filter((label) => !LEGACY_CAPACITY_RE.test(label.trim()));
 
-  if (plan.name === "Empresarial") {
-    return ["Multi-sucursal", `Hasta ${plan.maxCashRegisters} cajas`, `Hasta ${plan.maxUsers} usuarios`, ...nonCapacity];
-  }
+  const capacity =
+    plan.name === "Empresarial"
+      ? [
+          `Hasta ${plan.maxBranches} sucursales`,
+          `Hasta ${plan.maxCashRegisters} cajas`,
+          `Hasta ${plan.maxUsers} usuarios`,
+        ]
+      : [
+          `${plan.maxBranches} sucursal${plan.maxBranches === 1 ? "" : "es"}`,
+          `Hasta ${plan.maxCashRegisters} caja${plan.maxCashRegisters === 1 ? "" : "s"}`,
+          `Hasta ${plan.maxUsers} usuario${plan.maxUsers === 1 ? "" : "s"}`,
+        ];
 
-  return [
-    `${plan.maxBranches} sucursal${plan.maxBranches === 1 ? "" : "es"}`,
-    `Hasta ${plan.maxCashRegisters} caja${plan.maxCashRegisters === 1 ? "" : "s"}`,
-    `Hasta ${plan.maxUsers} usuario${plan.maxUsers === 1 ? "" : "s"}`,
-    ...nonCapacity,
-  ];
+  // Sin repetidos (sin importar mayúsculas/acentos de más)
+  const seen = new Set<string>();
+  return [...capacity, ...nonCapacity].filter((label) => {
+    const key = label.trim().toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
+
+export function PlansClient({ initialPlans }: { initialPlans: Plan[] }) {
+  const [plans, setPlans] = useState(initialPlans);
+  const [editing, setEditing] = useState<Plan | null>(null);
 
   function handleUpdated(updated: Plan) {
     setPlans((prev) => prev.map((p) => (p.id === updated.id ? { ...p, ...updated } : p)));
@@ -160,7 +181,7 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () => 
         </Field>
 
         <Field label="Características incluidas">
-          <div className="grid grid-cols-1 gap-1.5 max-h-56 overflow-y-auto border border-line rounded-md p-3">
+          <div className="grid grid-cols-1 gap-1.5 max-h-72 overflow-y-auto border border-line rounded-md p-3">
             {FEATURE_CATALOG.map((feature) => (
               <label key={feature.key} className="flex items-start gap-2 text-sm cursor-pointer">
                 <input
@@ -170,13 +191,24 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () => 
                   onChange={() => toggleFeature(feature.key)}
                 />
                 <span className="flex-1">{feature.label}</span>
-                {feature.status !== "live" && (
-                  <span
-                    className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${
-                      feature.status === "partial" ? "bg-marigold/20 text-marigold-dark" : "bg-ink-100 text-muted"
-                    }`}
-                  >
-                    {feature.status === "partial" ? "parcial" : "sin construir"}
+                {feature.status === "planned" && (
+                  <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-ink-100 text-muted">
+                    sin construir
+                  </span>
+                )}
+                {feature.status === "partial" && (
+                  <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-marigold/20 text-marigold-dark">
+                    parcial
+                  </span>
+                )}
+                {feature.status === "live" && !feature.enforced && (
+                  <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-sage/15 text-sage">
+                    en todos los planes
+                  </span>
+                )}
+                {feature.status === "live" && feature.enforced && (
+                  <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-ember/10 text-ember-dark">
+                    se bloquea por plan
                   </span>
                 )}
               </label>

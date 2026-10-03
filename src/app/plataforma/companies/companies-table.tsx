@@ -232,7 +232,7 @@ export function CompaniesTable({
                     )}
                     {c.status !== "CANCELLED" && (
                       <Button variant="ghost" onClick={() => cancelSubscription(c)} className="text-ember-dark hover:bg-ember/10">
-                        Cancelar suscripci\u00f3n
+                        Cancelar suscripción
                       </Button>
                     )}
                     <Button variant="ghost" onClick={() => deleteCompany(c)} className="text-ember-dark hover:bg-ember/10">
