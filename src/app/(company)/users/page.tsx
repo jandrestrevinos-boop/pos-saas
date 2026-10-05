@@ -16,10 +16,11 @@ export default async function UsersPage() {
 
   const companyId = session.user.companyId;
 
-  const [users, roles, subscription] = await Promise.all([
+  const [users, roles, subscription, branches] = await Promise.all([
     usersService.list(companyId),
     prisma.role.findMany({ where: { name: { not: "SUPER_ADMIN" } }, orderBy: { name: "asc" } }),
     prisma.subscription.findUnique({ where: { companyId }, include: { license: true, plan: true } }),
+    prisma.branch.findMany({ where: { companyId, isActive: true }, select: { id: true, name: true }, orderBy: { createdAt: "asc" } }),
   ]);
 
   const userLimit = subscription?.license?.allowedUsers ?? null;
@@ -35,7 +36,11 @@ export default async function UsersPage() {
           </span>
         )}
       </p>
-      <UsersTable initialUsers={JSON.parse(JSON.stringify(users))} roles={JSON.parse(JSON.stringify(roles))} />
+      <UsersTable
+        initialUsers={JSON.parse(JSON.stringify(users))}
+        roles={JSON.parse(JSON.stringify(roles))}
+        branches={branches}
+      />
     </div>
   );
 }

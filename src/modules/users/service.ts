@@ -43,8 +43,12 @@ export const usersService = {
 
     // Si no se especifica sucursal, se asigna la primera de la empresa.
     let branchId = input.branchId;
-    if (!branchId) {
-      const firstBranch = await prisma.branch.findFirst({ where: { companyId } });
+    if (branchId) {
+      // El branchId viene del navegador: debe ser una sucursal de ESTA empresa.
+      const owned = await prisma.branch.findFirst({ where: { id: branchId, companyId, isActive: true }, select: { id: true } });
+      if (!owned) throw new Error("La sucursal seleccionada no es válida");
+    } else {
+      const firstBranch = await prisma.branch.findFirst({ where: { companyId, isActive: true } });
       branchId = firstBranch?.id;
     }
 

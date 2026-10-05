@@ -10,6 +10,7 @@ export const productSchema = z.object({
   description: z.string().optional(),
   tracksInventory: z.boolean().optional(),
   stock: z.coerce.number().int().min(0).optional(),
+  minStock: z.coerce.number().int().min(0).optional(),
 });
 
 export const productsService = {
@@ -33,6 +34,7 @@ export const productsService = {
         description: input.description,
         tracksInventory: input.tracksInventory ?? false,
         stock: input.stock ?? 0,
+        minStock: input.minStock ?? 0,
       },
     });
   },

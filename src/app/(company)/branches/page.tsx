@@ -2,8 +2,9 @@ import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
-import { prisma } from "@/lib/prisma";
-import { Card, StatusBadge } from "@/components/ui";
+import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
+import { branchesService } from "@/modules/branches/service";
+import { BranchesClient } from "./branches-client";
 
 export default async function BranchesPage() {
   const session = await getServerSession(authOptions);
@@ -13,44 +14,28 @@ export default async function BranchesPage() {
     redirect(getHomeRoute(session.user.permissions));
   }
 
-  const branches = await prisma.branch.findMany({
-    where: { companyId: session.user.companyId },
-    orderBy: { createdAt: "asc" },
-  });
-  type BranchRow = (typeof branches)[number];
+  const ctx = await getTenantContext();
+  const [{ branches, limit, activeCount }, activeBranchId] = await Promise.all([
+    branchesService.overview(session.user.companyId),
+    resolveBranchId(ctx, session.user.companyId),
+  ]);
 
   return (
     <div>
       <h1 className="font-display text-3xl font-semibold mb-1">Sucursales</h1>
-      <p className="text-muted text-sm mb-8">Ubicaciones de tu restaurante.</p>
-
-      <Card className="overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
-              <th className="px-5 py-3 font-medium">Sucursal</th>
-              <th className="px-5 py-3 font-medium">Dirección</th>
-              <th className="px-5 py-3 font-medium">Estado</th>
-            </tr>
-          </thead>
-          <tbody>
-            {branches.map((b: BranchRow) => (
-              <tr key={b.id} className="border-b border-line last:border-0">
-                <td className="px-5 py-3 font-medium">{b.name}</td>
-                <td className="px-5 py-3 text-muted">{b.address ?? "—"}</td>
-                <td className="px-5 py-3">
-                  <StatusBadge status={b.isActive ? "active" : "inactive"} label={b.isActive ? "Activa" : "Inactiva"} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Card>
-
-      <p className="text-xs text-muted mt-4">
-        Crear y editar sucursales adicionales llega en la siguiente iteración — por ahora cada empresa nace con su
-        sucursal principal.
+      <p className="text-muted text-sm mb-8">
+        Ubicaciones de tu restaurante.
+        {limit !== null && (
+          <span className="ml-2 text-xs font-medium">
+            ({activeCount} de {limit} sucursales de tu plan)
+          </span>
+        )}
       </p>
+      <BranchesClient
+        initialBranches={JSON.parse(JSON.stringify(branches))}
+        limit={limit}
+        activeBranchId={activeBranchId}
+      />
     </div>
   );
 }

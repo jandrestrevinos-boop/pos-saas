@@ -3,8 +3,9 @@
 import { useEffect, useState } from "react";
 import { Button, Card } from "@/components/ui";
 import { Modal, Field, inputClass } from "@/components/ui/modal";
+import { ExportButton } from "@/components/export-button";
 
-type Product = { id: string; name: string; stock: number; category: { name: string } };
+type Product = { id: string; name: string; stock: number; minStock: number; category: { name: string } };
 type Movement = { id: string; type: string; quantity: number; reason: string | null; createdAt: string; product: { name: string }; user: { name: string } };
 
 const TYPE_LABELS: Record<string, string> = { IN: "Entrada", OUT: "Salida", ADJUSTMENT: "Ajuste", WASTE: "Merma" };
@@ -33,7 +34,9 @@ export function InventoryClient() {
 
   return (
     <div>
-      <div className="flex justify-end mb-4">
+      <div className="flex justify-end gap-2 mb-4">
+        <ExportButton dataset="products" label="Exportar existencias (CSV)" />
+        <ExportButton dataset="movements" label="Exportar movimientos (CSV)" />
         <Button onClick={() => setModalOpen(true)}>+ Registrar movimiento</Button>
       </div>
 
@@ -50,6 +53,8 @@ export function InventoryClient() {
                 <th className="px-5 py-3 font-medium">Producto</th>
                 <th className="px-5 py-3 font-medium">Categoría</th>
                 <th className="px-5 py-3 font-medium">Existencia</th>
+                <th className="px-5 py-3 font-medium">Mínimo</th>
+                <th className="px-5 py-3 font-medium">Estado</th>
               </tr>
             </thead>
             <tbody>
@@ -58,6 +63,16 @@ export function InventoryClient() {
                   <td className="px-5 py-3 font-medium">{p.name}</td>
                   <td className="px-5 py-3 text-muted">{p.category.name}</td>
                   <td className={`px-5 py-3 font-mono ${p.stock <= 0 ? "text-ember-dark" : ""}`}>{p.stock}</td>
+                  <td className="px-5 py-3 font-mono text-muted">{p.minStock > 0 ? p.minStock : "—"}</td>
+                  <td className="px-5 py-3 text-xs font-medium">
+                    {p.stock <= 0 ? (
+                      <span className="text-ember-dark">Agotado</span>
+                    ) : p.minStock > 0 && p.stock <= p.minStock ? (
+                      <span className="text-marigold-dark">Stock bajo</span>
+                    ) : (
+                      <span className="text-sage">OK</span>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>

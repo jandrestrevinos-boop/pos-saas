@@ -367,6 +367,9 @@ model Product {
   isActive    Boolean  @default(true)
   tracksInventory Boolean @default(false)
   stock       Int      @default(0)
+  // Existencia mínima: si stock <= minStock (y minStock > 0) el producto
+  // aparece en Alertas como "stock bajo". 0 = sin mínimo configurado.
+  minStock    Int      @default(0)
   taxRate     Decimal  @default(0) @db.Decimal(5, 2) // porcentaje, ej. 16.00
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

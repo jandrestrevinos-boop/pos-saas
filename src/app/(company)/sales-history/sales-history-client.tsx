@@ -3,6 +3,7 @@
 import { useEffect, useState, Fragment } from "react";
 import { formatMxn } from "@/lib/format";
 import { Card } from "@/components/ui";
+import { ExportButton } from "@/components/export-button";
 
 type OrderItem = { id: string; quantity: number; lineTotal: string; product: { name: string } };
 type Payment = { id: string; method: string; status: string; amount: string };
@@ -105,6 +106,9 @@ export function SalesHistoryClient() {
         <button onClick={() => setPreset(1)} className="text-sm underline text-muted">Hoy</button>
         <button onClick={() => setPreset(7)} className="text-sm underline text-muted">7 días</button>
         <button onClick={() => setPreset(30)} className="text-sm underline text-muted">30 días</button>
+        <div className="ml-auto">
+          <ExportButton dataset="sales" from={from} to={to} label="Exportar ventas (CSV)" />
+        </div>
       </div>
 
       {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}

@@ -22,12 +22,20 @@ const ROLE_LABELS: Record<string, string> = {
   COCINERO: "Cocinero",
 };
 
-export function UsersTable({ initialUsers, roles }: { initialUsers: UserRow[]; roles: Role[] }) {
+export function UsersTable({
+  initialUsers,
+  roles,
+  branches,
+}: {
+  initialUsers: UserRow[];
+  roles: Role[];
+  branches: { id: string; name: string }[];
+}) {
   const [users, setUsers] = useState(initialUsers);
   const [modalOpen, setModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [form, setForm] = useState({ name: "", email: "", password: "", roleId: roles[0]?.id ?? "" });
+  const [form, setForm] = useState({ name: "", email: "", password: "", roleId: roles[0]?.id ?? "", branchId: branches[0]?.id ?? "" });
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -49,7 +57,7 @@ export function UsersTable({ initialUsers, roles }: { initialUsers: UserRow[]; r
 
     setUsers((prev) => [...prev, data.user]);
     setModalOpen(false);
-    setForm({ name: "", email: "", password: "", roleId: roles[0]?.id ?? "" });
+    setForm({ name: "", email: "", password: "", roleId: roles[0]?.id ?? "", branchId: branches[0]?.id ?? "" });
   }
 
   async function toggleActive(u: UserRow) {
@@ -147,6 +155,17 @@ export function UsersTable({ initialUsers, roles }: { initialUsers: UserRow[]; r
               ))}
             </select>
           </Field>
+          {branches.length > 1 && (
+            <Field label="Sucursal donde trabaja">
+              <select className={inputClass} value={form.branchId} onChange={(e) => setForm({ ...form, branchId: e.target.value })}>
+                {branches.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
 
           {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
 

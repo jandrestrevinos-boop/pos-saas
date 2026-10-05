@@ -50,18 +50,18 @@ export const FEATURE_CATALOG: FeatureDef[] = [
   { key: "historial_movimientos", label: "Historial de movimientos", status: "live", enforced: false },
 
   // ── Construidas a medias ────────────────────────────────────────────
-  { key: "inventario_avanzado", label: "Inventario avanzado", status: "partial", enforced: false },
+  { key: "inventario_avanzado", label: "Inventario avanzado (mínimos, alertas, movimientos)", status: "live", enforced: false },
   { key: "promociones_descuentos", label: "Promociones y descuentos", status: "partial", enforced: false },
-  { key: "multi_sucursal", label: "Multi-sucursal", status: "partial", enforced: false },
+  { key: "multi_sucursal", label: "Multi-sucursal (crear y operar varias sucursales)", status: "live", enforced: false },
   { key: "dashboard_avanzado", label: "Dashboard avanzado (15+ gráficos)", status: "partial", enforced: false },
   { key: "auditoria_cajas", label: "Auditoría de cajas", status: "partial", enforced: false },
 
   // ── Sin construir (hoy solo son promesa comercial) ──────────────────
   { key: "compras_proveedores", label: "Compras y proveedores", status: "planned", enforced: false },
-  { key: "alertas", label: "Alertas", status: "planned", enforced: false },
-  { key: "exportacion_informacion", label: "Exportación de información", status: "planned", enforced: false },
-  { key: "automatizaciones_basicas", label: "Automatizaciones básicas", status: "planned", enforced: false },
-  { key: "automatizaciones_avanzadas", label: "Automatizaciones avanzadas", status: "planned", enforced: false },
+  { key: "alertas", label: "Alertas", status: "live", enforced: false },
+  { key: "exportacion_informacion", label: "Exportación de información", status: "live", enforced: false },
+  { key: "automatizaciones_basicas", label: "Automatizaciones básicas (comandas a pantalla de cocina, sin impresora)", status: "live", enforced: false },
+  { key: "automatizaciones_avanzadas", label: "Automatizaciones avanzadas (WhatsApp + Mercado Pago)", status: "live", enforced: false },
   { key: "api_basica", label: "API básica", status: "planned", enforced: false },
   { key: "api_avanzada", label: "API avanzada", status: "planned", enforced: false },
   { key: "permisos_avanzados", label: "Permisos avanzados", status: "planned", enforced: false },

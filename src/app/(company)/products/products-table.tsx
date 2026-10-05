@@ -1,5 +1,6 @@
 "use client";
 
+import { ExportButton } from "@/components/export-button";
 import { useState } from "react";
 import { Button, Card, StatusBadge } from "@/components/ui";
 import { Modal, Field, inputClass } from "@/components/ui/modal";
@@ -17,6 +18,7 @@ type Product = {
   categoryId: string;
   tracksInventory: boolean;
   stock: number;
+  minStock?: number;
 };
 
 function marginPercent(price: string, cost: string | null): string {
@@ -48,6 +50,7 @@ export function ProductsTable({
     sku: "",
     tracksInventory: false,
     stock: "",
+    minStock: "",
   });
 
   async function handleCreate(e: React.FormEvent) {
@@ -86,6 +89,7 @@ export function ProductsTable({
         sku: "",
         tracksInventory: false,
         stock: "",
+        minStock: "",
       });
     } catch {
       setError("No se pudo conectar con el servidor. Revisa tu conexión e intenta de nuevo.");
@@ -107,7 +111,8 @@ export function ProductsTable({
 
   return (
     <>
-      <div className="flex justify-end mb-4">
+      <div className="flex justify-end gap-2 mb-4">
+        <ExportButton dataset="products" label="Exportar productos (CSV)" />
         <Button onClick={() => setModalOpen(true)}>+ Nuevo producto</Button>
       </div>
 
@@ -241,6 +246,20 @@ export function ProductsTable({
             </Field>
           )}
 
+          {form.tracksInventory && (
+            <Field label="Existencia mínima (te avisamos en Alertas cuando baje de aquí)">
+              <input
+                type="number"
+                step="1"
+                min="0"
+                className={inputClass}
+                value={form.minStock}
+                onChange={(e) => setForm({ ...form, minStock: e.target.value })}
+                placeholder="10"
+              />
+            </Field>
+          )}
+
           {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
 
           <div className="flex justify-end gap-2">
@@ -288,6 +307,7 @@ function EditProductModal({
     sku: product.sku ?? "",
     tracksInventory: product.tracksInventory ?? false,
     stock: String(product.stock ?? 0),
+    minStock: String(product.minStock ?? 0),
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -389,6 +409,19 @@ function EditProductModal({
               className={inputClass}
               value={form.stock}
               onChange={(e) => setForm({ ...form, stock: e.target.value })}
+            />
+          </Field>
+        )}
+
+        {form.tracksInventory && (
+          <Field label="Existencia mínima (te avisamos en Alertas cuando baje de aquí)">
+            <input
+              type="number"
+              step="1"
+              min="0"
+              className={inputClass}
+              value={form.minStock}
+              onChange={(e) => setForm({ ...form, minStock: e.target.value })}
             />
           </Field>
         )}

@@ -7,6 +7,9 @@ import { FEATURE_KEYS } from "@/lib/plan-features";
 import { hasPermission, PERMISSIONS, type PermissionKey } from "@/lib/permissions";
 import { requireBillingAccess } from "@/lib/billing-gate";
 import Link from "next/link";
+import { alertsService } from "@/modules/alerts/service";
+import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
+import { prisma } from "@/lib/prisma";
 
 const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey }[] = [
   { href: "/pos", label: "Punto de Venta", permission: PERMISSIONS.SALES_CREATE },
@@ -22,6 +25,9 @@ const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey 
   { href: "/branches", label: "Sucursales", permission: PERMISSIONS.BRANCHES_MANAGE },
   { href: "/users", label: "Usuarios", permission: PERMISSIONS.USERS_MANAGE },
   { href: "/settings", label: "Configuración", permission: PERMISSIONS.SETTINGS_MANAGE },
+  // El restaurante puede ver su plan y pagar su mensualidad en cualquier momento,
+  // no solo cuando el demo ya venció.
+  { href: "/facturacion", label: "Mi plan y pagos", permission: PERMISSIONS.SETTINGS_MANAGE },
 ];
 
 export default async function CompanyLayout({ children }: { children: React.ReactNode }) {
@@ -60,13 +66,44 @@ export default async function CompanyLayout({ children }: { children: React.Reac
     ];
   }
 
+  // Alertas (stock bajo / agotado / caja abierta de más): el nav muestra cuántas hay.
+  if (hasPermission(session.user.permissions, PERMISSIONS.INVENTORY_MANAGE)) {
+    const alertCount = await alertsService.count(session.user.companyId);
+    const inventoryIndex = navItems.findIndex((item) => item.href === "/inventory");
+    const alertItem = {
+      href: "/alerts",
+      label: alertCount > 0 ? `Alertas (${alertCount})` : "Alertas",
+      permission: PERMISSIONS.INVENTORY_MANAGE,
+    };
+    navItems = [...navItems.slice(0, inventoryIndex + 1), alertItem, ...navItems.slice(inventoryIndex + 1)];
+  }
+
+  // Sucursal activa: si la empresa tiene varias sucursales activas, el nav muestra
+  // dónde se está operando, y quien administra sucursales puede cambiar de una a otra.
+  const activeBranches = await prisma.branch.findMany({
+    where: { companyId: session.user.companyId, isActive: true },
+    select: { id: true, name: true },
+    orderBy: { createdAt: "asc" },
+  });
+  const tenantCtx = await getTenantContext();
+  const activeBranchId = await resolveBranchId(tenantCtx, session.user.companyId);
+  const hasManyBranches = activeBranches.length > 1;
+  const canSwitchBranch = hasManyBranches && hasPermission(session.user.permissions, PERMISSIONS.BRANCHES_MANAGE);
+  const activeBranchName = activeBranches.find((b) => b.id === activeBranchId)?.name ?? null;
+
   const visibleNavItems = navItems.filter(
     (item) => !item.permission || hasPermission(session.user.permissions, item.permission)
   );
 
   return (
     <div className="min-h-screen flex">
-      <SidebarNav items={visibleNavItems} brand="Mi Restaurante" userName={session.user.name ?? ""} />
+      <SidebarNav
+        items={visibleNavItems}
+        brand="Mi Restaurante"
+        userName={session.user.name ?? ""}
+        branchSwitcher={canSwitchBranch ? { branches: activeBranches, activeId: activeBranchId } : undefined}
+        branchName={hasManyBranches && !canSwitchBranch ? activeBranchName : null}
+      />
       <main className="flex-1 p-8 bg-paper">
         {showBillingBanner && (
           <div className="mb-6 rounded-md border border-marigold/40 bg-marigold/10 px-4 py-3 text-sm">

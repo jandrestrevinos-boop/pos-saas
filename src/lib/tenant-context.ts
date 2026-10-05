@@ -1,5 +1,10 @@
 import { getServerSession } from "next-auth";
+import { cookies } from "next/headers";
 import { authOptions } from "./auth";
+import { hasPermission, PERMISSIONS } from "./permissions";
+
+/** Cookie donde se guarda la sucursal que el administrador eligió para operar. */
+export const ACTIVE_BRANCH_COOKIE = "tappy_branch";
 
 export interface TenantContext {
   userId: string;
@@ -49,8 +54,26 @@ export function requireCompanyId(ctx: TenantContext): string {
  * o la primera sucursal de la empresa como respaldo.
  */
 export async function resolveBranchId(ctx: TenantContext, companyId: string): Promise<string | null> {
-  if (ctx.branchId) return ctx.branchId;
   const { prisma } = await import("./prisma");
+
+  // Quien administra sucursales (dueño / admin) puede elegir en cuál operar.
+  // La cookie nunca se cree a ciegas: se valida que la sucursal sea de ESTA
+  // empresa y esté activa. Todo lo que ya usaba resolveBranchId (POS, caja,
+  // mesas, cocina, inventario...) queda automáticamente en la sucursal elegida.
+  if (hasPermission(ctx.permissions, PERMISSIONS.BRANCHES_MANAGE)) {
+    let chosen: string | undefined;
+    try {
+      chosen = cookies().get(ACTIVE_BRANCH_COOKIE)?.value;
+    } catch {
+      chosen = undefined; // fuera de un request (ej. scripts)
+    }
+    if (chosen) {
+      const branch = await prisma.branch.findFirst({ where: { id: chosen, companyId, isActive: true }, select: { id: true } });
+      if (branch) return branch.id;
+    }
+  }
+
+  if (ctx.branchId) return ctx.branchId;
   const branch = await prisma.branch.findFirst({ where: { companyId } });
   return branch?.id ?? null;
 }
