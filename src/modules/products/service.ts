@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
+import { inventoryService, getBranchStock } from "@/modules/inventory/service";
 
 export const productSchema = z.object({
   name: z.string().min(1, "El nombre es obligatorio"),
@@ -22,8 +23,12 @@ export const productsService = {
     });
   },
 
-  async create(companyId: string, input: z.infer<typeof productSchema>) {
-    return prisma.product.create({
+  /**
+   * `branchId` + `userId`: sucursal donde se da de alta; si trae existencia inicial,
+   * se queda en ESA sucursal (las demás empiezan en 0).
+   */
+  async create(companyId: string, input: z.infer<typeof productSchema>, ctx?: { branchId: string | null; userId: string }) {
+    const product = await prisma.product.create({
       data: {
         companyId,
         categoryId: input.categoryId,
@@ -37,12 +42,36 @@ export const productsService = {
         minStock: input.minStock ?? 0,
       },
     });
+
+    if (ctx?.branchId && product.tracksInventory && product.stock > 0) {
+      await inventoryService.seedInitialStock(product.id, ctx.branchId, ctx.userId, product.stock);
+    }
+    return product;
   },
 
-  async update(companyId: string, id: string, data: Partial<z.infer<typeof productSchema>>) {
-    const result = await prisma.product.updateMany({ where: { id, companyId }, data });
+  async update(
+    companyId: string,
+    id: string,
+    data: Partial<z.infer<typeof productSchema>>,
+    ctx?: { branchId: string | null; userId: string }
+  ) {
+    // La existencia ya no se escribe directo en Product.stock (es el TOTAL de todas las
+    // sucursales): "stock" del formulario es la existencia de la sucursal donde se edita.
+    const { stock, ...rest } = data;
+
+    const result = await prisma.product.updateMany({ where: { id, companyId }, data: rest });
     if (result.count === 0) throw new Error("Producto no encontrado");
-    return prisma.product.findUnique({ where: { id } });
+
+    if (stock !== undefined && ctx?.branchId) {
+      await inventoryService.setBranchStock(companyId, ctx.branchId, ctx.userId, id, stock);
+    }
+
+    const product = await prisma.product.findUnique({ where: { id } });
+    // La tabla de productos muestra la existencia de la sucursal activa, no el total.
+    if (product?.tracksInventory && ctx?.branchId) {
+      return { ...product, stock: await getBranchStock(id, ctx.branchId) };
+    }
+    return product;
   },
 
   async setActive(companyId: string, id: string, isActive: boolean) {

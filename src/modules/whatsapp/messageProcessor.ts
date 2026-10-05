@@ -3,6 +3,7 @@
  * Orquestra el flujo completo de WhatsApp Orders
  */
 
+import { getBranchStock } from "@/modules/inventory/service";
 import { prisma } from "@/lib/prisma";
 import { aiInterpreter } from "./aiInterpreter";
 import { catalogService } from "./catalogService";
@@ -311,12 +312,13 @@ export const messageProcessor = {
         if (!dbProduct) continue;
 
         // Solo los productos que controlan inventario se bloquean por stock.
-        if (dbProduct.tracksInventory && dbProduct.stock < qty) {
+        // (La existencia es por sucursal: se compara contra la de la sucursal que atiende este chat.)
+        if (dbProduct.tracksInventory && (await getBranchStock(dbProduct.id, branchId)) < qty) {
           unavailable.push(capitalize(dbProduct.name));
           continue;
         }
 
-        await cartManager.addItem(cart.id, {
+        await cartManager.addItem(branchId, cart.id, {
           productId: dbProduct.id,
           quantity: qty,
           unitPrice: Number(dbProduct.price),

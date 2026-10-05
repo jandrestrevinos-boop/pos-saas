@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { toCsv } from "@/lib/csv";
 
-export const EXPORT_DATASETS = ["sales", "products", "movements", "customers"] as const;
+export const EXPORT_DATASETS = ["sales", "products", "stock", "movements", "customers"] as const;
 export type ExportDataset = (typeof EXPORT_DATASETS)[number];
 
 const MAX_ROWS = 20000;
@@ -95,19 +95,49 @@ export const exportsService = {
       return { filename: `tappy-productos-${stamp}.csv`, csv, rows: products.length };
     }
 
+    if (dataset === "stock") {
+      // Una fila por producto y sucursal activa (existencia real de cada sucursal).
+      const [products, branches] = await Promise.all([
+        prisma.product.findMany({
+          where: { companyId, tracksInventory: true },
+          include: { category: { select: { name: true } }, branchStocks: { select: { branchId: true, stock: true } } },
+          orderBy: { name: "asc" },
+          take: MAX_ROWS,
+        }),
+        prisma.branch.findMany({ where: { companyId, isActive: true }, select: { id: true, name: true }, orderBy: { createdAt: "asc" } }),
+      ]);
+      const rows = products.flatMap((p) =>
+        branches.map((b) => [
+          p.name,
+          p.sku ?? "",
+          p.category.name,
+          b.name,
+          p.branchStocks.find((s) => s.branchId === b.id)?.stock ?? 0,
+          p.minStock,
+          p.isActive ? "Sí" : "No",
+        ])
+      );
+      const csv = toCsv(["Producto", "SKU", "Categoría", "Sucursal", "Existencia", "Existencia mínima", "Activo"], rows);
+      return { filename: `tappy-existencias-por-sucursal-${stamp}.csv`, csv, rows: rows.length };
+    }
+
     if (dataset === "movements") {
       const movements = await prisma.inventoryMovement.findMany({
         where: {
           product: { companyId },
           createdAt: { ...(range.from ? { gte: range.from } : {}), ...(range.to ? { lte: range.to } : {}) },
         },
-        include: { product: { select: { name: true } }, user: { select: { name: true } } },
+        include: {
+          product: { select: { name: true } },
+          user: { select: { name: true } },
+          branch: { select: { name: true } },
+        },
         orderBy: { createdAt: "desc" },
         take: MAX_ROWS,
       });
       const csv = toCsv(
-        ["Fecha", "Producto", "Tipo", "Cantidad", "Motivo", "Usuario"],
-        movements.map((m) => [m.createdAt, m.product.name, MOVEMENT_LABELS[m.type] ?? m.type, m.quantity, m.reason ?? "", m.user.name])
+        ["Fecha", "Sucursal", "Producto", "Tipo", "Cantidad", "Motivo", "Usuario"],
+        movements.map((m) => [m.createdAt, m.branch.name, m.product.name, MOVEMENT_LABELS[m.type] ?? m.type, m.quantity, m.reason ?? "", m.user.name])
       );
       return { filename: `tappy-movimientos-inventario-${stamp}.csv`, csv, rows: movements.length };
     }

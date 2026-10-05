@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
+import { getTenantContext, requireCompanyId, resolveBranchId } from "@/lib/tenant-context";
 import { productsService, productSchema } from "@/modules/products/service";
 import { hasPermission, PERMISSIONS } from "@/lib/permissions";
 
@@ -39,7 +39,8 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
         ? await prisma.product.findUnique({ where: { id: params.id }, select: { price: true, name: true } })
         : null;
 
-    const product = await productsService.update(companyId, params.id, parsed.data);
+    const branchId = await resolveBranchId(ctx, companyId);
+    const product = await productsService.update(companyId, params.id, parsed.data, { branchId, userId: ctx.userId });
 
     if (before && product && before.price.toString() !== product.price.toString()) {
       await prisma.auditLog.create({

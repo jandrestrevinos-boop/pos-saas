@@ -3,7 +3,8 @@ import Link from "next/link";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
-import { alertsService, CASH_OPEN_ALERT_HOURS } from "@/modules/alerts/service";
+import { alertsService, alertBranchScope, CASH_OPEN_ALERT_HOURS } from "@/modules/alerts/service";
+import { getTenantContext } from "@/lib/tenant-context";
 import { Card } from "@/components/ui";
 
 export default async function AlertsPage() {
@@ -14,7 +15,10 @@ export default async function AlertsPage() {
     redirect(getHomeRoute(session.user.permissions));
   }
 
-  const { stockAlerts, cashAlerts, total } = await alertsService.getAlerts(session.user.companyId);
+  const ctx = await getTenantContext();
+  const scope = await alertBranchScope(ctx, session.user.companyId);
+  const { stockAlerts, cashAlerts, total } = await alertsService.getAlerts(session.user.companyId, scope);
+  const showBranch = new Set(stockAlerts.map((a) => a.branchName)).size > 1 || scope === undefined;
 
   return (
     <div>
@@ -44,6 +48,7 @@ export default async function AlertsPage() {
                 <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
                   <th className="px-5 py-3 font-medium">Producto</th>
                   <th className="px-5 py-3 font-medium">Categoría</th>
+                  {showBranch && <th className="px-5 py-3 font-medium">Sucursal</th>}
                   <th className="px-5 py-3 font-medium">Existencia</th>
                   <th className="px-5 py-3 font-medium">Mínimo</th>
                   <th className="px-5 py-3 font-medium">Estado</th>
@@ -54,6 +59,7 @@ export default async function AlertsPage() {
                   <tr key={a.id} className="border-b border-line last:border-0">
                     <td className="px-5 py-3 font-medium">{a.name}</td>
                     <td className="px-5 py-3 text-muted">{a.category}</td>
+                    {showBranch && <td className="px-5 py-3 text-muted">{a.branchName}</td>}
                     <td className="px-5 py-3 font-mono">{a.stock}</td>
                     <td className="px-5 py-3 font-mono text-muted">{a.minStock > 0 ? a.minStock : "—"}</td>
                     <td className="px-5 py-3">

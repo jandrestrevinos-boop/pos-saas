@@ -5,7 +5,7 @@ export function ExportButton({
   to,
   label = "Exportar CSV",
 }: {
-  dataset: "sales" | "products" | "movements" | "customers";
+  dataset: "sales" | "products" | "stock" | "movements" | "customers";
   from?: string;
   to?: string;
   label?: string;

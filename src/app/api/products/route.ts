@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
+import { getTenantContext, requireCompanyId, resolveBranchId } from "@/lib/tenant-context";
 import { productsService, productSchema } from "@/modules/products/service";
 import { hasPermission, PERMISSIONS } from "@/lib/permissions";
 
@@ -24,6 +24,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
   }
 
-  const product = await productsService.create(companyId, parsed.data);
+  const branchId = await resolveBranchId(ctx, companyId);
+  const product = await productsService.create(companyId, parsed.data, { branchId, userId: ctx.userId });
   return NextResponse.json({ product }, { status: 201 });
 }

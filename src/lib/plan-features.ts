@@ -65,7 +65,7 @@ export const FEATURE_CATALOG: FeatureDef[] = [
   { key: "api_basica", label: "API básica", status: "planned", enforced: false },
   { key: "api_avanzada", label: "API avanzada", status: "planned", enforced: false },
   { key: "permisos_avanzados", label: "Permisos avanzados", status: "planned", enforced: false },
-  { key: "inventario_compartido", label: "Inventario compartido entre sucursales", status: "planned", enforced: false },
+  { key: "inventario_compartido", label: "Inventario por sucursal y transferencias entre sucursales", status: "live", enforced: false },
   { key: "reportes_consolidados", label: "Reportes consolidados", status: "planned", enforced: false },
   { key: "transferencias_automaticas", label: "Transferencias automáticas entre sucursales", status: "planned", enforced: false },
   { key: "menus_por_turno", label: "Menús por turno/hora", status: "planned", enforced: false },

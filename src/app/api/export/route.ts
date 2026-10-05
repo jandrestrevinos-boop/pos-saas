@@ -9,11 +9,12 @@ const REQUIRED_PERMISSION: Record<ExportDataset, PermissionKey> = {
   sales: PERMISSIONS.REPORTS_VIEW,
   customers: PERMISSIONS.REPORTS_VIEW,
   products: PERMISSIONS.PRODUCTS_MANAGE,
+  stock: PERMISSIONS.INVENTORY_MANAGE,
   movements: PERMISSIONS.INVENTORY_MANAGE,
 };
 
 /**
- * GET /api/export?dataset=sales|products|movements|customers[&from=YYYY-MM-DD&to=YYYY-MM-DD]
+ * GET /api/export?dataset=sales|products|stock|movements|customers[&from=YYYY-MM-DD&to=YYYY-MM-DD]
  * Descarga un CSV. from/to aplican a ventas y movimientos de inventario.
  */
 export async function GET(req: Request) {

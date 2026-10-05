@@ -33,9 +33,12 @@ function marginPercent(price: string, cost: string | null): string {
 export function ProductsTable({
   initialProducts,
   categories,
+  multiBranch = false,
 }: {
   initialProducts: Product[];
   categories: Category[];
+  /** true si la empresa tiene varias sucursales: la existencia mostrada es la de la sucursal activa. */
+  multiBranch?: boolean;
 }) {
   const [products, setProducts] = useState(initialProducts);
   const [modalOpen, setModalOpen] = useState(false);
@@ -233,7 +236,7 @@ export function ProductsTable({
           </Field>
 
           {form.tracksInventory && (
-            <Field label="Existencias iniciales">
+            <Field label={multiBranch ? "Existencias iniciales (en esta sucursal)" : "Existencias iniciales"}>
               <input
                 type="number"
                 step="1"
@@ -277,6 +280,7 @@ export function ProductsTable({
         <EditProductModal
           product={editing}
           categories={categories}
+          multiBranch={multiBranch}
           onClose={() => setEditing(null)}
           onSaved={(updated) => {
             setProducts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
@@ -291,11 +295,13 @@ export function ProductsTable({
 function EditProductModal({
   product,
   categories,
+  multiBranch,
   onClose,
   onSaved,
 }: {
   product: Product;
   categories: Category[];
+  multiBranch: boolean;
   onClose: () => void;
   onSaved: (p: Product) => void;
 }) {
@@ -401,7 +407,7 @@ function EditProductModal({
         </Field>
 
         {form.tracksInventory && (
-          <Field label="Existencias">
+          <Field label={multiBranch ? "Existencias (en esta sucursal)" : "Existencias"}>
             <input
               type="number"
               step="1"

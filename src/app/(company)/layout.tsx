@@ -7,7 +7,7 @@ import { FEATURE_KEYS } from "@/lib/plan-features";
 import { hasPermission, PERMISSIONS, type PermissionKey } from "@/lib/permissions";
 import { requireBillingAccess } from "@/lib/billing-gate";
 import Link from "next/link";
-import { alertsService } from "@/modules/alerts/service";
+import { alertsService, alertBranchScope } from "@/modules/alerts/service";
 import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
 import { prisma } from "@/lib/prisma";
 
@@ -68,7 +68,10 @@ export default async function CompanyLayout({ children }: { children: React.Reac
 
   // Alertas (stock bajo / agotado / caja abierta de más): el nav muestra cuántas hay.
   if (hasPermission(session.user.permissions, PERMISSIONS.INVENTORY_MANAGE)) {
-    const alertCount = await alertsService.count(session.user.companyId);
+    const alertCount = await alertsService.count(
+      session.user.companyId,
+      await alertBranchScope(await getTenantContext(), session.user.companyId)
+    );
     const inventoryIndex = navItems.findIndex((item) => item.href === "/inventory");
     const alertItem = {
       href: "/alerts",

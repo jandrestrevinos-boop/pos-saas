@@ -43,6 +43,8 @@ model Company {
 
   subscriptionPayments SubscriptionPayment[]
 
+  stockTransfers  StockTransfer[]
+
   @@map("companies")
 }
 
@@ -116,6 +118,10 @@ model Branch {
   mercadoPagoTerminal MercadoPagoTerminal?
 
   @@index([companyId])
+  stocks          BranchStock[]
+  transfersOut    StockTransfer[] @relation("TransferFrom")
+  transfersIn     StockTransfer[] @relation("TransferTo")
+
   @@map("branches")
 }
 
@@ -296,6 +302,8 @@ model User {
   hardwareFinancingsCreated HardwareFinancing[]
 
   @@index([companyId])
+  stockTransfers  StockTransfer[]
+
   @@map("users")
 }
 
@@ -380,6 +388,9 @@ model Product {
   hardwareFinancingItems HardwareFinancingItem[]
 
   @@index([companyId])
+  branchStocks    BranchStock[]
+  stockTransfers  StockTransfer[]
+
   @@map("products")
 }
 
@@ -883,4 +894,45 @@ model HardwareFinancingPayment {
   @@unique([financingId, paymentNumber])
   @@index([status, dueDate])
   @@map("hardware_financing_payments")
+}
+
+/// Existencia de un producto EN UNA SUCURSAL. Es la fuente de verdad del
+/// inventario. Product.stock se mantiene como el TOTAL de todas las sucursales
+/// (suma) para que lo que lee el stock total siga funcionando.
+/// Si no hay fila para (producto, sucursal), la existencia ahí es 0.
+model BranchStock {
+  id        String   @id @default(uuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  branchId  String
+  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  stock     Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@unique([productId, branchId])
+  @@index([branchId])
+  @@map("branch_stocks")
+}
+
+/// Traspaso de mercancía de una sucursal a otra (inmediato). Además de este
+/// registro se generan dos InventoryMovement (salida y entrada) para el historial.
+model StockTransfer {
+  id           String   @id @default(uuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  productId    String
+  product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  fromBranchId String
+  fromBranch   Branch   @relation("TransferFrom", fields: [fromBranchId], references: [id])
+  toBranchId   String
+  toBranch     Branch   @relation("TransferTo", fields: [toBranchId], references: [id])
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+
+  quantity  Int
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@map("stock_transfers")
 }

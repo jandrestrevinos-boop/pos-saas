@@ -4,6 +4,7 @@
  */
 
 import { prisma } from "@/lib/prisma";
+import { getBranchStock } from "@/modules/inventory/service";
 
 interface CartItem {
   productId: string;
@@ -14,7 +15,7 @@ interface CartItem {
 }
 
 export const cartManager = {
-  async addItem(cartId: string, item: CartItem) {
+  async addItem(branchId: string, cartId: string, item: CartItem) {
     try {
       const product = await prisma.product.findUnique({
         where: { id: item.productId },
@@ -25,7 +26,7 @@ export const cartManager = {
       }
 
       // Solo se valida stock si el producto realmente controla inventario.
-      if (product.tracksInventory && product.stock < item.quantity) {
+      if (product.tracksInventory && (await getBranchStock(product.id, branchId)) < item.quantity) {
         throw new Error(`Stock insuficiente`);
       }
 

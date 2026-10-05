@@ -24,7 +24,8 @@ export const catalogService = {
           products: {
             where: {
               isActive: true,
-              OR: [{ tracksInventory: false }, { stock: { gt: 0 } }],
+              // Solo se ofrece lo que esta sucursal tiene en existencia (o no controla inventario).
+              OR: [{ tracksInventory: false }, { branchStocks: { some: { branchId, stock: { gt: 0 } } } }],
             },
             select: {
               id: true,
@@ -64,14 +65,19 @@ export const catalogService = {
     }
   },
 
-  async isAvailable(productId: string, quantity: number = 1): Promise<boolean> {
+  async isAvailable(productId: string, branchId: string, quantity: number = 1): Promise<boolean> {
     try {
       const product = await prisma.product.findUnique({
         where: { id: productId },
-        select: { stock: true, tracksInventory: true, isActive: true },
+        select: { tracksInventory: true, isActive: true },
       });
       if (!product || !product.isActive) return false;
-      return !product.tracksInventory || product.stock >= quantity;
+      if (!product.tracksInventory) return true;
+      const row = await prisma.branchStock.findUnique({
+        where: { productId_branchId: { productId, branchId } },
+        select: { stock: true },
+      });
+      return (row?.stock ?? 0) >= quantity;
     } catch {
       return false;
     }
