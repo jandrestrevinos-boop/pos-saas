@@ -45,6 +45,10 @@ model Company {
 
   stockTransfers  StockTransfer[]
 
+  loyaltyProgram     LoyaltyProgram?
+  loyaltyVisits      LoyaltyVisit[]
+  loyaltyRedemptions LoyaltyRedemption[]
+
   @@map("companies")
 }
 
@@ -654,10 +658,89 @@ model Customer {
   email     String?
   createdAt DateTime @default(now())
 
-  orders Order[]
+  // Programa de clientes frecuentes (opcional: solo se llena si el cliente
+  // se registró en el programa). cardToken es el contenido del QR personal
+  // (largo y aleatorio, no adivinable); shortCode es el respaldo corto que
+  // el cajero puede teclear si la cámara falla.
+  cardToken       String?   @unique
+  shortCode       String?
+  visitsInCycle   Int       @default(0)
+  lastVisitAt     DateTime?
+  loyaltyJoinedAt DateTime?
 
+  orders      Order[]
+  visits      LoyaltyVisit[]
+  redemptions LoyaltyRedemption[]
+
+  @@unique([companyId, shortCode])
   @@index([companyId])
   @@map("customers")
+}
+
+// ------------------------------------------------------------
+// PROGRAMA DE CLIENTES FRECUENTES
+// ------------------------------------------------------------
+
+enum LoyaltyDiscountType {
+  PERCENT
+  FIXED
+}
+
+/// Configuración del programa de cada empresa (una por empresa). El
+/// signupToken es el QR fijo del mostrador con el que el cliente se registra.
+model LoyaltyProgram {
+  id             String   @id @default(uuid())
+  companyId      String   @unique
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  isActive       Boolean  @default(true)
+  visitsRequired Int      @default(7)
+  discountType   LoyaltyDiscountType @default(PERCENT)
+  discountValue  Decimal  @default(10) @db.Decimal(10, 2)
+  oneVisitPerDay Boolean  @default(true)
+  signupToken    String   @unique
+  displayName    String? // nombre que ve el cliente en su tarjeta (si no, el de la empresa)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@map("loyalty_programs")
+}
+
+/// Una visita (compra verificada por el personal) de un cliente.
+model LoyaltyVisit {
+  id         String   @id @default(uuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  branchId   String?
+  userId     String?
+  orderId    String? // se llena cuando la visita viene de una venta de Tappy (integración con Caja)
+  createdAt  DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@index([customerId, createdAt])
+  @@map("loyalty_visits")
+}
+
+/// Un descuento canjeado. Guarda las condiciones vigentes al momento del canje.
+model LoyaltyRedemption {
+  id            String   @id @default(uuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customerId    String
+  customer      Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  branchId      String?
+  userId        String?
+  orderId       String?
+  discountType  LoyaltyDiscountType
+  discountValue Decimal  @db.Decimal(10, 2)
+  visitsUsed    Int
+  createdAt     DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@index([customerId])
+  @@map("loyalty_redemptions")
 }
 
 // ------------------------------------------------------------

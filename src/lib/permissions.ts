@@ -22,6 +22,8 @@ export const PERMISSIONS = {
   HARDWARE_FINANCING_MANAGE: "hardware_financing.manage", // solo SUPER_ADMIN: crear/liquidar/reestructurar financiamientos
   TABLES_MANAGE: "tables.manage", // requiere además la feature de plan "gestion_mesas" — ver hasFeature()
   KITCHEN_VIEW: "kitchen.view", // ver/avanzar comandas en la Pantalla de Cocina
+  LOYALTY_MANAGE: "loyalty.manage", // configurar el programa de clientes frecuentes (requiere la feature "clientes_frecuentes")
+  LOYALTY_SCAN: "loyalty.scan", // escanear tarjetas, registrar visitas y canjear descuentos
 } as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -53,6 +55,8 @@ const ADMIN_PERMISSIONS: PermissionKey[] = [
   PERMISSIONS.SETTINGS_MANAGE,
   PERMISSIONS.TABLES_MANAGE,
   PERMISSIONS.KITCHEN_VIEW,
+  PERMISSIONS.LOYALTY_MANAGE,
+  PERMISSIONS.LOYALTY_SCAN,
 ];
 
 const VENTAS_PERMISSIONS: PermissionKey[] = [
@@ -62,6 +66,7 @@ const VENTAS_PERMISSIONS: PermissionKey[] = [
   PERMISSIONS.CASH_CLOSE,
   PERMISSIONS.CASH_MOVEMENT,
   PERMISSIONS.TABLES_MANAGE,
+  PERMISSIONS.LOYALTY_SCAN,
 ];
 
 export const DEFAULT_ROLE_PERMISSIONS: Record<string, PermissionKey[]> = {
@@ -86,7 +91,13 @@ export function hasPermission(
  * REPORTS_VIEW, así que caería en un loop de redirección si esa fuera la
  * meta fija. Cada página gateada debe usar esto en vez de un href fijo.
  */
-export function getHomeRoute(userPermissions: string[]): string {
+export function getHomeRoute(userPermissions: string[], opts?: { loyaltyOnly?: boolean }): string {
+  // Empresas con el programa de clientes frecuentes SIN POS: solo existen las pantallas de lealtad.
+  if (opts?.loyaltyOnly) {
+    if (hasPermission(userPermissions, PERMISSIONS.LOYALTY_SCAN)) return "/clientes-frecuentes/escanear";
+    if (hasPermission(userPermissions, PERMISSIONS.LOYALTY_MANAGE)) return "/clientes-frecuentes";
+    return "/login";
+  }
   if (hasPermission(userPermissions, PERMISSIONS.REPORTS_VIEW)) return "/dashboard";
   if (hasPermission(userPermissions, PERMISSIONS.SALES_CREATE)) return "/pos";
   if (hasPermission(userPermissions, PERMISSIONS.KITCHEN_VIEW)) return "/kitchen";

@@ -6,7 +6,7 @@ import { productsService } from "@/modules/products/service";
 import { hasPermission, PERMISSIONS } from "@/lib/permissions";
 import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
 import { cashService } from "@/modules/cash/service";
-import { hasFeature } from "@/lib/feature-gating";
+import { hasFeature, requirePosAccess } from "@/lib/feature-gating";
 import { FEATURE_KEYS } from "@/lib/plan-features";
 import { tablesService } from "@/modules/tables/service";
 import { mercadoPagoService } from "@/modules/mercadoPago/service";
@@ -19,6 +19,7 @@ export default async function PosPage() {
   if (!session?.user?.companyId) redirect("/login");
 
   await requireBillingAccess(session.user.companyId);
+  await requirePosAccess(session.user.companyId);
 
   if (!hasPermission(session.user.permissions, PERMISSIONS.SALES_CREATE)) {
     redirect("/dashboard");

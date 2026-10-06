@@ -40,6 +40,12 @@ export const FEATURE_CATALOG: FeatureDef[] = [
   { key: "pagos_integrados", label: "Pagos integrados (tarjetas desde el POS)", status: "live", enforced: true },
   { key: "whatsapp_business", label: "WhatsApp Business", status: "live", enforced: true },
   { key: "dashboard_empresarial", label: "Dashboard empresarial", status: "live", enforced: true },
+  // Programa de clientes frecuentes: opción independiente. No viene incluida en ningún plan
+  // por defecto; se activa por plan o por empresa (plan personalizado) desde Super Admin.
+  { key: "clientes_frecuentes", label: "Programa de clientes frecuentes (tarjeta digital con QR)", status: "live", enforced: true },
+  // Modo "solo clientes frecuentes": para restaurantes que contratan el programa SIN el POS.
+  // Marcar esta casilla (junto con clientes_frecuentes) oculta y bloquea Punto de Venta, Caja, etc.
+  { key: "solo_clientes_frecuentes", label: "Modo solo clientes frecuentes (sin Punto de Venta)", status: "live", enforced: true },
 
   // ── Construidas pero disponibles en todos los planes (marcarlas no cambia nada todavía) ──
   { key: "comandas_cocina", label: "Comandas digitales para cocina", status: "live", enforced: false },

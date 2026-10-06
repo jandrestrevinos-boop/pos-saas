@@ -19,12 +19,16 @@ export default withAuth(
     // SUPER_ADMIN no opera el panel ni el POS de un restaurante individual
     if (
       role === "SUPER_ADMIN" &&
-      ["/dashboard", "/products", "/categories", "/branches", "/users", "/pos", "/cash", "/reports", "/inventory", "/kitchen"].some((p) => pathname.startsWith(p))
+      ["/dashboard", "/products", "/categories", "/branches", "/users", "/pos", "/cash", "/reports", "/inventory", "/kitchen", "/clientes-frecuentes"].some((p) => pathname.startsWith(p))
     ) {
       return NextResponse.redirect(new URL("/plataforma/dashboard", req.url));
     }
 
-    return NextResponse.next();
+    // Pasa la ruta actual a los server components (el layout de empresa la usa para
+    // aplicar el modo "solo clientes frecuentes").
+    const requestHeaders = new Headers(req.headers);
+    requestHeaders.set("x-pathname", pathname);
+    return NextResponse.next({ request: { headers: requestHeaders } });
   },
   {
     callbacks: {
@@ -35,5 +39,5 @@ export default withAuth(
 );
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/products/:path*", "/categories/:path*", "/branches/:path*", "/users/:path*", "/pos/:path*", "/cash/:path*", "/reports/:path*", "/inventory/:path*", "/kitchen/:path*", "/plataforma/:path*", "/facturacion/:path*"],
+  matcher: ["/dashboard/:path*", "/products/:path*", "/categories/:path*", "/branches/:path*", "/users/:path*", "/pos/:path*", "/cash/:path*", "/reports/:path*", "/inventory/:path*", "/kitchen/:path*", "/clientes-frecuentes/:path*", "/plataforma/:path*", "/facturacion/:path*"],
 };

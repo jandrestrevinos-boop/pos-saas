@@ -4,6 +4,7 @@ import { authOptions } from "@/lib/auth";
 import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
 import { kitchenService } from "@/modules/kitchen/service";
 import { requireBillingAccess } from "@/lib/billing-gate";
+import { requirePosAccess } from "@/lib/feature-gating";
 import { KitchenClient } from "./kitchen-client";
 import Link from "next/link";
 
@@ -12,6 +13,7 @@ export default async function KitchenPage() {
   if (!session?.user?.companyId) redirect("/login");
 
   await requireBillingAccess(session.user.companyId);
+  await requirePosAccess(session.user.companyId);
 
   if (!hasPermission(session.user.permissions, PERMISSIONS.KITCHEN_VIEW)) {
     redirect(getHomeRoute(session.user.permissions));

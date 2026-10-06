@@ -21,6 +21,10 @@ export function SidebarNav({
   branchName?: string | null;
 }) {
   const pathname = usePathname();
+  // Se resalta solo la opción más específica (ej. "/clientes-frecuentes/escanear" y no también "/clientes-frecuentes").
+  const activeHref = items
+    .filter((i) => pathname === i.href || pathname.startsWith(i.href + "/"))
+    .sort((a, b) => b.href.length - a.href.length)[0]?.href;
 
   async function changeBranch(branchId: string) {
     const res = await fetch("/api/branches/active", {
@@ -57,7 +61,7 @@ export function SidebarNav({
         </div>
         <nav className="px-3 py-4 flex flex-col gap-1">
           {items.map((item) => {
-            const active = pathname.startsWith(item.href);
+            const active = item.href === activeHref;
             return (
               <Link
                 key={item.href}

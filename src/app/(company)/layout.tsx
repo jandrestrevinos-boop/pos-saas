@@ -1,10 +1,11 @@
 import { redirect } from "next/navigation";
+import { headers } from "next/headers";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { SidebarNav } from "@/components/sidebar-nav";
-import { hasFeature } from "@/lib/feature-gating";
+import { hasFeature, getEffectiveFeatureKeys } from "@/lib/feature-gating";
 import { FEATURE_KEYS } from "@/lib/plan-features";
-import { hasPermission, PERMISSIONS, type PermissionKey } from "@/lib/permissions";
+import { hasPermission, PERMISSIONS, getHomeRoute, type PermissionKey } from "@/lib/permissions";
 import { requireBillingAccess } from "@/lib/billing-gate";
 import Link from "next/link";
 import { alertsService, alertBranchScope } from "@/modules/alerts/service";
@@ -40,6 +41,19 @@ export default async function CompanyLayout({ children }: { children: React.Reac
   const billing = await requireBillingAccess(session.user.companyId);
   const showBillingBanner =
     billing.state === "GRACE" || (billing.state === "DEMO" && billing.daysLeft !== null && billing.daysLeft <= 5);
+
+  // Programa de clientes frecuentes: opción independiente. Con "solo_clientes_frecuentes" la
+  // empresa NO tiene POS: el panel se limita a las pantallas de lealtad (y Usuarios).
+  const featureKeys = await getEffectiveFeatureKeys(session.user.companyId);
+  const loyaltyEnabled = featureKeys.has(FEATURE_KEYS.CLIENTES_FRECUENTES);
+  const loyaltyOnly = loyaltyEnabled && featureKeys.has(FEATURE_KEYS.SOLO_CLIENTES_FRECUENTES);
+  if (loyaltyOnly) {
+    const pathname = headers().get("x-pathname") ?? "";
+    const allowed = ["/clientes-frecuentes", "/users"];
+    if (pathname && !allowed.some((p) => pathname.startsWith(p))) {
+      redirect(getHomeRoute(session.user.permissions, { loyaltyOnly: true }));
+    }
+  }
 
   // El nav en sí no reemplaza el gating real (page.tsx de cada ruta valida
   // hasFeature/hasPermission de nuevo) — esto es solo para no mostrar un
@@ -79,6 +93,23 @@ export default async function CompanyLayout({ children }: { children: React.Reac
       permission: PERMISSIONS.INVENTORY_MANAGE,
     };
     navItems = [...navItems.slice(0, inventoryIndex + 1), alertItem, ...navItems.slice(inventoryIndex + 1)];
+  }
+
+  if (loyaltyOnly) {
+    navItems = [
+      { href: "/clientes-frecuentes/escanear", label: "Escanear cliente", permission: PERMISSIONS.LOYALTY_SCAN },
+      { href: "/clientes-frecuentes", label: "Clientes frecuentes", permission: PERMISSIONS.LOYALTY_MANAGE },
+      { href: "/users", label: "Usuarios", permission: PERMISSIONS.USERS_MANAGE },
+      { href: "/facturacion", label: "Mi plan y pagos", permission: PERMISSIONS.SETTINGS_MANAGE },
+    ];
+  } else if (loyaltyEnabled) {
+    const loyaltyItems = [
+      { href: "/clientes-frecuentes/escanear", label: "Escanear cliente", permission: PERMISSIONS.LOYALTY_SCAN },
+      { href: "/clientes-frecuentes", label: "Clientes frecuentes", permission: PERMISSIONS.LOYALTY_MANAGE },
+    ];
+    const cashIndex = navItems.findIndex((item) => item.href === "/cash");
+    const at = cashIndex === -1 ? navItems.length : cashIndex + 1;
+    navItems = [...navItems.slice(0, at), ...loyaltyItems, ...navItems.slice(at)];
   }
 
   // Sucursal activa: si la empresa tiene varias sucursales activas, el nav muestra

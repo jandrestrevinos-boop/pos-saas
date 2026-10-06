@@ -1,3 +1,4 @@
+import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { VALID_FEATURE_KEYS } from "@/lib/plan-features";
 
@@ -37,4 +38,21 @@ export async function getEffectiveFeatureKeys(companyId: string): Promise<Set<st
 export async function hasFeature(companyId: string, featureKey: string): Promise<boolean> {
   const keys = await getEffectiveFeatureKeys(companyId);
   return keys.has(featureKey);
+}
+
+/**
+ * ¿La empresa contrató el programa de clientes frecuentes SIN el POS?
+ * (feature "solo_clientes_frecuentes"). En ese modo el menú solo muestra las
+ * pantallas de lealtad y /pos, /kitchen y el resto del panel redirigen aquí.
+ */
+export async function isLoyaltyOnly(companyId: string): Promise<boolean> {
+  const keys = await getEffectiveFeatureKeys(companyId);
+  return keys.has("solo_clientes_frecuentes") && keys.has("clientes_frecuentes");
+}
+
+/** Para páginas del POS (/pos, /kitchen): si la empresa es "solo clientes frecuentes", no entra. */
+export async function requirePosAccess(companyId: string) {
+  if (await isLoyaltyOnly(companyId)) {
+    redirect("/clientes-frecuentes/escanear");
+  }
 }

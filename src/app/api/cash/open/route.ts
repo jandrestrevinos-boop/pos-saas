@@ -3,10 +3,15 @@ import { getTenantContext, requireCompanyId, resolveBranchId } from "@/lib/tenan
 import { cashService, openRegisterSchema } from "@/modules/cash/service";
 import { hasPermission, PERMISSIONS } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
+import { isLoyaltyOnly } from "@/lib/feature-gating";
 
 export async function POST(req: Request) {
   const ctx = await getTenantContext();
   const companyId = requireCompanyId(ctx);
+
+  if (await isLoyaltyOnly(companyId)) {
+    return NextResponse.json({ error: "Tu plan no incluye el Punto de Venta" }, { status: 403 });
+  }
 
   if (!hasPermission(ctx.permissions, PERMISSIONS.CASH_OPEN)) {
     return NextResponse.json({ error: "No tienes permiso para abrir caja" }, { status: 403 });
