@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { hasFeature } from "@/lib/feature-gating";
 import { FEATURE_KEYS } from "@/lib/plan-features";
+import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
 
 /**
  * Programa de clientes frecuentes.
@@ -105,6 +106,8 @@ function summarize(customer: CustomerRow, program: ProgramRow) {
     lastVisitAt: customer.lastVisitAt,
     programActive: program.isActive,
     discountText: describeDiscount(program.discountType as "PERCENT" | "FIXED", Number(program.discountValue)),
+    discountType: program.discountType as "PERCENT" | "FIXED",
+    discountValue: Number(program.discountValue),
   };
 }
 
@@ -168,12 +171,45 @@ async function enroll(
   return { customer, created: true };
 }
 
+type Tx = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
+
 /** Bloquea la fila del cliente durante la transacción (evita doble visita / doble canje simultáneos). */
-async function lockCustomer(tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0], companyId: string, customerId: string) {
+async function lockCustomer(tx: Tx, companyId: string, customerId: string) {
   const rows = await tx.$queryRaw<{ id: string }[]>`
     SELECT id FROM customers WHERE id = ${customerId} AND "companyId" = ${companyId} FOR UPDATE`;
   if (rows.length === 0) throw new Error("Cliente no encontrado");
 }
+
+/** Suma una visita respetando "una por día". Debe llamarse con la fila del cliente ya bloqueada. */
+async function addVisitInTx(
+  tx: Tx,
+  ctx: { companyId: string; customerId: string; userId: string | null; branchId: string | null; orderId: string | null },
+  state: { visits: number; lastVisitAt: Date | null },
+  program: ProgramRow
+) {
+  const now = new Date();
+  if (program.oneVisitPerDay && state.lastVisitAt && dayKey(state.lastVisitAt) === dayKey(now)) {
+    return { registered: false, visits: state.visits };
+  }
+  await tx.loyaltyVisit.create({
+    data: { companyId: ctx.companyId, customerId: ctx.customerId, branchId: ctx.branchId, userId: ctx.userId, orderId: ctx.orderId },
+  });
+  await tx.customer.update({
+    where: { id: ctx.customerId },
+    data: { visitsInCycle: { increment: 1 }, lastVisitAt: now },
+  });
+  return { registered: true, visits: state.visits + 1 };
+}
+
+export type LoyaltySalePlan = {
+  customerId: string;
+  customerName: string;
+  redeem: boolean;
+  discount: number;
+  program: ProgramRow;
+  visits: number;
+  lastVisitAt: Date | null;
+};
 
 export const loyaltyService = {
   // ───────────── Administración (LOYALTY_MANAGE) ─────────────
@@ -400,5 +436,176 @@ export const loyaltyService = {
       ...summarize(customer, program),
       restaurantName: program.displayName || customer.company.name,
     };
+  },
+
+  // ───────────── Integración con Caja (ventas y cuentas de mesa) ─────────────
+  /**
+   * Antes de crear la venta: valida al cliente y, si pidió canjear, calcula el descuento EN EL
+   * SERVIDOR (lo que mande el navegador no se usa). Devuelve null si el programa está pausado y
+   * no se pidió canje: la venta sigue normal, solo sin visita.
+   */
+  async prepareForSale(tx: Tx, companyId: string, customerId: string, wantsRedeem: boolean, subtotal: number) {
+    await lockCustomer(tx, companyId, customerId);
+    const customer = await tx.customer.findFirst({ where: { id: customerId, companyId, cardToken: { not: null } } });
+    if (!customer) throw new Error("Ese cliente no está en el programa de clientes frecuentes");
+
+    const program = await tx.loyaltyProgram.findUnique({ where: { companyId } });
+    if (!program || !program.isActive) {
+      if (wantsRedeem) throw new Error("El programa de clientes frecuentes está pausado");
+      return null;
+    }
+    if (wantsRedeem && customer.visitsInCycle < program.visitsRequired) {
+      throw new Error("Este cliente aún no tiene descuento disponible");
+    }
+
+    const plan: LoyaltySalePlan = {
+      customerId,
+      customerName: customer.name,
+      redeem: wantsRedeem,
+      discount: wantsRedeem
+        ? computeLoyaltyDiscount(program.discountType as "PERCENT" | "FIXED", Number(program.discountValue), subtotal)
+        : 0,
+      program,
+      visits: customer.visitsInCycle,
+      lastVisitAt: customer.lastVisitAt,
+    };
+    return plan;
+  },
+
+  /**
+   * Después de crear la venta (misma transacción): registra el canje y, si el cobro ya quedó
+   * aprobado, la visita. En cobros de Mercado Pago pendientes la visita se suma cuando el pago
+   * se confirma (recordApprovedOrderVisit); el canje sí se aparta desde ahora porque el descuento
+   * ya forma parte del total que se cobra.
+   */
+  async commitForSale(
+    tx: Tx,
+    plan: LoyaltySalePlan,
+    ctx: { companyId: string; orderId: string; userId: string; branchId: string; paymentApproved: boolean }
+  ) {
+    const { program } = plan;
+    let visits = plan.visits;
+
+    if (plan.redeem) {
+      await tx.loyaltyRedemption.create({
+        data: {
+          companyId: ctx.companyId,
+          customerId: plan.customerId,
+          branchId: ctx.branchId,
+          userId: ctx.userId,
+          orderId: ctx.orderId,
+          discountType: program.discountType,
+          discountValue: program.discountValue,
+          visitsUsed: program.visitsRequired,
+        },
+      });
+      visits -= program.visitsRequired;
+      await tx.customer.update({ where: { id: plan.customerId }, data: { visitsInCycle: visits } });
+      await tx.auditLog.create({
+        data: {
+          companyId: ctx.companyId,
+          userId: ctx.userId,
+          action: "LOYALTY_REDEEM",
+          entity: "Order",
+          entityId: ctx.orderId,
+          newData: {
+            customerId: plan.customerId,
+            discountType: program.discountType,
+            discountValue: Number(program.discountValue),
+            discountApplied: plan.discount,
+          },
+        },
+      });
+    }
+
+    let visitRegistered = false;
+    if (ctx.paymentApproved) {
+      const r = await addVisitInTx(
+        tx,
+        { companyId: ctx.companyId, customerId: plan.customerId, userId: ctx.userId, branchId: ctx.branchId, orderId: ctx.orderId },
+        { visits, lastVisitAt: plan.lastVisitAt },
+        program
+      );
+      visitRegistered = r.registered;
+      visits = r.visits;
+    }
+
+    return {
+      customerName: plan.customerName,
+      redeemed: plan.redeem,
+      discountApplied: plan.discount,
+      visitRegistered,
+      visitPending: !ctx.paymentApproved,
+      visits,
+      required: program.visitsRequired,
+    };
+  },
+
+  /** Llamado cuando un pago de Mercado Pago queda aprobado: suma la visita que quedó pendiente. Idempotente. */
+  async recordApprovedOrderVisit(orderId: string) {
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      select: { id: true, companyId: true, branchId: true, userId: true, customerId: true },
+    });
+    if (!order?.customerId) return;
+    if (!(await hasFeature(order.companyId, FEATURE_KEYS.CLIENTES_FRECUENTES))) return;
+    const customerId = order.customerId;
+
+    await prisma.$transaction(async (tx) => {
+      await lockCustomer(tx, order.companyId, customerId);
+      const already = await tx.loyaltyVisit.findFirst({ where: { orderId: order.id }, select: { id: true } });
+      if (already) return;
+
+      const customer = await tx.customer.findFirst({ where: { id: customerId, cardToken: { not: null } } });
+      const program = await tx.loyaltyProgram.findUnique({ where: { companyId: order.companyId } });
+      if (!customer || !program || !program.isActive) return;
+
+      await addVisitInTx(
+        tx,
+        { companyId: order.companyId, customerId, userId: order.userId, branchId: order.branchId, orderId: order.id },
+        { visits: customer.visitsInCycle, lastVisitAt: customer.lastVisitAt },
+        program
+      );
+    });
+  },
+
+  /** Si se cancela una venta: se revierte su visita y se devuelve el descuento canjeado en ella. */
+  async revertForOrder(companyId: string, orderId: string, userId: string) {
+    const [visit, redemption] = await Promise.all([
+      prisma.loyaltyVisit.findFirst({ where: { orderId, companyId } }),
+      prisma.loyaltyRedemption.findFirst({ where: { orderId, companyId } }),
+    ]);
+    if (!visit && !redemption) return;
+    const customerId = (visit ?? redemption)!.customerId;
+
+    await prisma.$transaction(async (tx) => {
+      await lockCustomer(tx, companyId, customerId);
+      const customer = await tx.customer.findFirstOrThrow({ where: { id: customerId, companyId } });
+      let visits = customer.visitsInCycle;
+      let lastVisitAt = customer.lastVisitAt;
+
+      if (redemption) {
+        await tx.loyaltyRedemption.delete({ where: { id: redemption.id } });
+        visits += redemption.visitsUsed;
+      }
+      if (visit) {
+        await tx.loyaltyVisit.delete({ where: { id: visit.id } });
+        visits = Math.max(0, visits - 1);
+        const latest = await tx.loyaltyVisit.findFirst({ where: { customerId }, orderBy: { createdAt: "desc" } });
+        lastVisitAt = latest?.createdAt ?? null;
+      }
+
+      await tx.customer.update({ where: { id: customerId }, data: { visitsInCycle: visits, lastVisitAt } });
+      await tx.auditLog.create({
+        data: {
+          companyId,
+          userId,
+          action: "LOYALTY_REVERT",
+          entity: "Order",
+          entityId: orderId,
+          newData: { customerId, visitReverted: !!visit, redemptionReverted: !!redemption },
+        },
+      });
+    });
   },
 };

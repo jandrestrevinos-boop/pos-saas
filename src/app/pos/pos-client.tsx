@@ -4,6 +4,17 @@ import { useEffect, useMemo, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { formatMxn } from "@/lib/format";
+import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
+import { PosLoyaltyPanel, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
+
+type LoyaltyResult = {
+  customerName: string;
+  redeemed: boolean;
+  visitRegistered: boolean;
+  visitPending: boolean;
+  visits: number;
+  required: number;
+};
 
 type Category = { id: string; name: string };
 type Product = { id: string; name: string; price: string; categoryId: string };
@@ -18,6 +29,7 @@ const PAYMENT_METHODS: { value: "CASH" | "CARD" | "TRANSFER" | "OTHER"; label: s
 ];
 
 export function PosClient(props: {
+  loyaltyEnabled: boolean;
   categories: Category[];
   products: Product[];
   tables: TableOption[];
@@ -33,6 +45,7 @@ export function PosClient(props: {
 }
 
 function PosClientInner({
+  loyaltyEnabled,
   categories,
   products,
   tables,
@@ -40,6 +53,7 @@ function PosClientInner({
   terminalLinked,
   userName,
 }: {
+  loyaltyEnabled: boolean;
   categories: Category[];
   products: Product[];
   tables: TableOption[];
@@ -51,6 +65,8 @@ function PosClientInner({
   const [cart, setCart] = useState<CartLine[]>([]);
   const [discount, setDiscount] = useState(0);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
+  // Cliente frecuente identificado en esta venta (y si canjea su descuento)
+  const [loyalty, setLoyalty] = useState<LoyaltySelection | null>(null);
 
   // -----------------------------
   // MODO MESA (Caja tipo Mesa): llegamos aquí desde /tables con
@@ -112,7 +128,11 @@ function PosClientInner({
   );
 
   const subtotal = cart.reduce((sum, line) => sum + Number(line.product.price) * line.quantity, 0);
-  const safeDiscount = Math.min(discount, subtotal);
+  // Si canjea su descuento de cliente frecuente, ese descuento reemplaza al descuento manual.
+  const loyaltyDiscount = loyalty?.redeem
+    ? computeLoyaltyDiscount(loyalty.customer.discountType, loyalty.customer.discountValue, subtotal)
+    : 0;
+  const safeDiscount = loyalty?.redeem ? loyaltyDiscount : Math.min(discount, subtotal);
   const total = subtotal - safeDiscount;
 
   function addToCart(product: Product) {
@@ -136,6 +156,7 @@ function PosClientInner({
   function resetSale() {
     setCart([]);
     setDiscount(0);
+    setLoyalty(null);
     setCheckoutOpen(false);
   }
 
@@ -245,18 +266,26 @@ function PosClientInner({
           </div>
 
           <div className="ticket-edge px-5 py-4 space-y-2">
-            <label className="flex items-center justify-between text-sm">
-              <span className="text-muted">Descuento (MXN)</span>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={discount || ""}
-                onChange={(e) => setDiscount(parseFloat(e.target.value) || 0)}
-                className="w-24 rounded-md border border-line px-2 py-1 text-right font-mono"
-                placeholder="0.00"
-              />
-            </label>
+            {loyaltyEnabled && !tableInfo && <PosLoyaltyPanel value={loyalty} onChange={setLoyalty} />}
+            {loyalty?.redeem ? (
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-muted">Descuento cliente frecuente</span>
+                <span className="font-mono">-{formatMxn(loyaltyDiscount)}</span>
+              </div>
+            ) : (
+              <label className="flex items-center justify-between text-sm">
+                <span className="text-muted">Descuento (MXN)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={discount || ""}
+                  onChange={(e) => setDiscount(parseFloat(e.target.value) || 0)}
+                  className="w-24 rounded-md border border-line px-2 py-1 text-right font-mono"
+                  placeholder="0.00"
+                />
+              </label>
+            )}
             <div className="flex items-center justify-between text-sm text-muted">
               <span>Subtotal</span>
               <span className="font-mono">{formatMxn(subtotal)}</span>
@@ -306,6 +335,7 @@ function PosClientInner({
           discount={safeDiscount}
           subtotal={subtotal}
           cart={cart}
+          loyalty={loyalty}
           mercadoPagoEnabled={mercadoPagoEnabled}
           terminalLinked={terminalLinked}
           onClose={() => setCheckoutOpen(false)}
@@ -321,6 +351,7 @@ function CheckoutModal({
   discount,
   subtotal,
   cart,
+  loyalty,
   mercadoPagoEnabled,
   terminalLinked,
   onClose,
@@ -330,6 +361,7 @@ function CheckoutModal({
   discount: number;
   subtotal: number;
   cart: CartLine[];
+  loyalty: LoyaltySelection | null;
   mercadoPagoEnabled: boolean;
   terminalLinked: boolean;
   onClose: () => void;
@@ -360,6 +392,7 @@ function CheckoutModal({
     orderType: string;
     notes: string;
     deliveryAddress: string;
+    loyalty?: LoyaltyResult | null;
   } | null>(null);
   const [pendingMpCheckout, setPendingMpCheckout] = useState<{
     orderId: string;
@@ -400,6 +433,8 @@ function CheckoutModal({
             quantity: l.quantity,
           })),
           discount,
+          loyaltyCustomerId: loyalty?.customer.id,
+          redeemLoyalty: !!loyalty?.redeem,
           paymentMethod: method,
           cashReceived: method === "CASH" ? cashReceivedNum : undefined,
           orderType,
@@ -466,6 +501,7 @@ function CheckoutModal({
         orderType,
         notes: notes.trim(),
         deliveryAddress: orderType === "DOMICILIO" ? deliveryAddress.trim() : "",
+        loyalty: data.order.loyalty ?? null,
       });
     } catch (err) {
       setError("No se pudo conectar con el servidor.");
@@ -871,9 +907,23 @@ function CheckoutModal({
             </p>
           )}
 
-          <p className="font-mono text-xl mb-6">
+          <p className="font-mono text-xl mb-4">
             {formatMxn(completedOrder.total)}
           </p>
+
+          {completedOrder.loyalty && (
+            <div className="text-sm bg-sage-light text-sage rounded-md px-3 py-2 mb-4">
+              <p className="font-medium">{completedOrder.loyalty.customerName}</p>
+              {completedOrder.loyalty.redeemed && <p>Descuento de cliente frecuente aplicado.</p>}
+              <p>
+                {completedOrder.loyalty.visitRegistered
+                  ? `Visita sumada: ${completedOrder.loyalty.visits}/${completedOrder.loyalty.required}.`
+                  : completedOrder.loyalty.visitPending
+                    ? "La visita se sumará cuando se confirme el pago."
+                    : `Hoy ya había sumado su visita (${completedOrder.loyalty.visits}/${completedOrder.loyalty.required}).`}
+              </p>
+            </div>
+          )}
 
           <button
             onClick={printTicket}

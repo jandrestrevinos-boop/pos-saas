@@ -35,6 +35,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
   }
 
+  if (parsed.data.loyaltyCustomerId && !hasPermission(ctx.permissions, PERMISSIONS.LOYALTY_SCAN)) {
+    return NextResponse.json({ error: "No tienes permiso para usar clientes frecuentes" }, { status: 403 });
+  }
+
   try {
     const order = await salesService.create(companyId, branchId, ctx.userId, parsed.data);
 

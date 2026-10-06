@@ -32,7 +32,12 @@ export async function getEffectiveFeatureKeys(companyId: string): Promise<Set<st
   // Filtra cualquier valor que no sea una key válida del catálogo actual
   // (por ejemplo, labels viejos en español que no se hayan migrado, o
   // features que se hayan retirado del catálogo).
-  return new Set(raw.filter((key: string) => VALID_FEATURE_KEYS.has(key)));
+  const keys = new Set(raw.filter((key: string) => VALID_FEATURE_KEYS.has(key)));
+
+  // "Modo solo clientes frecuentes" implica el programa de clientes frecuentes: así, si en Super
+  // Admin solo se marca esa casilla, la empresa igual queda con el programa (y sin POS).
+  if (keys.has("solo_clientes_frecuentes")) keys.add("clientes_frecuentes");
+  return keys;
 }
 
 export async function hasFeature(companyId: string, featureKey: string): Promise<boolean> {
@@ -47,7 +52,7 @@ export async function hasFeature(companyId: string, featureKey: string): Promise
  */
 export async function isLoyaltyOnly(companyId: string): Promise<boolean> {
   const keys = await getEffectiveFeatureKeys(companyId);
-  return keys.has("solo_clientes_frecuentes") && keys.has("clientes_frecuentes");
+  return keys.has("solo_clientes_frecuentes");
 }
 
 /** Para páginas del POS (/pos, /kitchen): si la empresa es "solo clientes frecuentes", no entra. */

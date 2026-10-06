@@ -1,5 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
+import { hasFeature } from "@/lib/feature-gating";
+import { FEATURE_KEYS } from "@/lib/plan-features";
+import { loyaltyService } from "@/modules/loyalty/service";
 
 export const saleSchema = z
   .object({
@@ -18,6 +21,9 @@ export const saleSchema = z
     orderType: z.enum(["COMER_AQUI", "PARA_LLEVAR", "DOMICILIO"]).default("COMER_AQUI"),
     notes: z.string().max(500).optional(),
     deliveryAddress: z.string().max(500).optional(),
+    // Programa de clientes frecuentes (opcional): cliente identificado y si se canjea su descuento.
+    loyaltyCustomerId: z.string().min(1).optional(),
+    redeemLoyalty: z.boolean().default(false),
   })
   .superRefine((data, ctx) => {
     if (data.orderType === "DOMICILIO" && !data.deliveryAddress?.trim()) {
@@ -75,51 +81,76 @@ export const salesService = {
       };
     });
 
-    const discount = Math.min(input.discount, subtotal); // el descuento nunca deja el total en negativo
-    const total = subtotal - discount;
-
-    if (input.paymentMethod === "CASH") {
-      if (input.cashReceived === undefined || input.cashReceived < total) {
-        throw new Error("El efectivo recibido no puede ser menor al total");
-      }
+    if (input.loyaltyCustomerId && !(await hasFeature(companyId, FEATURE_KEYS.CLIENTES_FRECUENTES))) {
+      throw new Error("Tu plan no incluye el programa de clientes frecuentes");
     }
+    const paymentPending = input.paymentMethod === "MERCADOPAGO" || input.paymentMethod === "MERCADOPAGO_TERMINAL";
 
-    const change =
-      input.paymentMethod === "CASH" && input.cashReceived !== undefined
-        ? input.cashReceived - total
-        : undefined;
+    // 2. Crea la orden y sus renglones en una sola transacción (junto con el canje/visita de
+    //    clientes frecuentes, si el cliente fue identificado).
+    const { order, loyalty } = await prisma.$transaction(async (tx) => {
+      const plan = input.loyaltyCustomerId
+        ? await loyaltyService.prepareForSale(tx, companyId, input.loyaltyCustomerId, input.redeemLoyalty, subtotal)
+        : null;
 
-    // 2. Crea la orden y sus renglones en una sola transacción
-    const order = await prisma.order.create({
-      data: {
-        localId: crypto.randomUUID(),
-        companyId,
-        branchId,
-        userId,
-        tableId: input.tableId ?? null,
-        status: "PENDING",
-        orderType: input.orderType,
-        notes: input.notes?.trim() || null,
-        deliveryAddress: input.orderType === "DOMICILIO" ? input.deliveryAddress?.trim() : null,
-        subtotal,
-        discount,
-        tax: 0,
-        total,
-        items: { create: orderItemsData },
-        payments: {
-          create: {
-            method: input.paymentMethod,
-            status:
-              input.paymentMethod === "MERCADOPAGO" || input.paymentMethod === "MERCADOPAGO_TERMINAL"
-                ? "PENDING"
-                : "APPROVED",
-            amount: total,
-            cashReceived: input.cashReceived,
-            change,
+      // Si canjea su descuento de cliente frecuente, ese descuento (calculado en el servidor)
+      // reemplaza al descuento manual del cajero.
+      const manualDiscount = plan?.redeem ? 0 : input.discount;
+      const discount = Math.min(manualDiscount + (plan?.discount ?? 0), subtotal); // el descuento nunca deja el total en negativo
+      const total = subtotal - discount;
+
+      if (input.paymentMethod === "CASH") {
+        if (input.cashReceived === undefined || input.cashReceived < total) {
+          throw new Error("El efectivo recibido no puede ser menor al total");
+        }
+      }
+
+      const change =
+        input.paymentMethod === "CASH" && input.cashReceived !== undefined
+          ? input.cashReceived - total
+          : undefined;
+
+      const order = await tx.order.create({
+        data: {
+          localId: crypto.randomUUID(),
+          companyId,
+          branchId,
+          userId,
+          customerId: plan?.customerId ?? null,
+          tableId: input.tableId ?? null,
+          status: "PENDING",
+          orderType: input.orderType,
+          notes: input.notes?.trim() || null,
+          deliveryAddress: input.orderType === "DOMICILIO" ? input.deliveryAddress?.trim() : null,
+          subtotal,
+          discount,
+          tax: 0,
+          total,
+          items: { create: orderItemsData },
+          payments: {
+            create: {
+              method: input.paymentMethod,
+              status: paymentPending ? "PENDING" : "APPROVED",
+              amount: total,
+              cashReceived: input.cashReceived,
+              change,
+            },
           },
         },
-      },
-      include: { items: { include: { product: true } }, payments: true },
+        include: { items: { include: { product: true } }, payments: true },
+      });
+
+      const loyalty = plan
+        ? await loyaltyService.commitForSale(tx, plan, {
+            companyId,
+            orderId: order.id,
+            userId,
+            branchId,
+            paymentApproved: !paymentPending,
+          })
+        : null;
+
+      return { order, loyalty };
     });
 
     // Si la venta viene ligada a una mesa, la marca como Ocupada
@@ -145,7 +176,7 @@ export const salesService = {
       }
     }
 
-    return order;
+    return { ...order, loyalty };
   },
 
   /** Se llama desde el webhook de Mercado Pago cuando un pago queda aprobado: descuenta el inventario que se difirió en create(). */
@@ -163,6 +194,13 @@ export const salesService = {
       );
     } catch {
       // Igual que en create(): el inventario no debe bloquear que el pago quede confirmado.
+    }
+
+    // Clientes frecuentes: la visita de una venta con Mercado Pago se suma hasta que el pago se confirma.
+    try {
+      await loyaltyService.recordApprovedOrderVisit(orderId);
+    } catch {
+      // La lealtad nunca debe bloquear la confirmación de un pago.
     }
   },
 
@@ -321,6 +359,13 @@ export const salesService = {
       } catch {
         // No debe bloquear la cancelación si el inventario falla al reponerse.
       }
+    }
+
+    // Clientes frecuentes: la visita de esta venta se revierte y el descuento canjeado se devuelve.
+    try {
+      await loyaltyService.revertForOrder(companyId, orderId, userId);
+    } catch {
+      // No debe bloquear la cancelación de la venta.
     }
 
     await prisma.auditLog.create({

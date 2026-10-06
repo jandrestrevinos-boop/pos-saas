@@ -40,8 +40,13 @@ function buildDisplayFeatures(plan: Plan): string[] {
     .map((f) => (VALID_FEATURE_KEYS.has(f) ? featureLabel(f) : f))
     .filter((label) => !LEGACY_CAPACITY_RE.test(label.trim()));
 
-  const capacity =
-    plan.name === "Empresarial"
+  const loyaltyOnly = (plan.features ?? []).includes("solo_clientes_frecuentes");
+  const capacity = loyaltyOnly
+    ? [
+        `${plan.maxBranches} sucursal${plan.maxBranches === 1 ? "" : "es"}`,
+        `Hasta ${plan.maxUsers} usuario${plan.maxUsers === 1 ? "" : "s"}`,
+      ]
+    : plan.name === "Empresarial"
       ? [
           `Hasta ${plan.maxBranches} sucursales`,
           `Hasta ${plan.maxCashRegisters} cajas`,
@@ -66,14 +71,29 @@ function buildDisplayFeatures(plan: Plan): string[] {
 export function PlansClient({ initialPlans }: { initialPlans: Plan[] }) {
   const [plans, setPlans] = useState(initialPlans);
   const [editing, setEditing] = useState<Plan | null>(null);
+  const [creating, setCreating] = useState<"blank" | "loyalty" | null>(null);
 
   function handleUpdated(updated: Plan) {
     setPlans((prev) => prev.map((p) => (p.id === updated.id ? { ...p, ...updated } : p)));
     setEditing(null);
   }
 
+  function handleCreated(created: Plan) {
+    setPlans((prev) =>
+      [...prev, { ...created, _count: { subscriptions: 0 } }].sort((a, b) => Number(a.priceMxn) - Number(b.priceMxn))
+    );
+    setCreating(null);
+  }
+
   return (
     <>
+      <div className="flex flex-wrap justify-end gap-2 mb-5">
+        <Button variant="secondary" onClick={() => setCreating("loyalty")}>
+          + Plan solo clientes frecuentes
+        </Button>
+        <Button onClick={() => setCreating("blank")}>+ Nuevo plan</Button>
+      </div>
+
       <div className="grid md:grid-cols-3 gap-5">
         {plans.map((plan) => (
           <Card key={plan.id} className={`p-6 border-2 ${PLAN_ACCENTS[plan.name] ?? "border-line"}`}>
@@ -105,18 +125,42 @@ export function PlansClient({ initialPlans }: { initialPlans: Plan[] }) {
         ))}
       </div>
 
-      {editing && <EditPlanModal plan={editing} onClose={() => setEditing(null)} onSaved={handleUpdated} />}
+      {editing && <PlanModal plan={editing} onClose={() => setEditing(null)} onSaved={handleUpdated} />}
+      {creating && <PlanModal template={creating} onClose={() => setCreating(null)} onSaved={handleCreated} />}
     </>
   );
 }
 
-function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () => void; onSaved: (p: Plan) => void }) {
-  const [priceMxn, setPriceMxn] = useState(plan.priceMxn);
-  const [maxBranches, setMaxBranches] = useState(String(plan.maxBranches));
-  const [maxUsers, setMaxUsers] = useState(String(plan.maxUsers));
-  const [maxCashRegisters, setMaxCashRegisters] = useState(String(plan.maxCashRegisters));
+/**
+ * Crear (sin `plan`) o editar (con `plan`) un plan. `template="loyalty"` precarga el plan
+ * "solo clientes frecuentes": para restaurantes que contratan únicamente el programa, sin POS.
+ */
+function PlanModal({
+  plan,
+  template,
+  onClose,
+  onSaved,
+}: {
+  plan?: Plan;
+  template?: "blank" | "loyalty";
+  onClose: () => void;
+  onSaved: (p: Plan) => void;
+}) {
+  const isCreate = !plan;
+  const loyaltyPreset = template === "loyalty";
+  const [name, setName] = useState(plan?.name ?? (loyaltyPreset ? "Solo Clientes Frecuentes" : ""));
+  const [priceMxn, setPriceMxn] = useState(plan?.priceMxn ?? "");
+  const [maxBranches, setMaxBranches] = useState(String(plan?.maxBranches ?? 1));
+  const [maxUsers, setMaxUsers] = useState(String(plan?.maxUsers ?? (loyaltyPreset ? 3 : 5)));
+  const [maxCashRegisters, setMaxCashRegisters] = useState(String(plan?.maxCashRegisters ?? 1));
   const [checkedFeatures, setCheckedFeatures] = useState<Set<string>>(
-    new Set((plan.features ?? []).filter((f) => VALID_FEATURE_KEYS.has(f)))
+    new Set(
+      plan
+        ? (plan.features ?? []).filter((f) => VALID_FEATURE_KEYS.has(f))
+        : loyaltyPreset
+          ? ["clientes_frecuentes", "solo_clientes_frecuentes"]
+          : []
+    )
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -138,16 +182,17 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () => 
     // Conserva cualquier feature que ya estuviera guardada y que no forme
     // parte de este catálogo (por si hay algo custom cargado desde el
     // seed), y sobreescribe únicamente las del catálogo con lo marcado.
-    const preservedNonCatalog = (plan.features ?? []).filter((f) => !VALID_FEATURE_KEYS.has(f));
+    const preservedNonCatalog = (plan?.features ?? []).filter((f) => !VALID_FEATURE_KEYS.has(f));
     const features = [
       ...preservedNonCatalog,
       ...FEATURE_CATALOG.filter((f) => checkedFeatures.has(f.key)).map((f) => f.key),
     ];
 
-    const res = await fetch(`/api/plans/${plan.id}`, {
-      method: "PATCH",
+    const res = await fetch(isCreate ? "/api/plans" : `/api/plans/${plan.id}`, {
+      method: isCreate ? "POST" : "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        ...(isCreate ? { name } : {}),
         priceMxn: parseFloat(priceMxn) || 0,
         maxBranches: parseInt(maxBranches, 10) || 1,
         maxUsers: parseInt(maxUsers, 10) || 1,
@@ -158,15 +203,20 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () => 
     const data = await res.json();
     setSaving(false);
     if (!res.ok) {
-      setError(data.error ?? "No se pudo actualizar el plan");
+      setError(data.error ?? (isCreate ? "No se pudo crear el plan" : "No se pudo actualizar el plan"));
       return;
     }
-    onSaved({ ...plan, ...data.plan });
+    onSaved(isCreate ? data.plan : { ...plan, ...data.plan });
   }
 
   return (
-    <Modal open onClose={onClose} title={`Editar plan ${plan.name}`}>
+    <Modal open onClose={onClose} title={isCreate ? "Nuevo plan" : `Editar plan ${plan.name}`}>
       <form onSubmit={handleSubmit}>
+        {isCreate && (
+          <Field label="Nombre del plan">
+            <input required className={inputClass} value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej. Solo Clientes Frecuentes" />
+          </Field>
+        )}
         <Field label="Precio mensual (MXN)">
           <input required type="number" min="0" step="1" className={inputClass} value={priceMxn} onChange={(e) => setPriceMxn(e.target.value)} />
         </Field>
@@ -216,6 +266,13 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () => 
           </div>
         </Field>
 
+        {checkedFeatures.has("solo_clientes_frecuentes") && (
+          <p className="text-xs text-muted bg-marigold/10 rounded-md px-3 py-2 mb-4">
+            Con &ldquo;Modo solo clientes frecuentes&rdquo; el restaurante NO tendrá Punto de Venta, Caja ni Inventario:
+            solo el programa de clientes frecuentes y la gestión de usuarios.
+          </p>
+        )}
+
         {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
 
         <div className="flex justify-end gap-2">
@@ -223,7 +280,7 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () => 
             Cancelar
           </Button>
           <Button type="submit" disabled={saving}>
-            {saving ? "Guardando..." : "Guardar"}
+            {saving ? "Guardando..." : isCreate ? "Crear plan" : "Guardar"}
           </Button>
         </div>
       </form>

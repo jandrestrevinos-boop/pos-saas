@@ -23,6 +23,10 @@ export async function POST(req: Request, { params }: { params: { id: string } })
     return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
   }
 
+  if (parsed.data.loyaltyCustomerId && !hasPermission(ctx.permissions, PERMISSIONS.LOYALTY_SCAN)) {
+    return NextResponse.json({ error: "No tienes permiso para usar clientes frecuentes" }, { status: 403 });
+  }
+
   try {
     const order = await tableTabsService.close(companyId, params.id, ctx.userId, parsed.data);
     let mpCheckout: { preferenceId: string; checkoutUrl: string } | null = null;

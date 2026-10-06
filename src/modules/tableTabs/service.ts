@@ -1,5 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
+import { hasFeature } from "@/lib/feature-gating";
+import { FEATURE_KEYS } from "@/lib/plan-features";
+import { loyaltyService } from "@/modules/loyalty/service";
 
 export const addRoundSchema = z.object({
   items: z
@@ -16,6 +19,9 @@ export const closeTabSchema = z.object({
   paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO", "MERCADOPAGO_TERMINAL"]),
   cashReceived: z.coerce.number().min(0).optional(),
   discount: z.coerce.number().min(0).default(0),
+  // Programa de clientes frecuentes (opcional): cliente identificado y si se canjea su descuento.
+  loyaltyCustomerId: z.string().min(1).optional(),
+  redeemLoyalty: z.boolean().default(false),
 });
 
 /**
@@ -155,37 +161,62 @@ export const tableTabsService = {
     if (order.items.length === 0) throw new Error("La cuenta no tiene productos todavía");
 
     const subtotal = Number(order.subtotal);
-    const discount = Math.min(input.discount, subtotal);
-    const total = subtotal - discount;
 
-    if (input.paymentMethod === "CASH") {
-      if (input.cashReceived === undefined || input.cashReceived < total) {
-        throw new Error("El efectivo recibido no puede ser menor al total");
-      }
+    if (input.loyaltyCustomerId && !(await hasFeature(companyId, FEATURE_KEYS.CLIENTES_FRECUENTES))) {
+      throw new Error("Tu plan no incluye el programa de clientes frecuentes");
     }
-    const change =
-      input.paymentMethod === "CASH" && input.cashReceived !== undefined ? input.cashReceived - total : undefined;
+    const paymentPending = input.paymentMethod === "MERCADOPAGO" || input.paymentMethod === "MERCADOPAGO_TERMINAL";
 
-    const updated = await prisma.order.update({
-      where: { id: orderId },
-      data: {
-        isOpenTab: false,
-        discount,
-        total,
-        payments: {
-          create: {
-            method: input.paymentMethod,
-            status:
-              input.paymentMethod === "MERCADOPAGO" || input.paymentMethod === "MERCADOPAGO_TERMINAL"
-                ? "PENDING"
-                : "APPROVED",
-            amount: total,
-            cashReceived: input.cashReceived,
-            change,
+    const { updated, total, loyalty } = await prisma.$transaction(async (tx) => {
+      const plan = input.loyaltyCustomerId
+        ? await loyaltyService.prepareForSale(tx, companyId, input.loyaltyCustomerId, input.redeemLoyalty, subtotal)
+        : null;
+
+      // Si canjea su descuento de cliente frecuente, ese descuento (calculado en el servidor)
+      // reemplaza al descuento manual.
+      const manualDiscount = plan?.redeem ? 0 : input.discount;
+      const discount = Math.min(manualDiscount + (plan?.discount ?? 0), subtotal);
+      const total = subtotal - discount;
+
+      if (input.paymentMethod === "CASH") {
+        if (input.cashReceived === undefined || input.cashReceived < total) {
+          throw new Error("El efectivo recibido no puede ser menor al total");
+        }
+      }
+      const change =
+        input.paymentMethod === "CASH" && input.cashReceived !== undefined ? input.cashReceived - total : undefined;
+
+      const updated = await tx.order.update({
+        where: { id: orderId },
+        data: {
+          isOpenTab: false,
+          discount,
+          total,
+          ...(plan ? { customerId: plan.customerId } : {}),
+          payments: {
+            create: {
+              method: input.paymentMethod,
+              status: paymentPending ? "PENDING" : "APPROVED",
+              amount: total,
+              cashReceived: input.cashReceived,
+              change,
+            },
           },
         },
-      },
-      include: { items: { include: { product: true } }, payments: true },
+        include: { items: { include: { product: true } }, payments: true },
+      });
+
+      const loyalty = plan
+        ? await loyaltyService.commitForSale(tx, plan, {
+            companyId,
+            orderId,
+            userId,
+            branchId: order.branchId,
+            paymentApproved: !paymentPending,
+          })
+        : null;
+
+      return { updated, total, loyalty };
     });
 
     await prisma.auditLog.create({
@@ -210,6 +241,6 @@ export const tableTabsService = {
       });
     }
 
-    return updated;
+    return { ...updated, loyalty };
   },
 };

@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { clsx } from "clsx";
+import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
+import { PosLoyaltyPanel, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
 
 type TableStatus = "LIBRE" | "OCUPADA" | "CUENTA" | "LIMPIEZA";
 type TableRow = { id: string; name: string; capacity: number | null; status: TableStatus };
@@ -24,10 +26,12 @@ const STATUS_COLOR: Record<TableStatus, string> = {
 };
 
 export function TablesClient({
+  loyaltyEnabled,
   initialTables,
   mercadoPagoEnabled,
   terminalLinked,
 }: {
+  loyaltyEnabled: boolean;
   initialTables: TableRow[];
   mercadoPagoEnabled: boolean;
   terminalLinked: boolean;
@@ -243,6 +247,7 @@ export function TablesClient({
       {closeOpen && ticketOrder && ticketTable && (
         <CloseTabModal
           order={ticketOrder}
+          loyaltyEnabled={loyaltyEnabled}
           mercadoPagoEnabled={mercadoPagoEnabled}
           terminalLinked={terminalLinked}
           onClose={() => setCloseOpen(false)}
@@ -261,12 +266,14 @@ export function TablesClient({
 
 function CloseTabModal({
   order,
+  loyaltyEnabled,
   mercadoPagoEnabled,
   terminalLinked,
   onClose,
   onDone,
 }: {
   order: OpenOrder;
+  loyaltyEnabled: boolean;
   mercadoPagoEnabled: boolean;
   terminalLinked: boolean;
   onClose: () => void;
@@ -282,7 +289,22 @@ function CloseTabModal({
   const [checkingPoint, setCheckingPoint] = useState(false);
   const [pointMessage, setPointMessage] = useState("");
 
-  const total = Number(order.total);
+  const [loyalty, setLoyalty] = useState<LoyaltySelection | null>(null);
+  const [loyaltyDone, setLoyaltyDone] = useState<{
+    customerName: string;
+    redeemed: boolean;
+    visitRegistered: boolean;
+    visitPending: boolean;
+    visits: number;
+    required: number;
+  } | null>(null);
+
+  // Si canjea su descuento de cliente frecuente, el total se calcula sobre el subtotal de la cuenta.
+  const subtotalNum = Number(order.subtotal);
+  const loyaltyDiscount = loyalty?.redeem
+    ? computeLoyaltyDiscount(loyalty.customer.discountType, loyalty.customer.discountValue, subtotalNum)
+    : 0;
+  const total = loyalty?.redeem ? subtotalNum - loyaltyDiscount : Number(order.total);
   const cashReceivedNum = parseFloat(cashReceived || "0");
   const change = method === "CASH" ? cashReceivedNum - total : 0;
 
@@ -300,6 +322,8 @@ function CloseTabModal({
         body: JSON.stringify({
           paymentMethod: method,
           cashReceived: method === "CASH" ? cashReceivedNum : undefined,
+          loyaltyCustomerId: loyalty?.customer.id,
+          redeemLoyalty: !!loyalty?.redeem,
         }),
       });
       const data = await res.json();
@@ -313,6 +337,12 @@ function CloseTabModal({
 
       if (method === "MERCADOPAGO_TERMINAL" && data.pointOrder?.id) {
         setPendingPointOrderId(data.pointOrder.id);
+        setSaving(false);
+        return;
+      }
+
+      if (data.order?.loyalty) {
+        setLoyaltyDone(data.order.loyalty);
         setSaving(false);
         return;
       }
@@ -371,11 +401,40 @@ function CloseTabModal({
     );
   }
 
+  if (loyaltyDone) {
+    return (
+      <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4">
+        <div className="bg-white rounded-lg p-6 max-w-sm w-full text-center">
+          <p className="text-sage text-4xl mb-2">✓</p>
+          <p className="font-display text-xl font-semibold mb-3">Cobro registrado</p>
+          <div className="text-sm bg-sage/10 text-sage rounded-md px-3 py-2 mb-5">
+            <p className="font-medium">{loyaltyDone.customerName}</p>
+            {loyaltyDone.redeemed && <p>Descuento de cliente frecuente aplicado.</p>}
+            <p>
+              {loyaltyDone.visitRegistered
+                ? `Visita sumada: ${loyaltyDone.visits}/${loyaltyDone.required}.`
+                : loyaltyDone.visitPending
+                  ? "La visita se sumará cuando se confirme el pago."
+                  : `Hoy ya había sumado su visita (${loyaltyDone.visits}/${loyaltyDone.required}).`}
+            </p>
+          </div>
+          <button onClick={onDone} className="w-full rounded-md bg-ember text-white px-4 py-3 text-sm font-medium">
+            Listo
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4">
-      <div className="bg-white rounded-lg p-6 max-w-sm w-full">
+      <div className="bg-white rounded-lg p-6 max-w-sm w-full max-h-[90vh] overflow-y-auto">
         <p className="font-display text-xl font-semibold mb-1">Cobrar mesa</p>
-        <p className="text-3xl font-display font-semibold mb-5">${total.toFixed(2)} MXN</p>
+        <p className="text-3xl font-display font-semibold mb-1">${total.toFixed(2)} MXN</p>
+        {loyalty?.redeem && (
+          <p className="text-xs text-sage mb-4">Incluye descuento de cliente frecuente (-${loyaltyDiscount.toFixed(2)})</p>
+        )}
+        <div className="mb-5">{loyaltyEnabled && <PosLoyaltyPanel value={loyalty} onChange={setLoyalty} />}</div>
 
         <div className="grid grid-cols-2 gap-2 mb-4">
           {(["CASH", "CARD", "TRANSFER", "OTHER"] as const).map((m) => (

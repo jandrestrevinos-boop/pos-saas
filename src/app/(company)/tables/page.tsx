@@ -49,8 +49,13 @@ export default async function TablesPage() {
       ? !!(await prisma.mercadoPagoTerminal.findUnique({ where: { branchId } }))
       : false;
 
+  const loyaltyEnabled =
+    hasPermission(session.user.permissions, PERMISSIONS.LOYALTY_SCAN) &&
+    (await hasFeature(session.user.companyId, FEATURE_KEYS.CLIENTES_FRECUENTES));
+
   return (
     <TablesClient
+      loyaltyEnabled={loyaltyEnabled}
       initialTables={JSON.parse(JSON.stringify(tables))}
       mercadoPagoEnabled={!!mpAccount}
       terminalLinked={terminalLinked}

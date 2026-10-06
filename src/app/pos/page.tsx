@@ -67,8 +67,13 @@ export default async function PosPage() {
       ? !!(await prisma.mercadoPagoTerminal.findUnique({ where: { branchId } }))
       : false;
 
+  const loyaltyEnabled =
+    hasPermission(session.user.permissions, PERMISSIONS.LOYALTY_SCAN) &&
+    (await hasFeature(session.user.companyId, FEATURE_KEYS.CLIENTES_FRECUENTES));
+
   return (
     <PosClient
+      loyaltyEnabled={loyaltyEnabled}
       categories={JSON.parse(JSON.stringify(categories.filter((c: (typeof categories)[number]) => c.isActive)))}
       products={JSON.parse(JSON.stringify(activeProducts))}
       tables={JSON.parse(JSON.stringify(tables))}
