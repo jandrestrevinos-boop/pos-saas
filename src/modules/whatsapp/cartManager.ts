@@ -5,6 +5,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { getBranchStock } from "@/modules/inventory/service";
+import { evaluateCartPromotions } from "./cartPromotions";
 
 interface CartItem {
   productId: string;
@@ -100,13 +101,16 @@ export const cartManager = {
       });
 
       const subtotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
+      // Promociones automáticas (por WhatsApp no se escribe cupón).
+      const { promo } = await evaluateCartPromotions(cartId);
 
       return await prisma.whatsAppCart.update({
         where: { id: cartId },
         data: {
           subtotal,
           tax: 0,
-          total: subtotal,
+          discount: promo.discount,
+          total: Math.round((subtotal - promo.discount) * 100) / 100,
         },
       });
     } catch (error) {

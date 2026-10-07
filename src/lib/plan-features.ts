@@ -57,7 +57,7 @@ export const FEATURE_CATALOG: FeatureDef[] = [
 
   // ── Construidas a medias ────────────────────────────────────────────
   { key: "inventario_avanzado", label: "Inventario avanzado (mínimos, alertas, movimientos)", status: "live", enforced: false },
-  { key: "promociones_descuentos", label: "Promociones y descuentos", status: "partial", enforced: false },
+  { key: "promociones_descuentos", label: "Promociones y descuentos", status: "live", enforced: false },
   { key: "multi_sucursal", label: "Multi-sucursal (crear y operar varias sucursales)", status: "live", enforced: false },
   { key: "dashboard_avanzado", label: "Dashboard avanzado (15+ gráficos)", status: "live", enforced: false },
   { key: "auditoria_cajas", label: "Auditoría de cajas", status: "live", enforced: false },

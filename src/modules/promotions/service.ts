@@ -118,6 +118,16 @@ const toData = (d: PromotionInput) => ({
   isActive: d.isActive,
 });
 
+export type PromoReportRange = "today" | "7d" | "30d";
+
+/** Inicio del día en Monterrey (UTC-6, sin horario de verano), hace `daysBack` días. */
+function startOfDayMonterrey(daysBack: number): Date {
+  const OFFSET = 6 * 3600 * 1000;
+  const wall = new Date(Date.now() - OFFSET);
+  wall.setUTCHours(0, 0, 0, 0);
+  return new Date(wall.getTime() + OFFSET - daysBack * 86400000);
+}
+
 export const promotionsService = {
   /** Lista completa para la pantalla de administración. */
   async list(companyId: string) {
@@ -148,6 +158,69 @@ export const promotionsService = {
       recentUses: statsById.get(r.id)?._count._all ?? 0,
       recentDiscount: Number(statsById.get(r.id)?._sum.amount ?? 0),
     }));
+  },
+
+  /** Resumen de uso de promociones (hoy, 7 o 30 días) y últimos movimientos. No cuenta ventas canceladas. */
+  async report(companyId: string, range: PromoReportRange) {
+    const since = startOfDayMonterrey(range === "today" ? 0 : range === "7d" ? 6 : 29);
+    const where = {
+      createdAt: { gte: since },
+      order: { companyId, status: { not: "CANCELED" as const }, isOpenTab: false },
+    };
+
+    const [grouped, ordersWithPromo, ordersTotal, recent] = await Promise.all([
+      prisma.orderPromotion.groupBy({
+        by: ["promotionId", "name"],
+        where,
+        _sum: { amount: true },
+        _count: { _all: true },
+      }) as unknown as Promise<
+        { promotionId: string | null; name: string; _sum: { amount: number | string | null }; _count: { _all: number } }[]
+      >,
+      prisma.order.count({
+        where: {
+          companyId,
+          status: { not: "CANCELED" },
+          isOpenTab: false,
+          createdAt: { gte: since },
+          promotions: { some: {} },
+        },
+      }),
+      prisma.order.count({
+        where: { companyId, status: { not: "CANCELED" }, isOpenTab: false, createdAt: { gte: since } },
+      }),
+      prisma.orderPromotion.findMany({
+        where,
+        include: { order: { select: { orderNumber: true, user: { select: { name: true } } } } },
+        orderBy: { createdAt: "desc" },
+        take: 25,
+      }) as unknown as Promise<
+        { id: string; name: string; amount: number | string; createdAt: Date; order: { orderNumber: number; user: { name: string } | null } }[]
+      >,
+    ]);
+
+    const byPromotion = grouped
+      .map((g) => ({ name: g.name, timesApplied: g._count._all, totalDiscount: Number(g._sum.amount ?? 0) }))
+      .sort((a, b) => b.totalDiscount - a.totalDiscount);
+
+    return {
+      since: since.toISOString(),
+      summary: {
+        timesApplied: byPromotion.reduce((s, p) => s + p.timesApplied, 0),
+        totalDiscount: byPromotion.reduce((s, p) => s + p.totalDiscount, 0),
+        ordersWithPromo,
+        ordersTotal,
+      },
+      byPromotion,
+      recent: recent.map((r) => ({
+        id: r.id,
+        name: r.name,
+        amount: Number(r.amount),
+        createdAt: r.createdAt.toISOString(),
+        orderNumber: r.order.orderNumber,
+        cashier: r.order.user?.name ?? null,
+      })),
+    };
   },
 
   async create(companyId: string, input: PromotionInput) {

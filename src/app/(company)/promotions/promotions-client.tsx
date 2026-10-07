@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Card } from "@/components/ui";
 import { formatMxn } from "@/lib/format";
+import { PromotionsReport } from "./promotions-report";
 import { describePromotion, type PromotionKind, type PromotionScope } from "@/lib/promotions";
 
 type Option = { id: string; name: string };
@@ -194,6 +195,8 @@ export function PromotionsClient({ products, categories }: { products: Option[];
 
   return (
     <div className="space-y-6">
+      <PromotionsReport />
+
       <div className="flex justify-end">
         <button onClick={() => { setFormError(""); setEditing({ id: null, form: EMPTY }); }} className="rounded-md bg-ember text-white px-4 py-2 text-sm font-medium">
           + Nueva promoción

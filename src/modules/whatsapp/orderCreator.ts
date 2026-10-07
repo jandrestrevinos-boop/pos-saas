@@ -1,4 +1,6 @@
 import { prisma } from "@/lib/prisma";
+import { promotionsService } from "@/modules/promotions/service";
+import { evaluateCartPromotions } from "./cartPromotions";
 
 interface OrderCreationResult {
   id: string;
@@ -36,7 +38,11 @@ export const orderCreator = {
         throw new Error("No hay usuario en la compañía para atribuir la orden");
       }
 
-      const newOrder = await prisma.order.create({
+      // Se recalcula al confirmar: si una promoción venció o empezó mientras el cliente pedía, se cobra lo vigente.
+      const { promo } = await evaluateCartPromotions(cartId);
+
+      const newOrder = await prisma.$transaction(async (tx) => {
+      const created = await tx.order.create({
         data: {
           branchId,
           companyId,
@@ -50,9 +56,9 @@ export const orderCreator = {
           // Totales reales del carrito — ya vienen calculados por
           // cartManager.updateTotals(), no se inventan aquí.
           subtotal: cart.subtotal,
-          discount: cart.discount,
+          discount: promo.discount,
           tax: cart.tax,
-          total: cart.total,
+          total: Math.round((cart.subtotal - promo.discount) * 100) / 100,
           items: {
             create: cart.items.map((item) => ({
               productId: item.productId,
@@ -62,6 +68,9 @@ export const orderCreator = {
             })),
           },
         },
+      });
+      await promotionsService.recordApplications(tx, created.id, promo.applied);
+      return created;
       });
 
       return {

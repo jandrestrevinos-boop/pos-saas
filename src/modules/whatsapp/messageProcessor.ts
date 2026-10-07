@@ -350,6 +350,7 @@ export const messageProcessor = {
           "🛒 *Tu pedido*",
           summary,
           "━━━━━━━━━━",
+          ...(updated.discount > 0 ? [`🏷️ Promoción: -${formatPrice(updated.discount)}`] : []),
           `💰 *Total: ${formatPrice(updated.total)}*`,
           "",
           "¿Algo más? Escríbelo.",
