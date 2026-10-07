@@ -158,7 +158,7 @@ export const tableTabsService = {
   /** Promociones de una cuenta abierta: se calculan sobre TODAS las rondas juntas (un 2x1 cuenta aunque se pida en rondas distintas). */
   async evaluateTabPromotions(
     companyId: string,
-    items: { productId: string; quantity: number; unitPriceAtSale: number | string }[],
+    items: { productId: string; quantity: number; unitPriceAtSale: number | string | { toString(): string } }[],
     couponCode?: string | null
   ) {
     const products = await prisma.product.findMany({
