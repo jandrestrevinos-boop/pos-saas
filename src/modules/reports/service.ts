@@ -13,6 +13,12 @@ type ReportOrder = {
   }[];
 };
 
+type DashboardOrder = {
+  createdAt: Date;
+  total: number | string;
+  items: { quantity: number; product: { cost: number | string | null } }[];
+};
+
 export const reportsService = {
   async salesReport(companyId: string, from: Date, to: Date) {
     const orders = (await prisma.order.findMany({
@@ -135,6 +141,39 @@ export const reportsService = {
 
     const dailyTrend = [...dailyMap.entries()].map(([date, total]) => ({ date, total }));
 
+    // ── Dashboard avanzado: detalle diario (ventas, utilidad, # de ventas) y
+    // comparativo contra el periodo anterior de la misma duración ──
+    const detailMap = new Map<string, { profit: number; orders: number }>();
+    for (const order of report.orders as unknown as DashboardOrder[]) {
+      const dayKey = new Date(order.createdAt).toISOString().slice(0, 10);
+      const orderCost = order.items.reduce(
+        (sum, item) => sum + Number(item.product.cost ?? 0) * item.quantity,
+        0
+      );
+      const current = detailMap.get(dayKey) ?? { profit: 0, orders: 0 };
+      current.profit += Number(order.total) - orderCost;
+      current.orders += 1;
+      detailMap.set(dayKey, current);
+    }
+
+    const prevTo = new Date(from.getTime() - 1);
+    const prevFrom = new Date(from);
+    prevFrom.setDate(prevFrom.getDate() - days);
+    const prevReport = await this.salesReport(companyId, prevFrom, prevTo);
+    const previousTotals = Array(days).fill(0) as number[];
+    for (const order of prevReport.orders as unknown as DashboardOrder[]) {
+      const idx = Math.floor((new Date(order.createdAt).getTime() - prevFrom.getTime()) / 86400000);
+      if (idx >= 0 && idx < days) previousTotals[idx] += Number(order.total);
+    }
+
+    const dailyDetail = dailyTrend.map((d, i) => ({
+      date: d.date,
+      total: d.total,
+      profit: detailMap.get(d.date)?.profit ?? 0,
+      orders: detailMap.get(d.date)?.orders ?? 0,
+      previousTotal: previousTotals[i] ?? 0,
+    }));
+
     const foodCostPercent = report.totalSales > 0 ? (report.totalCost / report.totalSales) * 100 : 0;
 
     const contributionMargin = report.topProducts
@@ -159,6 +198,7 @@ export const reportsService = {
       byUser: report.byUser,
       contributionMargin,
       dailyTrend,
+      dailyDetail,
       hourly,
       weekdayTotals,
       days,

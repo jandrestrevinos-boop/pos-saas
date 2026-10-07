@@ -7,6 +7,7 @@ import {
 } from "recharts";
 import { Card, StatCard } from "@/components/ui";
 import { formatMxn } from "@/lib/format";
+import { DashboardAvanzadoCharts } from "./dashboard-avanzado-charts";
 
 type DashboardData = {
   totalSales: number;
@@ -22,6 +23,7 @@ type DashboardData = {
   byUser: { name: string; total: number; count: number }[];
   contributionMargin: { name: string; marginTotal: number; marginPercent: number }[];
   dailyTrend: { date: string; total: number }[];
+  dailyDetail: { date: string; total: number; profit: number; orders: number; previousTotal: number }[];
   hourly: number[];
   weekdayTotals: number[];
   days: number;
@@ -250,6 +252,8 @@ export function DashboardEmpresarialClient() {
           </table>
         </Card>
       </div>
+
+      <DashboardAvanzadoCharts data={data} />
     </div>
   );
 }

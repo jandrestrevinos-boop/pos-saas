@@ -59,7 +59,7 @@ export const FEATURE_CATALOG: FeatureDef[] = [
   { key: "inventario_avanzado", label: "Inventario avanzado (mínimos, alertas, movimientos)", status: "live", enforced: false },
   { key: "promociones_descuentos", label: "Promociones y descuentos", status: "partial", enforced: false },
   { key: "multi_sucursal", label: "Multi-sucursal (crear y operar varias sucursales)", status: "live", enforced: false },
-  { key: "dashboard_avanzado", label: "Dashboard avanzado (15+ gráficos)", status: "partial", enforced: false },
+  { key: "dashboard_avanzado", label: "Dashboard avanzado (15+ gráficos)", status: "live", enforced: false },
   { key: "auditoria_cajas", label: "Auditoría de cajas", status: "partial", enforced: false },
 
   // ── Sin construir (hoy solo son promesa comercial) ──────────────────
