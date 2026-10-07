@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { clsx } from "clsx";
 import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
@@ -290,6 +290,32 @@ function CloseTabModal({
   const [pointMessage, setPointMessage] = useState("");
 
   const [loyalty, setLoyalty] = useState<LoyaltySelection | null>(null);
+
+  // Promociones: el servidor calcula el descuento de la cuenta (todas las rondas juntas) y aquí se muestra.
+  const [promo, setPromo] = useState<{ discount: number; applied: { promotionId: string; name: string; amount: number }[] }>({
+    discount: 0,
+    applied: [],
+  });
+  const [couponInput, setCouponInput] = useState("");
+  const [coupon, setCoupon] = useState<string | null>(null);
+  const [couponError, setCouponError] = useState("");
+
+  useEffect(() => {
+    const qs = coupon ? `?coupon=${encodeURIComponent(coupon)}` : "";
+    fetch(`/api/orders/${order.id}/promo-preview${qs}`)
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Cupón no válido");
+        setPromo({ discount: data.discount, applied: data.applied });
+        setCouponError("");
+      })
+      .catch((err) => {
+        if (coupon) {
+          setCoupon(null);
+          setCouponError(err instanceof Error ? err.message : "Cupón no válido");
+        }
+      });
+  }, [order.id, coupon]);
   const [loyaltyDone, setLoyaltyDone] = useState<{
     customerName: string;
     redeemed: boolean;
@@ -301,10 +327,11 @@ function CloseTabModal({
 
   // Si canjea su descuento de cliente frecuente, el total se calcula sobre el subtotal de la cuenta.
   const subtotalNum = Number(order.subtotal);
+  const afterPromo = subtotalNum - promo.discount;
   const loyaltyDiscount = loyalty?.redeem
-    ? computeLoyaltyDiscount(loyalty.customer.discountType, loyalty.customer.discountValue, subtotalNum)
+    ? computeLoyaltyDiscount(loyalty.customer.discountType, loyalty.customer.discountValue, afterPromo)
     : 0;
-  const total = loyalty?.redeem ? subtotalNum - loyaltyDiscount : Number(order.total);
+  const total = afterPromo - loyaltyDiscount;
   const cashReceivedNum = parseFloat(cashReceived || "0");
   const change = method === "CASH" ? cashReceivedNum - total : 0;
 
@@ -324,6 +351,7 @@ function CloseTabModal({
           cashReceived: method === "CASH" ? cashReceivedNum : undefined,
           loyaltyCustomerId: loyalty?.customer.id,
           redeemLoyalty: !!loyalty?.redeem,
+          couponCode: coupon ?? undefined,
         }),
       });
       const data = await res.json();
@@ -434,6 +462,52 @@ function CloseTabModal({
         {loyalty?.redeem && (
           <p className="text-xs text-sage mb-4">Incluye descuento de cliente frecuente (-${loyaltyDiscount.toFixed(2)})</p>
         )}
+        <div className="mb-4 space-y-1">
+          {promo.applied.map((a) => (
+            <div key={a.promotionId} className="flex items-center justify-between text-sm">
+              <span className="text-muted">{a.name}</span>
+              <span className="font-mono">-${a.amount.toFixed(2)}</span>
+            </div>
+          ))}
+          {coupon ? (
+            <div className="flex items-center justify-between text-xs text-muted">
+              <span>Cupón {coupon}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setCoupon(null);
+                  setCouponInput("");
+                }}
+                className="underline"
+              >
+                Quitar
+              </button>
+            </div>
+          ) : (
+            <div>
+              <div className="flex gap-2">
+                <input
+                  value={couponInput}
+                  onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                  placeholder="Cupón"
+                  className="flex-1 rounded-md border border-line px-2 py-1 text-sm font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCouponError("");
+                    setCoupon(couponInput.trim());
+                  }}
+                  disabled={!couponInput.trim()}
+                  className="rounded-md border border-line px-3 py-1 text-sm disabled:opacity-40"
+                >
+                  Aplicar
+                </button>
+              </div>
+              {couponError && <p className="text-xs text-ember-dark mt-1">{couponError}</p>}
+            </div>
+          )}
+        </div>
         <div className="mb-5">{loyaltyEnabled && <PosLoyaltyPanel value={loyalty} onChange={setLoyalty} />}</div>
 
         <div className="grid grid-cols-2 gap-2 mb-4">

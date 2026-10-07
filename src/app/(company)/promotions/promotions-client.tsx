@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Card } from "@/components/ui";
+import { formatMxn } from "@/lib/format";
 import { describePromotion, type PromotionKind, type PromotionScope } from "@/lib/promotions";
 
 type Option = { id: string; name: string };
@@ -19,6 +20,8 @@ type Promo = {
   couponCode: string | null;
   maxUses: number | null;
   usesCount: number;
+  recentUses: number;
+  recentDiscount: number;
   startsAt: string | null;
   endsAt: string | null;
   weekdays: number[];
@@ -340,6 +343,7 @@ export function PromotionsClient({ products, categories }: { products: Option[];
                 <th className="text-left px-4 py-3">Descuento</th>
                 <th className="text-left px-4 py-3">Cuándo</th>
                 <th className="text-left px-4 py-3">Cupón</th>
+                <th className="text-left px-4 py-3">Últimos 30 días</th>
                 <th className="text-left px-4 py-3">Estado</th>
                 <th className="text-right px-4 py-3">&nbsp;</th>
               </tr>
@@ -358,6 +362,16 @@ export function PromotionsClient({ products, categories }: { products: Option[];
                       <span className="font-mono">{p.couponCode}<span className="text-muted"> · {p.usesCount}{p.maxUses ? `/${p.maxUses}` : ""} usos</span></span>
                     ) : (
                       <span className="text-muted">Automática</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    {p.recentUses > 0 ? (
+                      <>
+                        <span className="font-mono">{formatMxn(p.recentDiscount)}</span>
+                        <span className="text-muted"> en {p.recentUses} {p.recentUses === 1 ? "venta" : "ventas"}</span>
+                      </>
+                    ) : (
+                      <span className="text-muted">Sin uso</span>
                     )}
                   </td>
                   <td className="px-4 py-3">{p.isActive ? "Activa" : <span className="text-muted">Pausada</span>}</td>

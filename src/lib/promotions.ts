@@ -102,11 +102,24 @@ export function lineDiscountFor(rule: PromotionRule, line: PromoLine): number {
   return 0;
 }
 
+/** Junta renglones del mismo producto y precio (ej. rondas distintas de una mesa) para que un 2x1 los cuente juntos. */
+function mergeLines(lines: PromoLine[]): PromoLine[] {
+  const merged = new Map<string, PromoLine>();
+  for (const l of lines) {
+    const key = `${l.productId}|${l.unitPrice}`;
+    const cur = merged.get(key);
+    if (cur) cur.quantity += l.quantity;
+    else merged.set(key, { ...l });
+  }
+  return [...merged.values()];
+}
+
 export function evaluatePromotions(
-  lines: PromoLine[],
+  rawLines: PromoLine[],
   rules: PromotionRule[],
   opts: { now?: Date; couponCode?: string | null } = {}
 ): PromoResult {
+  const lines = mergeLines(rawLines);
   const now = opts.now ?? new Date();
   const code = opts.couponCode?.trim().toUpperCase() || null;
 

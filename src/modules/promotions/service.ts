@@ -121,15 +121,32 @@ const toData = (d: PromotionInput) => ({
 export const promotionsService = {
   /** Lista completa para la pantalla de administración. */
   async list(companyId: string) {
-    const rows = (await prisma.promotion.findMany({
-      where: { companyId },
-      orderBy: [{ isActive: "desc" }, { createdAt: "desc" }],
-    })) as unknown as PromotionRow[];
+    const since = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+    const [rows, stats] = await Promise.all([
+      prisma.promotion.findMany({
+        where: { companyId },
+        orderBy: [{ isActive: "desc" }, { createdAt: "desc" }],
+      }) as unknown as Promise<PromotionRow[]>,
+      prisma.orderPromotion.groupBy({
+        by: ["promotionId"],
+        where: {
+          promotionId: { not: null },
+          createdAt: { gte: since },
+          order: { companyId, status: { not: "CANCELED" } },
+        },
+        _sum: { amount: true },
+        _count: { _all: true },
+      }) as unknown as Promise<{ promotionId: string | null; _sum: { amount: number | string | null }; _count: { _all: number } }[]>,
+    ]);
+    const statsById = new Map(stats.map((s) => [s.promotionId, s]));
     return rows.map((r) => ({
       ...toRule(r),
       maxUses: r.maxUses,
       usesCount: r.usesCount,
       isActive: r.isActive,
+      // Últimos 30 días (ventas no canceladas)
+      recentUses: statsById.get(r.id)?._count._all ?? 0,
+      recentDiscount: Number(statsById.get(r.id)?._sum.amount ?? 0),
     }));
   },
 

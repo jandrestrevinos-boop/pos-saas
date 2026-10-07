@@ -3,6 +3,7 @@ import { z } from "zod";
 import { hasFeature } from "@/lib/feature-gating";
 import { FEATURE_KEYS } from "@/lib/plan-features";
 import { loyaltyService } from "@/modules/loyalty/service";
+import { promotionsService } from "@/modules/promotions/service";
 
 export const addRoundSchema = z.object({
   items: z
@@ -22,6 +23,8 @@ export const closeTabSchema = z.object({
   // Programa de clientes frecuentes (opcional): cliente identificado y si se canjea su descuento.
   loyaltyCustomerId: z.string().min(1).optional(),
   redeemLoyalty: z.boolean().default(false),
+  // Cupón de promoción (opcional) escrito por el cajero.
+  couponCode: z.string().trim().max(20).optional(),
 });
 
 /**
@@ -152,6 +155,40 @@ export const tableTabsService = {
   },
 
   /** Cierra la cuenta: cobra el total acumulado de todas las rondas y libera la mesa. */
+  /** Promociones de una cuenta abierta: se calculan sobre TODAS las rondas juntas (un 2x1 cuenta aunque se pida en rondas distintas). */
+  async evaluateTabPromotions(
+    companyId: string,
+    items: { productId: string; quantity: number; unitPriceAtSale: number | string }[],
+    couponCode?: string | null
+  ) {
+    const products = await prisma.product.findMany({
+      where: { companyId, id: { in: [...new Set(items.map((i) => i.productId))] } },
+      select: { id: true, categoryId: true },
+    });
+    const categoryOf = new Map(products.map((p) => [p.id, p.categoryId]));
+    return promotionsService.evaluateForSale(
+      companyId,
+      items.map((i) => ({
+        productId: i.productId,
+        categoryId: categoryOf.get(i.productId) ?? "",
+        unitPrice: Number(i.unitPriceAtSale),
+        quantity: i.quantity,
+      })),
+      couponCode
+    );
+  },
+
+  /** Vista previa para la pantalla de cobro de mesa (el servidor es quien manda; esto solo muestra lo mismo antes de cobrar). */
+  async promoPreview(companyId: string, orderId: string, couponCode?: string | null) {
+    const order = await prisma.order.findFirst({
+      where: { id: orderId, companyId, isOpenTab: true },
+      include: { items: true },
+    });
+    if (!order) throw new Error("Esta mesa no tiene una cuenta abierta");
+    const promo = await this.evaluateTabPromotions(companyId, order.items, couponCode);
+    return { subtotal: Number(order.subtotal), discount: promo.discount, applied: promo.applied };
+  },
+
   async close(companyId: string, orderId: string, userId: string, input: z.infer<typeof closeTabSchema>) {
     const order = await prisma.order.findFirst({
       where: { id: orderId, companyId, isOpenTab: true },
@@ -165,17 +202,19 @@ export const tableTabsService = {
     if (input.loyaltyCustomerId && !(await hasFeature(companyId, FEATURE_KEYS.CLIENTES_FRECUENTES))) {
       throw new Error("Tu plan no incluye el programa de clientes frecuentes");
     }
+    const promo = await this.evaluateTabPromotions(companyId, order.items, input.couponCode);
+
     const paymentPending = input.paymentMethod === "MERCADOPAGO" || input.paymentMethod === "MERCADOPAGO_TERMINAL";
 
     const { updated, total, loyalty } = await prisma.$transaction(async (tx) => {
       const plan = input.loyaltyCustomerId
-        ? await loyaltyService.prepareForSale(tx, companyId, input.loyaltyCustomerId, input.redeemLoyalty, subtotal)
+        ? await loyaltyService.prepareForSale(tx, companyId, input.loyaltyCustomerId, input.redeemLoyalty, subtotal - promo.discount)
         : null;
 
       // Si canjea su descuento de cliente frecuente, ese descuento (calculado en el servidor)
       // reemplaza al descuento manual.
       const manualDiscount = plan?.redeem ? 0 : input.discount;
-      const discount = Math.min(manualDiscount + (plan?.discount ?? 0), subtotal);
+      const discount = Math.min(manualDiscount + (plan?.discount ?? 0) + promo.discount, subtotal);
       const total = subtotal - discount;
 
       if (input.paymentMethod === "CASH") {
@@ -215,6 +254,8 @@ export const tableTabsService = {
             paymentApproved: !paymentPending,
           })
         : null;
+
+      await promotionsService.recordApplications(tx, orderId, promo.applied, input.couponCode);
 
       return { updated, total, loyalty };
     });
