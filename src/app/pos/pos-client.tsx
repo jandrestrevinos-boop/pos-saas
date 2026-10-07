@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { formatMxn } from "@/lib/format";
 import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
+import { evaluatePromotions, type PromotionRule } from "@/lib/promotions";
 import { PosLoyaltyPanel, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
 
 type LoyaltyResult = {
@@ -68,6 +69,38 @@ function PosClientInner({
   // Cliente frecuente identificado en esta venta (y si canjea su descuento)
   const [loyalty, setLoyalty] = useState<LoyaltySelection | null>(null);
 
+  // Promociones: las automáticas se cargan al abrir el POS; el cupón lo escribe el cajero.
+  const [promoRules, setPromoRules] = useState<PromotionRule[]>([]);
+  const [couponInput, setCouponInput] = useState("");
+  const [coupon, setCoupon] = useState<PromotionRule | null>(null);
+  const [couponError, setCouponError] = useState("");
+
+  useEffect(() => {
+    fetch("/api/promotions/active")
+      .then((res) => (res.ok ? res.json() : { promotions: [] }))
+      .then((data) => setPromoRules(data.promotions ?? []))
+      .catch(() => setPromoRules([]));
+  }, []);
+
+  async function applyCoupon() {
+    setCouponError("");
+    try {
+      const res = await fetch(`/api/promotions/coupon?code=${encodeURIComponent(couponInput.trim())}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Cupón no válido");
+      setCoupon(data.promotion);
+    } catch (err) {
+      setCoupon(null);
+      setCouponError(err instanceof Error ? err.message : "Cupón no válido");
+    }
+  }
+
+  function removeCoupon() {
+    setCoupon(null);
+    setCouponInput("");
+    setCouponError("");
+  }
+
   // -----------------------------
   // MODO MESA (Caja tipo Mesa): llegamos aquí desde /tables con
   // ?tableId=X — en vez de cobrar de una vez, cada "Enviar a cocina" manda
@@ -128,11 +161,30 @@ function PosClientInner({
   );
 
   const subtotal = cart.reduce((sum, line) => sum + Number(line.product.price) * line.quantity, 0);
+  // Promociones primero (en cuentas de mesa se aplican al cerrar la cuenta, no aquí).
+  const promo = useMemo(
+    () =>
+      tableInfo
+        ? { discount: 0, applied: [] as { promotionId: string; name: string; amount: number }[] }
+        : evaluatePromotions(
+            cart.map((l) => ({
+              productId: l.product.id,
+              categoryId: l.product.categoryId,
+              unitPrice: Number(l.product.price),
+              quantity: l.quantity,
+            })),
+            coupon ? [...promoRules, coupon] : promoRules,
+            { couponCode: coupon?.couponCode ?? null }
+          ),
+    [cart, promoRules, coupon, tableInfo]
+  );
+  const afterPromo = subtotal - promo.discount;
   // Si canjea su descuento de cliente frecuente, ese descuento reemplaza al descuento manual.
   const loyaltyDiscount = loyalty?.redeem
-    ? computeLoyaltyDiscount(loyalty.customer.discountType, loyalty.customer.discountValue, subtotal)
+    ? computeLoyaltyDiscount(loyalty.customer.discountType, loyalty.customer.discountValue, afterPromo)
     : 0;
-  const safeDiscount = loyalty?.redeem ? loyaltyDiscount : Math.min(discount, subtotal);
+  const manualDiscount = loyalty?.redeem ? 0 : Math.min(discount, afterPromo);
+  const safeDiscount = promo.discount + (loyalty?.redeem ? loyaltyDiscount : manualDiscount);
   const total = subtotal - safeDiscount;
 
   function addToCart(product: Product) {
@@ -157,6 +209,7 @@ function PosClientInner({
     setCart([]);
     setDiscount(0);
     setLoyalty(null);
+    removeCoupon();
     setCheckoutOpen(false);
   }
 
@@ -266,6 +319,43 @@ function PosClientInner({
           </div>
 
           <div className="ticket-edge px-5 py-4 space-y-2">
+            {!tableInfo && (
+              <div className="space-y-1">
+                {promo.applied.map((a) => (
+                  <div key={a.promotionId} className="flex items-center justify-between text-sm">
+                    <span className="text-muted">{a.name}</span>
+                    <span className="font-mono">-{formatMxn(a.amount)}</span>
+                  </div>
+                ))}
+                {coupon ? (
+                  <div className="flex items-center justify-between text-xs text-muted">
+                    <span>Cupón {coupon.couponCode}</span>
+                    <button onClick={removeCoupon} className="underline">
+                      Quitar
+                    </button>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="flex gap-2">
+                      <input
+                        value={couponInput}
+                        onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                        placeholder="Cupón"
+                        className="flex-1 rounded-md border border-line px-2 py-1 text-sm font-mono"
+                      />
+                      <button
+                        onClick={applyCoupon}
+                        disabled={!couponInput.trim()}
+                        className="rounded-md border border-line px-3 py-1 text-sm disabled:opacity-40"
+                      >
+                        Aplicar
+                      </button>
+                    </div>
+                    {couponError && <p className="text-xs text-ember-dark mt-1">{couponError}</p>}
+                  </div>
+                )}
+              </div>
+            )}
             {loyaltyEnabled && !tableInfo && <PosLoyaltyPanel value={loyalty} onChange={setLoyalty} />}
             {loyalty?.redeem ? (
               <div className="flex items-center justify-between text-sm">
@@ -333,6 +423,8 @@ function PosClientInner({
         <CheckoutModal
           total={total}
           discount={safeDiscount}
+          manualDiscount={manualDiscount}
+          couponCode={coupon?.couponCode ?? ""}
           subtotal={subtotal}
           cart={cart}
           loyalty={loyalty}
@@ -349,6 +441,8 @@ function PosClientInner({
 function CheckoutModal({
   total,
   discount,
+  manualDiscount,
+  couponCode,
   subtotal,
   cart,
   loyalty,
@@ -359,6 +453,8 @@ function CheckoutModal({
 }: {
   total: number;
   discount: number;
+  manualDiscount: number;
+  couponCode: string;
   subtotal: number;
   cart: CartLine[];
   loyalty: LoyaltySelection | null;
@@ -432,7 +528,8 @@ function CheckoutModal({
             productId: l.product.id,
             quantity: l.quantity,
           })),
-          discount,
+          discount: manualDiscount,
+          couponCode: couponCode || undefined,
           loyaltyCustomerId: loyalty?.customer.id,
           redeemLoyalty: !!loyalty?.redeem,
           paymentMethod: method,

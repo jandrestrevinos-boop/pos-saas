@@ -48,6 +48,7 @@ model Company {
   loyaltyProgram     LoyaltyProgram?
   loyaltyVisits      LoyaltyVisit[]
   loyaltyRedemptions LoyaltyRedemption[]
+  promotions         Promotion[]
 
   @@map("companies")
 }
@@ -463,6 +464,7 @@ model Order {
 
   items    OrderItem[]
   payments Payment[]
+  promotions OrderPromotion[]
 
   @@index([companyId, branchId])
   @@index([createdAt])
@@ -1018,4 +1020,76 @@ model StockTransfer {
 
   @@index([companyId, createdAt])
   @@map("stock_transfers")
+}
+
+// ------------------------------------------------------------
+// PROMOCIONES Y DESCUENTOS
+// ------------------------------------------------------------
+
+enum PromotionKind {
+  PERCENT_OFF
+  AMOUNT_OFF
+  BUY_X_PAY_Y
+}
+
+enum PromotionScope {
+  PRODUCTS
+  CATEGORIES
+  TICKET
+}
+
+/// Promoción de la empresa. Se aplica sola (por horario/fechas) o con un cupón que escribe el cajero.
+/// El cálculo vive en src/lib/promotions.ts (mismo código en servidor y POS).
+model Promotion {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name  String
+  kind  PromotionKind
+  scope PromotionScope
+
+  value       Decimal? @db.Decimal(10, 2) // % o pesos, según kind
+  buyQty      Int? // "lleva"
+  payQty      Int? // "paga"
+  minSubtotal Decimal? @db.Decimal(10, 2) // solo ticket completo
+
+  productIds  Json? // string[]
+  categoryIds Json? // string[]
+
+  couponCode String?
+  maxUses    Int?
+  usesCount  Int     @default(0)
+
+  startsAt  DateTime?
+  endsAt    DateTime?
+  weekdays  Json? // number[] (0 = domingo); vacío = todos los días
+  startTime String? // "HH:MM" hora de Monterrey
+  endTime   String?
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  applications OrderPromotion[]
+
+  @@unique([companyId, couponCode])
+  @@index([companyId])
+  @@map("promotions")
+}
+
+/// Qué promociones se aplicaron a una orden y cuánto descontó cada una (para reportes y auditoría).
+model OrderPromotion {
+  id          String     @id @default(uuid())
+  orderId     String
+  order       Order      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  promotionId String?
+  promotion   Promotion? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
+
+  name      String // se conserva aunque se elimine la promoción
+  amount    Decimal  @db.Decimal(10, 2)
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+  @@map("order_promotions")
 }

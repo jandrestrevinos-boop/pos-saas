@@ -24,6 +24,7 @@ const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey 
   { href: "/inventory", label: "Inventario", permission: PERMISSIONS.INVENTORY_MANAGE },
   { href: "/products", label: "Productos", permission: PERMISSIONS.PRODUCTS_MANAGE },
   { href: "/categories", label: "Categorías", permission: PERMISSIONS.CATEGORIES_MANAGE },
+  { href: "/promotions", label: "Promociones", permission: PERMISSIONS.PRODUCTS_MANAGE },
   { href: "/branches", label: "Sucursales", permission: PERMISSIONS.BRANCHES_MANAGE },
   { href: "/users", label: "Usuarios", permission: PERMISSIONS.USERS_MANAGE },
   { href: "/settings", label: "Configuración", permission: PERMISSIONS.SETTINGS_MANAGE },

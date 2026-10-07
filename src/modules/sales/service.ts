@@ -3,6 +3,7 @@ import { z } from "zod";
 import { hasFeature } from "@/lib/feature-gating";
 import { FEATURE_KEYS } from "@/lib/plan-features";
 import { loyaltyService } from "@/modules/loyalty/service";
+import { promotionsService } from "@/modules/promotions/service";
 
 export const saleSchema = z
   .object({
@@ -24,6 +25,8 @@ export const saleSchema = z
     // Programa de clientes frecuentes (opcional): cliente identificado y si se canjea su descuento.
     loyaltyCustomerId: z.string().min(1).optional(),
     redeemLoyalty: z.boolean().default(false),
+    // Cupón de promoción (opcional) escrito por el cajero.
+    couponCode: z.string().trim().max(20).optional(),
   })
   .superRefine((data, ctx) => {
     if (data.orderType === "DOMICILIO" && !data.deliveryAddress?.trim()) {
@@ -64,7 +67,7 @@ export const salesService = {
 
     // Tipo mínimo explícito: evita depender de la inferencia automática de
     // Prisma para estos dos campos, que es lo único que usamos aquí.
-    type SaleProduct = { id: string; price: number | string };
+    type SaleProduct = { id: string; price: number | string; categoryId: string };
     const productMap = new Map((products as unknown as SaleProduct[]).map((p) => [p.id, p]));
 
     let subtotal = 0;
@@ -84,19 +87,34 @@ export const salesService = {
     if (input.loyaltyCustomerId && !(await hasFeature(companyId, FEATURE_KEYS.CLIENTES_FRECUENTES))) {
       throw new Error("Tu plan no incluye el programa de clientes frecuentes");
     }
+    // Promociones (automáticas + cupón): el servidor siempre las calcula, nunca se confía en el navegador.
+    const promo = await promotionsService.evaluateForSale(
+      companyId,
+      input.items.map((item) => {
+        const product = productMap.get(item.productId)!;
+        return {
+          productId: product.id,
+          categoryId: product.categoryId,
+          unitPrice: Number(product.price),
+          quantity: item.quantity,
+        };
+      }),
+      input.couponCode
+    );
+
     const paymentPending = input.paymentMethod === "MERCADOPAGO" || input.paymentMethod === "MERCADOPAGO_TERMINAL";
 
     // 2. Crea la orden y sus renglones en una sola transacción (junto con el canje/visita de
     //    clientes frecuentes, si el cliente fue identificado).
     const { order, loyalty } = await prisma.$transaction(async (tx) => {
       const plan = input.loyaltyCustomerId
-        ? await loyaltyService.prepareForSale(tx, companyId, input.loyaltyCustomerId, input.redeemLoyalty, subtotal)
+        ? await loyaltyService.prepareForSale(tx, companyId, input.loyaltyCustomerId, input.redeemLoyalty, subtotal - promo.discount)
         : null;
 
       // Si canjea su descuento de cliente frecuente, ese descuento (calculado en el servidor)
       // reemplaza al descuento manual del cajero.
       const manualDiscount = plan?.redeem ? 0 : input.discount;
-      const discount = Math.min(manualDiscount + (plan?.discount ?? 0), subtotal); // el descuento nunca deja el total en negativo
+      const discount = Math.min(manualDiscount + (plan?.discount ?? 0) + promo.discount, subtotal); // el descuento nunca deja el total en negativo
       const total = subtotal - discount;
 
       if (input.paymentMethod === "CASH") {
@@ -149,6 +167,8 @@ export const salesService = {
             paymentApproved: !paymentPending,
           })
         : null;
+
+      await promotionsService.recordApplications(tx, order.id, promo.applied, input.couponCode);
 
       return { order, loyalty };
     });
@@ -359,6 +379,13 @@ export const salesService = {
       } catch {
         // No debe bloquear la cancelación si el inventario falla al reponerse.
       }
+    }
+
+    // Promociones: si la venta usó un cupón, recupera su uso.
+    try {
+      await promotionsService.revertForOrder(orderId);
+    } catch {
+      // No debe bloquear la cancelación de la venta.
     }
 
     // Clientes frecuentes: la visita de esta venta se revierte y el descuento canjeado se devuelve.
