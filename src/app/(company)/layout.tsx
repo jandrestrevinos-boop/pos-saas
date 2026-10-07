@@ -20,6 +20,7 @@ const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey 
   { href: "/reports", label: "Reportes", permission: PERMISSIONS.REPORTS_VIEW },
   { href: "/sales-history", label: "Historial de ventas", permission: PERMISSIONS.REPORTS_VIEW },
   { href: "/audit-log", label: "Auditoría", permission: PERMISSIONS.SETTINGS_MANAGE },
+  { href: "/cash-audit", label: "Auditoría de cajas", permission: PERMISSIONS.SETTINGS_MANAGE },
   { href: "/inventory", label: "Inventario", permission: PERMISSIONS.INVENTORY_MANAGE },
   { href: "/products", label: "Productos", permission: PERMISSIONS.PRODUCTS_MANAGE },
   { href: "/categories", label: "Categorías", permission: PERMISSIONS.CATEGORIES_MANAGE },

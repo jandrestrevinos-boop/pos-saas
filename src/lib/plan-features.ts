@@ -60,7 +60,7 @@ export const FEATURE_CATALOG: FeatureDef[] = [
   { key: "promociones_descuentos", label: "Promociones y descuentos", status: "partial", enforced: false },
   { key: "multi_sucursal", label: "Multi-sucursal (crear y operar varias sucursales)", status: "live", enforced: false },
   { key: "dashboard_avanzado", label: "Dashboard avanzado (15+ gráficos)", status: "live", enforced: false },
-  { key: "auditoria_cajas", label: "Auditoría de cajas", status: "partial", enforced: false },
+  { key: "auditoria_cajas", label: "Auditoría de cajas", status: "live", enforced: false },
 
   // ── Sin construir (hoy solo son promesa comercial) ──────────────────
   { key: "compras_proveedores", label: "Compras y proveedores", status: "planned", enforced: false },
