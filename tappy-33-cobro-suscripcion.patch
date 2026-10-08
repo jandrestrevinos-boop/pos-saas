@@ -1,0 +1,1701 @@
+From 2032b8f6eaebb7cdd06967ea3c65c6363989b6ab Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Thu, 1 Oct 2026 22:58:39 +0000
+Subject: [PATCH] Cobro mensual de suscripcion: demo con fecha, pantalla
+ /facturacion, Mercado Pago Suscripciones, candado de acceso y panel de cobro
+ en Super Admin
+
+---
+ .../migration.sql                             |  55 +++
+ prisma/schema.prisma                          |  56 ++-
+ src/app/(company)/layout.tsx                  |  28 +-
+ src/app/api/billing/checkout/route.ts         |  32 ++
+ src/app/api/billing/webhook/route.ts          |  48 ++
+ src/app/api/companies/[id]/billing/route.ts   |  40 ++
+ src/app/api/platform-settings/route.ts        |   4 +-
+ src/app/facturacion/facturacion-client.tsx    | 196 ++++++++
+ src/app/facturacion/page.tsx                  |  26 ++
+ src/app/kitchen/page.tsx                      |   3 +
+ .../plataforma/companies/companies-table.tsx  | 180 ++++++-
+ src/app/plataforma/companies/page.tsx         |   5 +-
+ .../plataforma/settings/settings-client.tsx   |  52 ++-
+ src/app/pos/page.tsx                          |   3 +
+ src/lib/billing-gate.ts                       |  16 +
+ src/lib/billing.ts                            | 147 ++++++
+ src/middleware.ts                             |   2 +-
+ src/modules/billing/service.ts                | 442 ++++++++++++++++++
+ src/modules/companies/service.ts              |   5 +
+ src/modules/platformSettings/service.ts       |   2 +-
+ 20 files changed, 1332 insertions(+), 10 deletions(-)
+ create mode 100644 prisma/migrations/20261001120000_cobro_suscripcion/migration.sql
+ create mode 100644 src/app/api/billing/checkout/route.ts
+ create mode 100644 src/app/api/billing/webhook/route.ts
+ create mode 100644 src/app/api/companies/[id]/billing/route.ts
+ create mode 100644 src/app/facturacion/facturacion-client.tsx
+ create mode 100644 src/app/facturacion/page.tsx
+ create mode 100644 src/lib/billing-gate.ts
+ create mode 100644 src/lib/billing.ts
+ create mode 100644 src/modules/billing/service.ts
+
+diff --git a/prisma/migrations/20261001120000_cobro_suscripcion/migration.sql b/prisma/migrations/20261001120000_cobro_suscripcion/migration.sql
+new file mode 100644
+index 0000000..fc5cb05
+--- /dev/null
++++ b/prisma/migrations/20261001120000_cobro_suscripcion/migration.sql
+@@ -0,0 +1,55 @@
++-- CreateEnum
++CREATE TYPE "SubscriptionPaymentMethod" AS ENUM ('MERCADOPAGO', 'MANUAL');
++
++-- CreateEnum
++CREATE TYPE "SubscriptionPaymentStatus" AS ENUM ('PENDING', 'APPROVED', 'REJECTED', 'REFUNDED');
++
++-- AlterTable
++ALTER TABLE "companies" ADD COLUMN     "hardwareFinancingEnabled" BOOLEAN NOT NULL DEFAULT false;
++
++-- AlterTable
++ALTER TABLE "platform_settings" ADD COLUMN     "defaultTrialDays" INTEGER NOT NULL DEFAULT 14,
++ADD COLUMN     "graceDays" INTEGER NOT NULL DEFAULT 5;
++
++-- AlterTable
++ALTER TABLE "subscriptions" ADD COLUMN     "mpPreapprovalId" TEXT,
++ADD COLUMN     "payerEmail" TEXT,
++ADD COLUMN     "trialEndsAt" TIMESTAMP(3);
++
++-- CreateTable
++CREATE TABLE "subscription_payments" (
++    "id" TEXT NOT NULL,
++    "companyId" TEXT NOT NULL,
++    "subscriptionId" TEXT NOT NULL,
++    "amountMxn" DECIMAL(10,2) NOT NULL,
++    "status" "SubscriptionPaymentStatus" NOT NULL DEFAULT 'PENDING',
++    "method" "SubscriptionPaymentMethod" NOT NULL DEFAULT 'MERCADOPAGO',
++    "mpPaymentId" TEXT,
++    "periodStart" TIMESTAMP(3),
++    "periodEnd" TIMESTAMP(3),
++    "paidAt" TIMESTAMP(3),
++    "note" TEXT,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++
++    CONSTRAINT "subscription_payments_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateIndex
++CREATE UNIQUE INDEX "subscription_payments_mpPaymentId_key" ON "subscription_payments"("mpPaymentId");
++
++-- CreateIndex
++CREATE INDEX "subscription_payments_companyId_createdAt_idx" ON "subscription_payments"("companyId", "createdAt");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "subscriptions_mpPreapprovalId_key" ON "subscriptions"("mpPreapprovalId");
++
++-- AddForeignKey
++ALTER TABLE "subscription_payments" ADD CONSTRAINT "subscription_payments_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "subscription_payments" ADD CONSTRAINT "subscription_payments_subscriptionId_fkey" FOREIGN KEY ("subscriptionId") REFERENCES "subscriptions"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- Backfill: las empresas que ya tienen un financiamiento de hardware conservan
++-- la capacidad (el interruptor nuevo nace apagado para el resto).
++UPDATE "companies" SET "hardwareFinancingEnabled" = true
++WHERE "id" IN (SELECT DISTINCT "companyId" FROM "hardware_financings");
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 2c998aa..1213b5e 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -37,6 +37,12 @@ model Company {
+   hardwareFinancings HardwareFinancing[]
+   mercadoPagoAccount MercadoPagoAccount?
+ 
++  // Interruptor comercial (lo activa Jose por empresa desde Super Admin):
++  // solo una empresa con esto en true puede tener financiamientos de hardware.
++  hardwareFinancingEnabled Boolean @default(false)
++
++  subscriptionPayments SubscriptionPayment[]
++
+   @@map("companies")
+ }
+ 
+@@ -79,6 +85,12 @@ model PlatformSettings {
+   // solo deja de bloquear la cancelaci\u00f3n.
+   blockCancellationWithPendingFinancing Boolean @default(true)
+ 
++  // Cobro de la suscripción de TAPI: duración del demo para empresas nuevas
++  // y días de gracia después de que vence el demo / el periodo pagado
++  // antes de bloquear el acceso.
++  defaultTrialDays Int @default(14)
++  graceDays        Int @default(5)
++
+   updatedAt DateTime @updatedAt
+ 
+   @@map("platform_settings")
+@@ -191,7 +203,13 @@ model Subscription {
+   customPriceMxn Decimal? @db.Decimal(10, 2) 
+   customFeatures String[] @default([])
+ 
+-  license License?
++  // Cobro mensual. renewalDate = "pagado hasta" (fin del periodo pagado).
++  trialEndsAt     DateTime? // fin del demo (solo aplica mientras status = TRIALING)
++  mpPreapprovalId String?   @unique // suscripción recurrente en la cuenta de Mercado Pago de Jose
++  payerEmail      String?
++
++  license  License?
++  payments SubscriptionPayment[]
+ 
+   @@map("subscriptions")
+ }
+@@ -215,6 +233,42 @@ model License {
+   @@map("licenses")
+ }
+ 
++enum SubscriptionPaymentMethod {
++  MERCADOPAGO
++  MANUAL
++}
++
++enum SubscriptionPaymentStatus {
++  PENDING
++  APPROVED
++  REJECTED
++  REFUNDED
++}
++
++/// Cobro mensual de la suscripción de TAPI (software). Independiente de
++/// HardwareFinancingPayment. Historial + idempotencia del webhook.
++model SubscriptionPayment {
++  id             String       @id @default(uuid())
++  companyId      String
++  company        Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
++  subscriptionId String
++  subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
++
++  amountMxn   Decimal                   @db.Decimal(10, 2)
++  status      SubscriptionPaymentStatus @default(PENDING)
++  method      SubscriptionPaymentMethod @default(MERCADOPAGO)
++  mpPaymentId String?                   @unique
++
++  periodStart DateTime?
++  periodEnd   DateTime?
++  paidAt      DateTime?
++  note        String?
++  createdAt   DateTime  @default(now())
++
++  @@index([companyId, createdAt])
++  @@map("subscription_payments")
++}
++
+ // ------------------------------------------------------------
+ // IDENTIDAD Y PERMISOS
+ // ------------------------------------------------------------
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index d252994..3ee4d13 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -5,6 +5,8 @@ import { SidebarNav } from "@/components/sidebar-nav";
+ import { hasFeature } from "@/lib/feature-gating";
+ import { FEATURE_KEYS } from "@/lib/plan-features";
+ import { hasPermission, PERMISSIONS, type PermissionKey } from "@/lib/permissions";
++import { requireBillingAccess } from "@/lib/billing-gate";
++import Link from "next/link";
+ 
+ const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey }[] = [
+   { href: "/pos", label: "Punto de Venta", permission: PERMISSIONS.SALES_CREATE },
+@@ -28,6 +30,11 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+     redirect("/login");
+   }
+ 
++  // Candado de cobro: demo / periodo pagado vencido (+ gracia) => /facturacion.
++  const billing = await requireBillingAccess(session.user.companyId);
++  const showBillingBanner =
++    billing.state === "GRACE" || (billing.state === "DEMO" && billing.daysLeft !== null && billing.daysLeft <= 5);
++
+   // El nav en sí no reemplaza el gating real (page.tsx de cada ruta valida
+   // hasFeature/hasPermission de nuevo) — esto es solo para no mostrar un
+   // link a algo que la empresa no tiene contratado, o que este usuario no
+@@ -60,7 +67,26 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+   return (
+     <div className="min-h-screen flex">
+       <SidebarNav items={visibleNavItems} brand="Mi Restaurante" userName={session.user.name ?? ""} />
+-      <main className="flex-1 p-8 bg-paper">{children}</main>
++      <main className="flex-1 p-8 bg-paper">
++        {showBillingBanner && (
++          <div className="mb-6 rounded-md border border-marigold/40 bg-marigold/10 px-4 py-3 text-sm">
++            {billing.state === "GRACE" ? (
++              <span>
++                Tu plan venció. Tienes <strong>{billing.graceDaysLeft} {billing.graceDaysLeft === 1 ? "día" : "días"}</strong> para
++                regularizar tu pago antes de que se bloquee el acceso.{" "}
++              </span>
++            ) : (
++              <span>
++                Tu demo termina en <strong>{billing.daysLeft} {billing.daysLeft === 1 ? "día" : "días"}</strong>.{" "}
++              </span>
++            )}
++            <Link href="/facturacion" className="underline font-medium">
++              Ir a facturación
++            </Link>
++          </div>
++        )}
++        {children}
++      </main>
+     </div>
+   );
+ }
+diff --git a/src/app/api/billing/checkout/route.ts b/src/app/api/billing/checkout/route.ts
+new file mode 100644
+index 0000000..6331758
+--- /dev/null
++++ b/src/app/api/billing/checkout/route.ts
+@@ -0,0 +1,32 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { billingService, checkoutSchema } from "@/modules/billing/service";
++
++/**
++ * POST /api/billing/checkout — el administrador de la empresa genera su
++ * link de pago (suscripción mensual en Mercado Pago de Jose).
++ * Es el único endpoint de empresa que SIGUE funcionando con el demo vencido.
++ */
++export async function POST(req: Request) {
++  const ctx = await getTenantContext();
++  if (ctx.isSuperAdmin || !ctx.companyId) {
++    return NextResponse.json({ error: "No autorizado" }, { status: 403 });
++  }
++  if (!hasPermission(ctx.permissions, PERMISSIONS.SETTINGS_MANAGE)) {
++    return NextResponse.json({ error: "Solo el administrador puede contratar o pagar el plan" }, { status: 403 });
++  }
++
++  const parsed = checkoutSchema.safeParse(await req.json());
++  if (!parsed.success) {
++    return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  }
++
++  try {
++    const result = await billingService.createCheckout(requireCompanyId(ctx), ctx.userId, parsed.data);
++    return NextResponse.json(result);
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo generar el link de pago";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/billing/webhook/route.ts b/src/app/api/billing/webhook/route.ts
+new file mode 100644
+index 0000000..2424f09
+--- /dev/null
++++ b/src/app/api/billing/webhook/route.ts
+@@ -0,0 +1,48 @@
++import { NextResponse } from "next/server";
++import { billingService } from "@/modules/billing/service";
++
++/**
++ * Webhook de Mercado Pago para la cuenta de JOSE (suscripciones de TAPI).
++ * Distinto de /api/mercadopago/webhook, que es de las cuentas de cada restaurante.
++ *
++ * Configurar en el panel de desarrolladores de Mercado Pago (tu aplicación →
++ * Webhooks), en producción, con los eventos "Planes y suscripciones":
++ *   URL: https://www.tappysoftware.com/api/billing/webhook
++ *
++ * Mercado Pago reintenta si no respondemos 200, así que siempre respondemos 200
++ * (los errores quedan en logs). Nada del body se considera confiable: solo
++ * tomamos el id y consultamos a Mercado Pago con nuestro token.
++ */
++export async function POST(req: Request) {
++  const url = new URL(req.url);
++
++  let body: Record<string, unknown> = {};
++  try {
++    body = await req.json();
++  } catch {
++    // a veces el aviso viene solo por querystring
++  }
++
++  const topic = (body.type as string | undefined) ?? url.searchParams.get("type") ?? url.searchParams.get("topic");
++  const resourceId =
++    ((body.data as { id?: string } | undefined)?.id as string | undefined) ??
++    url.searchParams.get("data.id") ??
++    url.searchParams.get("id") ??
++    undefined;
++
++  if (!topic || !resourceId) {
++    return NextResponse.json({ ok: true, skipped: true });
++  }
++
++  try {
++    const result = await billingService.handleNotification(topic, String(resourceId));
++    return NextResponse.json({ ok: true, ...result });
++  } catch (err) {
++    console.error("Error procesando webhook de cobro de suscripción:", err);
++    return NextResponse.json({ ok: true, error: "internal" });
++  }
++}
++
++export async function GET(req: Request) {
++  return POST(req);
++}
+diff --git a/src/app/api/companies/[id]/billing/route.ts b/src/app/api/companies/[id]/billing/route.ts
+new file mode 100644
+index 0000000..993ef7d
+--- /dev/null
++++ b/src/app/api/companies/[id]/billing/route.ts
+@@ -0,0 +1,40 @@
++import { NextResponse } from "next/server";
++import { z } from "zod";
++import { getTenantContext } from "@/lib/tenant-context";
++import { billingService, manualPaymentSchema } from "@/modules/billing/service";
++
++const actionSchema = z.discriminatedUnion("action", [
++  z.object({ action: z.literal("extend_trial"), days: z.coerce.number().int().min(1).max(365) }),
++  z.object({ action: z.literal("manual_payment") }).merge(manualPaymentSchema),
++]);
++
++/**
++ * POST /api/companies/[id]/billing — acciones de cobro de Jose sobre una empresa.
++ *   { action: "extend_trial", days }
++ *   { action: "manual_payment", months?, amountMxn?, note? }
++ */
++export async function POST(req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  if (!ctx.isSuperAdmin) {
++    return NextResponse.json({ error: "No autorizado" }, { status: 403 });
++  }
++
++  const parsed = actionSchema.safeParse(await req.json());
++  if (!parsed.success) {
++    return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  }
++
++  try {
++    if (parsed.data.action === "extend_trial") {
++      const result = await billingService.extendTrial(params.id, ctx.userId, parsed.data.days);
++      return NextResponse.json({ ok: true, trialEndsAt: result.trialEndsAt.toISOString() });
++    }
++
++    const { months, amountMxn, note } = parsed.data;
++    const result = await billingService.markManualPayment(params.id, ctx.userId, { months, amountMxn, note });
++    return NextResponse.json(result);
++  } catch (err) {
++    const message = err instanceof Error ? err.message : "No se pudo completar la acción";
++    return NextResponse.json({ error: message }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/platform-settings/route.ts b/src/app/api/platform-settings/route.ts
+index 7121f1e..87f44ef 100644
+--- a/src/app/api/platform-settings/route.ts
++++ b/src/app/api/platform-settings/route.ts
+@@ -4,7 +4,9 @@ import { platformSettingsService } from "@/modules/platformSettings/service";
+ import { z } from "zod";
+ 
+ const updateSchema = z.object({
+-  blockCancellationWithPendingFinancing: z.boolean(),
++  blockCancellationWithPendingFinancing: z.boolean().optional(),
++  defaultTrialDays: z.coerce.number().int().min(1).max(365).optional(),
++  graceDays: z.coerce.number().int().min(0).max(60).optional(),
+ });
+ 
+ export async function GET() {
+diff --git a/src/app/facturacion/facturacion-client.tsx b/src/app/facturacion/facturacion-client.tsx
+new file mode 100644
+index 0000000..751cfd9
+--- /dev/null
++++ b/src/app/facturacion/facturacion-client.tsx
+@@ -0,0 +1,196 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import { useRouter, useSearchParams } from "next/navigation";
++import { signOut } from "next-auth/react";
++import Link from "next/link";
++import { Button, Card } from "@/components/ui";
++import { inputClass } from "@/components/ui/modal";
++import { formatMxn } from "@/lib/format";
++
++type Overview = {
++  companyName: string;
++  companyStatus: "ACTIVE" | "SUSPENDED" | "CANCELLED";
++  planName: string | null;
++  priceMxn: number | null;
++  hasRecurringCharge: boolean;
++  access: {
++    state: "DEMO" | "ACTIVE" | "GRACE" | "BLOCKED";
++    allowed: boolean;
++    endsAt: string | null;
++    graceEndsAt: string | null;
++    daysLeft: number | null;
++    graceDaysLeft: number | null;
++    blockReason: "COMPANY_INACTIVE" | "CANCELED" | "EXPIRED" | null;
++  };
++  payments: {
++    id: string;
++    amountMxn: number;
++    status: string;
++    method: "MERCADOPAGO" | "MANUAL";
++    paidAt: string | null;
++    periodEnd: string | null;
++    note: string | null;
++  }[];
++};
++
++function fmtDate(iso: string | null) {
++  if (!iso) return "—";
++  return new Date(iso).toLocaleDateString("es-MX", { day: "numeric", month: "long", year: "numeric" });
++}
++
++export function FacturacionClient({ overview, canPay }: { overview: Overview; canPay: boolean }) {
++  const router = useRouter();
++  const searchParams = useSearchParams();
++  const returning = searchParams.get("retorno") === "1";
++
++  const [email, setEmail] = useState("");
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState("");
++  const [polls, setPolls] = useState(0);
++
++  const { access } = overview;
++  const inactive = access.blockReason === "COMPANY_INACTIVE" || access.blockReason === "CANCELED";
++
++  // Al volver de Mercado Pago el aviso (webhook) puede tardar unos segundos:
++  // refrescamos solos hasta ~1 minuto para que el acceso se reactive sin que
++  // el cliente tenga que hacer nada.
++  useEffect(() => {
++    if (!returning || access.state === "ACTIVE" || polls >= 12) return;
++    const t = setTimeout(() => {
++      router.refresh();
++      setPolls((n) => n + 1);
++    }, 5000);
++    return () => clearTimeout(t);
++  }, [returning, access.state, polls, router]);
++
++  async function pay(e: React.FormEvent) {
++    e.preventDefault();
++    setError("");
++    setLoading(true);
++    const res = await fetch("/api/billing/checkout", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ payerEmail: email }),
++    });
++    const data = await res.json();
++    if (!res.ok) {
++      setLoading(false);
++      setError(data.error ?? "No se pudo generar el link de pago");
++      return;
++    }
++    window.location.href = data.checkoutUrl;
++  }
++
++  let headline = "";
++  let detail = "";
++  if (access.state === "DEMO") {
++    headline = "Estás en periodo de demo";
++    detail = access.endsAt
++      ? `Tu demo termina el ${fmtDate(access.endsAt)}. Si te suscribes desde hoy, el primer cobro se hace hasta ese día.`
++      : "Tu demo no tiene fecha de término todavía.";
++  } else if (access.state === "ACTIVE") {
++    headline = "Tu plan está al corriente";
++    detail = access.endsAt ? `Pagado hasta el ${fmtDate(access.endsAt)}.` : "Tu plan está activo.";
++  } else if (access.state === "GRACE") {
++    headline = "Tu plan venció";
++    detail = `Todavía puedes operar ${access.graceDaysLeft} ${access.graceDaysLeft === 1 ? "día" : "días"} más. Regulariza tu pago para no perder el acceso.`;
++  } else if (inactive) {
++    headline = access.blockReason === "CANCELED" ? "Tu suscripción fue cancelada" : "Tu cuenta está suspendida";
++    detail = "Para reactivarla, contacta a soporte de Tappy.";
++  } else {
++    headline = "Tu periodo terminó";
++    detail = "Para seguir usando Tappy, contrata tu plan. Tu información sigue guardada: en cuanto el pago se confirme, vuelves a entrar.";
++  }
++
++  const showPay = canPay && !inactive;
++
++  return (
++    <div className="max-w-2xl mx-auto px-6 py-12">
++      <div className="flex items-center justify-between mb-8">
++        <p className="font-display text-xl font-semibold">{overview.companyName}</p>
++        <Button variant="ghost" onClick={() => signOut({ callbackUrl: "/login" })}>
++          Cerrar sesión
++        </Button>
++      </div>
++
++      <Card className="p-6 mb-6">
++        <p className="font-display text-2xl font-semibold mb-1">{headline}</p>
++        <p className="text-sm text-muted mb-4">{detail}</p>
++
++        {overview.planName && (
++          <p className="text-sm mb-4">
++            Plan <strong>{overview.planName}</strong>
++            {overview.priceMxn !== null && <> · <span className="font-mono">{formatMxn(overview.priceMxn)}</span> al mes</>}
++          </p>
++        )}
++
++        {returning && access.state !== "ACTIVE" && polls < 12 && (
++          <p className="text-sm rounded-md bg-marigold/10 border border-marigold/30 px-3 py-2 mb-4">
++            Estamos confirmando tu pago con Mercado Pago… esta pantalla se actualiza sola.
++          </p>
++        )}
++        {returning && access.state === "ACTIVE" && (
++          <p className="text-sm rounded-md bg-sage/10 border border-sage/30 px-3 py-2 mb-4">
++            ¡Pago confirmado! Ya puedes seguir usando Tappy.
++          </p>
++        )}
++
++        {access.allowed && (
++          <Link href="/redirect-after-login" className="inline-block text-sm underline mb-4">
++            Volver a la plataforma
++          </Link>
++        )}
++
++        {!canPay && !inactive && access.state !== "ACTIVE" && (
++          <p className="text-sm text-muted">Pídele al administrador de tu empresa que realice el pago.</p>
++        )}
++
++        {showPay && access.state !== "ACTIVE" && (
++          <form onSubmit={pay} className="space-y-3">
++            <div>
++              <label className="block text-sm font-medium mb-1">Correo de tu cuenta de Mercado Pago</label>
++              <input
++                type="email"
++                required
++                className={inputClass}
++                value={email}
++                onChange={(e) => setEmail(e.target.value)}
++                placeholder="tucorreo@ejemplo.com"
++              />
++            </div>
++            {error && <p className="text-sm text-ember-dark">{error}</p>}
++            <Button type="submit" disabled={loading}>
++              {loading ? "Redirigiendo…" : access.state === "DEMO" ? "Suscribirme con Mercado Pago" : "Pagar con Mercado Pago"}
++            </Button>
++            <p className="text-xs text-muted">
++              Autorizas un cargo mensual automático que puedes cancelar en tu cuenta de Mercado Pago.
++            </p>
++          </form>
++        )}
++
++        {overview.hasRecurringCharge && access.state === "ACTIVE" && (
++          <p className="text-xs text-muted">Tu cobro mensual automático está configurado.</p>
++        )}
++      </Card>
++
++      {overview.payments.length > 0 && (
++        <Card className="overflow-hidden">
++          <p className="px-5 py-3 text-xs uppercase tracking-wide text-muted border-b border-line">Historial de pagos</p>
++          <table className="w-full text-sm">
++            <tbody>
++              {overview.payments.map((p) => (
++                <tr key={p.id} className="border-b border-line last:border-0">
++                  <td className="px-5 py-3">{fmtDate(p.paidAt)}</td>
++                  <td className="px-5 py-3 font-mono">{formatMxn(p.amountMxn)}</td>
++                  <td className="px-5 py-3 text-muted">{p.method === "MANUAL" ? "Pago manual" : "Mercado Pago"}</td>
++                  <td className="px-5 py-3 text-muted">hasta {fmtDate(p.periodEnd)}</td>
++                </tr>
++              ))}
++            </tbody>
++          </table>
++        </Card>
++      )}
++    </div>
++  );
++}
+diff --git a/src/app/facturacion/page.tsx b/src/app/facturacion/page.tsx
+new file mode 100644
+index 0000000..79528c1
+--- /dev/null
++++ b/src/app/facturacion/page.tsx
+@@ -0,0 +1,26 @@
++import { redirect } from "next/navigation";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { billingService } from "@/modules/billing/service";
++import { FacturacionClient } from "./facturacion-client";
++
++/**
++ * Pantalla de pago del plan. Vive FUERA del grupo (company) a propósito:
++ * el layout de (company) bloquea a las empresas con demo/plan vencido y las
++ * manda justo aquí, así que esta ruta no puede tener ese mismo candado.
++ */
++export default async function FacturacionPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user) redirect("/login");
++  if (!session.user.companyId) redirect("/plataforma/dashboard");
++
++  const overview = await billingService.getOverview(session.user.companyId);
++  const canPay = hasPermission(session.user.permissions, PERMISSIONS.SETTINGS_MANAGE);
++
++  return (
++    <div className="min-h-screen bg-paper">
++      <FacturacionClient overview={JSON.parse(JSON.stringify(overview))} canPay={canPay} />
++    </div>
++  );
++}
+diff --git a/src/app/kitchen/page.tsx b/src/app/kitchen/page.tsx
+index 006c72b..d7d67e3 100644
+--- a/src/app/kitchen/page.tsx
++++ b/src/app/kitchen/page.tsx
+@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
+ import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+ import { kitchenService } from "@/modules/kitchen/service";
++import { requireBillingAccess } from "@/lib/billing-gate";
+ import { KitchenClient } from "./kitchen-client";
+ import Link from "next/link";
+ 
+@@ -10,6 +11,8 @@ export default async function KitchenPage() {
+   const session = await getServerSession(authOptions);
+   if (!session?.user?.companyId) redirect("/login");
+ 
++  await requireBillingAccess(session.user.companyId);
++
+   if (!hasPermission(session.user.permissions, PERMISSIONS.KITCHEN_VIEW)) {
+     redirect(getHomeRoute(session.user.permissions));
+   }
+diff --git a/src/app/plataforma/companies/companies-table.tsx b/src/app/plataforma/companies/companies-table.tsx
+index f97e55f..8d1e5a4 100644
+--- a/src/app/plataforma/companies/companies-table.tsx
++++ b/src/app/plataforma/companies/companies-table.tsx
+@@ -5,6 +5,7 @@ import { Button, Card, StatusBadge } from "@/components/ui";
+ import { Modal, Field, inputClass } from "@/components/ui/modal";
+ import { formatMxn } from "@/lib/format";
+ import { FEATURE_CATALOG } from "@/lib/plan-features";
++import { computeBillingAccess } from "@/lib/billing";
+ // FEATURE_CATALOG ahora es [{ key, label, status }] — customFeatures y
+ // plan.features guardan `key`, la UI muestra `label`.
+ 
+@@ -21,6 +22,9 @@ type Company = {
+     useCustomPlan?: boolean;
+     customPriceMxn?: string | null;
+     customFeatures?: string[];
++    status?: "TRIALING" | "ACTIVE" | "PAST_DUE" | "CANCELED";
++    trialEndsAt?: string | null;
++    renewalDate?: string | null;
+   } | null;
+ };
+ 
+@@ -32,11 +36,53 @@ const ROLE_LABELS: Record<string, string> = {
+   COCINERO: "Cocinero",
+ };
+ 
+-export function CompaniesTable({ initialCompanies, plans, roles }: { initialCompanies: Company[]; plans: Plan[]; roles: Role[] }) {
++function fmtShort(iso: string | null | undefined) {
++  if (!iso) return "";
++  return new Date(iso).toLocaleDateString("es-MX", { day: "numeric", month: "short", year: "numeric" });
++}
++
++function billingSummary(c: Company, graceDays: number): { label: string; tone: "ok" | "warn" | "bad" | "muted" } {
++  if (c.status !== "ACTIVE") return { label: "—", tone: "muted" };
++  const sub = c.subscription;
++  const access = computeBillingAccess({
++    companyStatus: c.status,
++    subscription: sub?.status
++      ? {
++          status: sub.status,
++          trialEndsAt: sub.trialEndsAt ? new Date(sub.trialEndsAt) : null,
++          renewalDate: sub.renewalDate ? new Date(sub.renewalDate) : null,
++        }
++      : null,
++    graceDays,
++  });
++  if (access.state === "DEMO") {
++    return access.endsAt
++      ? { label: `Demo hasta ${fmtShort(sub?.trialEndsAt)}`, tone: access.daysLeft !== null && access.daysLeft <= 3 ? "warn" : "muted" }
++      : { label: "Demo sin fecha", tone: "warn" };
++  }
++  if (access.state === "ACTIVE") {
++    return access.endsAt ? { label: `Pagado hasta ${fmtShort(sub?.renewalDate)}`, tone: "ok" } : { label: "Activa (sin fecha)", tone: "muted" };
++  }
++  if (access.state === "GRACE") return { label: `En gracia (${access.graceDaysLeft} d)`, tone: "warn" };
++  return { label: "Bloqueada por pago", tone: "bad" };
++}
++
++export function CompaniesTable({
++  initialCompanies,
++  plans,
++  roles,
++  graceDays,
++}: {
++  initialCompanies: Company[];
++  plans: Plan[];
++  roles: Role[];
++  graceDays: number;
++}) {
+   const [companies, setCompanies] = useState(initialCompanies);
+   const [modalOpen, setModalOpen] = useState(false);
+   const [usersCompany, setUsersCompany] = useState<Company | null>(null);
+   const [planCompany, setPlanCompany] = useState<Company | null>(null);
++  const [billingCompany, setBillingCompany] = useState<Company | null>(null);
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
+   const [form, setForm] = useState({ name: "", branchName: "Principal", planId: plans[0]?.id ?? "" });
+@@ -141,6 +187,7 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
+                 <th className="px-5 py-3 font-medium">Sucursales</th>
+                 <th className="px-5 py-3 font-medium">Usuarios</th>
+                 <th className="px-5 py-3 font-medium">Estado</th>
++                <th className="px-5 py-3 font-medium">Cobro</th>
+                 <th className="px-5 py-3 font-medium"></th>
+               </tr>
+             </thead>
+@@ -161,10 +208,23 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
+                       label={c.status === "ACTIVE" ? "Activa" : c.status === "SUSPENDED" ? "Suspendida" : "Cancelada"}
+                     />
+                   </td>
++                  <td className="px-5 py-3 text-xs">
++                    {(() => {
++                      const b = billingSummary(c, graceDays);
++                      const color =
++                        b.tone === "ok" ? "text-sage" : b.tone === "warn" ? "text-marigold" : b.tone === "bad" ? "text-ember-dark" : "text-muted";
++                      return <span className={`${color} font-medium`}>{b.label}</span>;
++                    })()}
++                  </td>
+                   <td className="px-5 py-3 text-right space-x-1">
+                     <Button variant="ghost" onClick={() => setUsersCompany(c)}>
+                       Usuarios
+                     </Button>
++                    {c.status !== "CANCELLED" && (
++                      <Button variant="ghost" onClick={() => setBillingCompany(c)}>
++                        Cobro
++                      </Button>
++                    )}
+                     {c.status !== "CANCELLED" && (
+                       <Button variant="ghost" onClick={() => toggleStatus(c)}>
+                         {c.status === "ACTIVE" ? "Suspender" : "Activar"}
+@@ -244,6 +304,21 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
+           }
+         />
+       )}
++      {billingCompany && (
++        <BillingModal
++          company={billingCompany}
++          graceDays={graceDays}
++          onClose={() => setBillingCompany(null)}
++          onChanged={(patch) => {
++            setCompanies((prev) =>
++              prev.map((c) =>
++                c.id === billingCompany.id && c.subscription ? { ...c, subscription: { ...c.subscription, ...patch } } : c
++              )
++            );
++            setBillingCompany(null);
++          }}
++        />
++      )}
+       {planCompany && (
+         <ChangePlanModal
+           company={planCompany}
+@@ -251,7 +326,9 @@ export function CompaniesTable({ initialCompanies, plans, roles }: { initialComp
+           onClose={() => setPlanCompany(null)}
+           onChanged={(planName) => {
+             setCompanies((prev) =>
+-              prev.map((c) => (c.id === planCompany.id ? { ...c, subscription: { plan: { name: planName } } } : c))
++              prev.map((c) =>
++                c.id === planCompany.id ? { ...c, subscription: { ...(c.subscription ?? {}), plan: { name: planName } } } : c
++              )
+             );
+             setPlanCompany(null);
+           }}
+@@ -624,4 +701,101 @@ function CompanyUsersModal({
+       )}
+     </Modal>
+   );
+-}
+\ No newline at end of file
++}
++function BillingModal({
++  company,
++  graceDays,
++  onClose,
++  onChanged,
++}: {
++  company: Company;
++  graceDays: number;
++  onClose: () => void;
++  onChanged: (patch: { status?: "TRIALING" | "ACTIVE" | "PAST_DUE" | "CANCELED"; trialEndsAt?: string | null; renewalDate?: string | null }) => void;
++}) {
++  const summary = billingSummary(company, graceDays);
++  const isTrial = company.subscription?.status === "TRIALING";
++
++  const [days, setDays] = useState("7");
++  const [months, setMonths] = useState("1");
++  const [amount, setAmount] = useState("");
++  const [note, setNote] = useState("");
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState("");
++
++  async function send(body: Record<string, unknown>) {
++    setBusy(true);
++    setError("");
++    const res = await fetch(`/api/companies/${company.id}/billing`, {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify(body),
++    });
++    const data = await res.json();
++    setBusy(false);
++    if (!res.ok) {
++      setError(data.error ?? "No se pudo completar la acción");
++      return null;
++    }
++    return data as { trialEndsAt?: string; periodEnd?: string };
++  }
++
++  async function extendTrial() {
++    const data = await send({ action: "extend_trial", days: Number(days) });
++    if (data?.trialEndsAt) onChanged({ trialEndsAt: data.trialEndsAt });
++  }
++
++  async function manualPayment() {
++    const data = await send({
++      action: "manual_payment",
++      months: Number(months),
++      ...(amount.trim() ? { amountMxn: Number(amount) } : {}),
++      ...(note.trim() ? { note: note.trim() } : {}),
++    });
++    if (data?.periodEnd) onChanged({ status: "ACTIVE", renewalDate: data.periodEnd });
++    else if (data) onClose();
++  }
++
++  return (
++    <Modal open onClose={onClose} title={`Cobro — ${company.name}`}>
++      <p className="text-sm mb-1">
++        Estado: <strong>{summary.label}</strong>
++      </p>
++      <p className="text-xs text-muted mb-5">
++        Plan {company.subscription?.plan.name ?? "—"}. Días de gracia después del vencimiento: {graceDays}.
++      </p>
++
++      {isTrial && (
++        <div className="mb-5 pb-5 border-b border-line">
++          <Field label="Extender demo (días)">
++            <input className={inputClass} type="number" min={1} max={365} value={days} onChange={(e) => setDays(e.target.value)} />
++          </Field>
++          <Button type="button" variant="secondary" disabled={busy} onClick={extendTrial}>
++            Extender demo
++          </Button>
++        </div>
++      )}
++
++      <p className="text-sm font-medium mb-3">Registrar pago recibido (SPEI, efectivo…)</p>
++      <Field label="Meses que cubre">
++        <input className={inputClass} type="number" min={1} max={24} value={months} onChange={(e) => setMonths(e.target.value)} />
++      </Field>
++      <Field label="Monto (vacío = precio del plan × meses)">
++        <input className={inputClass} type="number" min={0} step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} />
++      </Field>
++      <Field label="Nota (opcional)">
++        <input className={inputClass} value={note} maxLength={200} onChange={(e) => setNote(e.target.value)} placeholder="Ej. SPEI folio 12345" />
++      </Field>
++
++      {error && <p className="text-sm text-ember-dark mb-3">{error}</p>}
++      <div className="flex justify-end gap-2">
++        <Button type="button" variant="secondary" onClick={onClose}>
++          Cerrar
++        </Button>
++        <Button type="button" disabled={busy} onClick={manualPayment}>
++          Registrar pago
++        </Button>
++      </div>
++    </Modal>
++  );
++}
+diff --git a/src/app/plataforma/companies/page.tsx b/src/app/plataforma/companies/page.tsx
+index 24463ca..224979d 100644
+--- a/src/app/plataforma/companies/page.tsx
++++ b/src/app/plataforma/companies/page.tsx
+@@ -1,12 +1,14 @@
+ import { companiesService } from "@/modules/companies/service";
+ import { CompaniesTable } from "./companies-table";
+ import { prisma } from "@/lib/prisma";
++import { platformSettingsService } from "@/modules/platformSettings/service";
+ 
+ export default async function CompaniesPage() {
+-  const [companies, plans, roles] = await Promise.all([
++  const [companies, plans, roles, settings] = await Promise.all([
+     companiesService.list(),
+     prisma.plan.findMany({ orderBy: { priceMxn: "asc" } }),
+     prisma.role.findMany({ where: { name: { not: "SUPER_ADMIN" } }, orderBy: { name: "asc" } }),
++    platformSettingsService.get(),
+   ]);
+ 
+   return (
+@@ -22,6 +24,7 @@ export default async function CompaniesPage() {
+         initialCompanies={JSON.parse(JSON.stringify(companies))}
+         plans={JSON.parse(JSON.stringify(plans))}
+         roles={JSON.parse(JSON.stringify(roles))}
++        graceDays={settings.graceDays}
+       />
+     </div>
+   );
+diff --git a/src/app/plataforma/settings/settings-client.tsx b/src/app/plataforma/settings/settings-client.tsx
+index 0b0a4a2..063ac47 100644
+--- a/src/app/plataforma/settings/settings-client.tsx
++++ b/src/app/plataforma/settings/settings-client.tsx
+@@ -3,7 +3,7 @@
+ import { useState } from "react";
+ import { Button, Card } from "@/components/ui";
+ 
+-type Settings = { id: string; blockCancellationWithPendingFinancing: boolean };
++type Settings = { id: string; blockCancellationWithPendingFinancing: boolean; defaultTrialDays: number; graceDays: number };
+ 
+ export function SettingsClient({ initialSettings }: { initialSettings: Settings }) {
+   const [settings, setSettings] = useState(initialSettings);
+@@ -23,7 +23,56 @@ export function SettingsClient({ initialSettings }: { initialSettings: Settings
+     }
+   }
+ 
++  const [trialDays, setTrialDays] = useState(String(initialSettings.defaultTrialDays));
++  const [graceDays, setGraceDays] = useState(String(initialSettings.graceDays));
++  const [savingBilling, setSavingBilling] = useState(false);
++  const [billingMsg, setBillingMsg] = useState("");
++
++  async function saveBilling() {
++    setSavingBilling(true);
++    setBillingMsg("");
++    const res = await fetch("/api/platform-settings", {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ defaultTrialDays: Number(trialDays), graceDays: Number(graceDays) }),
++    });
++    setSavingBilling(false);
++    if (res.ok) {
++      const data = await res.json();
++      setSettings(data.settings);
++      setBillingMsg("Guardado");
++    } else {
++      const data = await res.json();
++      setBillingMsg(data.error ?? "No se pudo guardar");
++    }
++  }
++
+   return (
++    <div className="space-y-6">
++    <Card className="p-6 max-w-xl">
++      <p className="font-display text-lg font-semibold mb-1">Cobro de la suscripción</p>
++      <p className="text-sm text-muted mb-4">
++        Duración del demo para las empresas que des de alta a partir de ahora, y cuántos días de gracia tienen después de
++        que vence el demo o el periodo pagado antes de que se les bloquee el acceso.
++      </p>
++      <div className="grid grid-cols-2 gap-4 mb-4">
++        <label className="block text-sm">
++          <span className="block font-medium mb-1.5">Días de demo</span>
++          <input className="w-full rounded-md border border-line bg-paper px-3 py-2 text-sm" type="number" min={1} max={365} value={trialDays} onChange={(e) => setTrialDays(e.target.value)} />
++        </label>
++        <label className="block text-sm">
++          <span className="block font-medium mb-1.5">Días de gracia</span>
++          <input className="w-full rounded-md border border-line bg-paper px-3 py-2 text-sm" type="number" min={0} max={60} value={graceDays} onChange={(e) => setGraceDays(e.target.value)} />
++        </label>
++      </div>
++      <div className="flex items-center gap-3">
++        <Button type="button" onClick={saveBilling} disabled={savingBilling}>
++          Guardar
++        </Button>
++        {billingMsg && <span className="text-sm text-muted">{billingMsg}</span>}
++      </div>
++    </Card>
++
+     <Card className="p-6 max-w-xl">
+       <p className="font-display text-lg font-semibold mb-1">Cancelación de suscripción vs. financiamiento de hardware</p>
+       <p className="text-sm text-muted mb-4">
+@@ -44,5 +93,6 @@ export function SettingsClient({ initialSettings }: { initialSettings: Settings
+         </span>
+       </label>
+     </Card>
++    </div>
+   );
+ }
+diff --git a/src/app/pos/page.tsx b/src/app/pos/page.tsx
+index 9d0d3d5..5febff0 100644
+--- a/src/app/pos/page.tsx
++++ b/src/app/pos/page.tsx
+@@ -10,6 +10,7 @@ import { hasFeature } from "@/lib/feature-gating";
+ import { FEATURE_KEYS } from "@/lib/plan-features";
+ import { tablesService } from "@/modules/tables/service";
+ import { mercadoPagoService } from "@/modules/mercadoPago/service";
++import { requireBillingAccess } from "@/lib/billing-gate";
+ import { PosClient } from "./pos-client";
+ import Link from "next/link";
+ 
+@@ -17,6 +18,8 @@ export default async function PosPage() {
+   const session = await getServerSession(authOptions);
+   if (!session?.user?.companyId) redirect("/login");
+ 
++  await requireBillingAccess(session.user.companyId);
++
+   if (!hasPermission(session.user.permissions, PERMISSIONS.SALES_CREATE)) {
+     redirect("/dashboard");
+   }
+diff --git a/src/lib/billing-gate.ts b/src/lib/billing-gate.ts
+new file mode 100644
+index 0000000..11859d8
+--- /dev/null
++++ b/src/lib/billing-gate.ts
+@@ -0,0 +1,16 @@
++import { redirect } from "next/navigation";
++import { billingService } from "@/modules/billing/service";
++
++/**
++ * Candado de cobro para páginas de empresa: si el demo / periodo pagado ya
++ * venció (y se acabó la gracia), manda a /facturacion. Se usa en el layout
++ * de (company), en /pos y en /kitchen. Devuelve el estado para que el layout
++ * pueda mostrar el aviso de "tu demo termina en X días".
++ */
++export async function requireBillingAccess(companyId: string) {
++  const access = await billingService.getAccess(companyId);
++  if (!access.allowed) {
++    redirect("/facturacion");
++  }
++  return access;
++}
+diff --git a/src/lib/billing.ts b/src/lib/billing.ts
+new file mode 100644
+index 0000000..568298e
+--- /dev/null
++++ b/src/lib/billing.ts
+@@ -0,0 +1,147 @@
++/**
++ * Lógica pura (sin base de datos) de "¿esta empresa puede usar Tappy hoy?".
++ *
++ * Todo se calcula con FECHAS, no con un cron: el estado nunca se queda
++ * desfasado. Cuando vence el demo o el periodo pagado, el acceso se corta
++ * solo al pasar la fecha (+ días de gracia), y un pago aprobado simplemente
++ * mueve la fecha hacia adelante.
++ *
++ *   DEMO     empresa en TRIALING con trialEndsAt vigente
++ *   ACTIVE   suscripción pagada con renewalDate ("pagado hasta") vigente
++ *   GRACE    ya venció, pero aún está dentro de los días de gracia (sigue operando, con aviso)
++ *   BLOCKED  venció y se acabó la gracia, o la suscripción está cancelada, o la empresa fue suspendida
++ *
++ * Empresas "legacy" (sin trialEndsAt / sin renewalDate) NO se bloquean:
++ * Jose decide su fecha desde Super Admin (extender demo / registrar pago).
++ */
++
++export type BillingState = "DEMO" | "ACTIVE" | "GRACE" | "BLOCKED";
++
++export type BillingBlockReason = "COMPANY_INACTIVE" | "CANCELED" | "EXPIRED";
++
++export interface BillingAccess {
++  state: BillingState;
++  allowed: boolean;
++  /** Fin del demo o del periodo pagado (null = sin fecha, empresa legacy). */
++  endsAt: Date | null;
++  /** Hasta cuándo dura la gracia (endsAt + graceDays). */
++  graceEndsAt: Date | null;
++  /** Días enteros que faltan para endsAt (negativo si ya venció). null si no hay fecha. */
++  daysLeft: number | null;
++  /** Días que faltan para que se bloquee (solo en GRACE). */
++  graceDaysLeft: number | null;
++  blockReason?: BillingBlockReason;
++}
++
++export interface BillingInput {
++  companyStatus: "ACTIVE" | "SUSPENDED" | "CANCELLED";
++  subscription: {
++    status: "TRIALING" | "ACTIVE" | "PAST_DUE" | "CANCELED";
++    trialEndsAt: Date | null;
++    renewalDate: Date | null;
++  } | null;
++  graceDays: number;
++  now?: Date;
++}
++
++const DAY_MS = 24 * 60 * 60 * 1000;
++
++export function computeBillingAccess(input: BillingInput): BillingAccess {
++  const now = input.now ?? new Date();
++
++  if (input.companyStatus !== "ACTIVE") {
++    return {
++      state: "BLOCKED",
++      allowed: false,
++      endsAt: null,
++      graceEndsAt: null,
++      daysLeft: null,
++      graceDaysLeft: null,
++      blockReason: "COMPANY_INACTIVE",
++    };
++  }
++
++  const sub = input.subscription;
++
++  // Sin suscripción registrada: no bloqueamos (dato legacy).
++  if (!sub) {
++    return { state: "ACTIVE", allowed: true, endsAt: null, graceEndsAt: null, daysLeft: null, graceDaysLeft: null };
++  }
++
++  if (sub.status === "CANCELED") {
++    return {
++      state: "BLOCKED",
++      allowed: false,
++      endsAt: sub.renewalDate,
++      graceEndsAt: null,
++      daysLeft: null,
++      graceDaysLeft: null,
++      blockReason: "CANCELED",
++    };
++  }
++
++  const isTrial = sub.status === "TRIALING";
++  const endsAt = isTrial ? sub.trialEndsAt : sub.renewalDate;
++
++  // Sin fecha: no hay nada que vencer.
++  if (!endsAt) {
++    return {
++      state: isTrial ? "DEMO" : "ACTIVE",
++      allowed: true,
++      endsAt: null,
++      graceEndsAt: null,
++      daysLeft: null,
++      graceDaysLeft: null,
++    };
++  }
++
++  const graceEndsAt = new Date(endsAt.getTime() + Math.max(0, input.graceDays) * DAY_MS);
++  const daysLeft = Math.ceil((endsAt.getTime() - now.getTime()) / DAY_MS);
++
++  if (now.getTime() <= endsAt.getTime()) {
++    return {
++      state: isTrial ? "DEMO" : "ACTIVE",
++      allowed: true,
++      endsAt,
++      graceEndsAt,
++      daysLeft,
++      graceDaysLeft: null,
++    };
++  }
++
++  if (now.getTime() <= graceEndsAt.getTime()) {
++    return {
++      state: "GRACE",
++      allowed: true,
++      endsAt,
++      graceEndsAt,
++      daysLeft,
++      graceDaysLeft: Math.ceil((graceEndsAt.getTime() - now.getTime()) / DAY_MS),
++    };
++  }
++
++  return {
++    state: "BLOCKED",
++    allowed: false,
++    endsAt,
++    graceEndsAt,
++    daysLeft,
++    graceDaysLeft: 0,
++    blockReason: "EXPIRED",
++  };
++}
++
++/** Suma meses de calendario sin desbordar (31 ene + 1 mes = 28/29 feb, no 3 mar). */
++export function addMonths(date: Date, months: number): Date {
++  const result = new Date(date.getTime());
++  const day = result.getUTCDate();
++  result.setUTCDate(1);
++  result.setUTCMonth(result.getUTCMonth() + months);
++  const lastDay = new Date(Date.UTC(result.getUTCFullYear(), result.getUTCMonth() + 1, 0)).getUTCDate();
++  result.setUTCDate(Math.min(day, lastDay));
++  return result;
++}
++
++export function addDays(date: Date, days: number): Date {
++  return new Date(date.getTime() + days * DAY_MS);
++}
+diff --git a/src/middleware.ts b/src/middleware.ts
+index df50123..ec1cc2f 100644
+--- a/src/middleware.ts
++++ b/src/middleware.ts
+@@ -35,5 +35,5 @@ export default withAuth(
+ );
+ 
+ export const config = {
+-  matcher: ["/dashboard/:path*", "/products/:path*", "/categories/:path*", "/branches/:path*", "/users/:path*", "/pos/:path*", "/cash/:path*", "/reports/:path*", "/inventory/:path*", "/kitchen/:path*", "/plataforma/:path*"],
++  matcher: ["/dashboard/:path*", "/products/:path*", "/categories/:path*", "/branches/:path*", "/users/:path*", "/pos/:path*", "/cash/:path*", "/reports/:path*", "/inventory/:path*", "/kitchen/:path*", "/plataforma/:path*", "/facturacion/:path*"],
+ };
+diff --git a/src/modules/billing/service.ts b/src/modules/billing/service.ts
+new file mode 100644
+index 0000000..9f804f9
+--- /dev/null
++++ b/src/modules/billing/service.ts
+@@ -0,0 +1,442 @@
++import { prisma } from "@/lib/prisma";
++import { z } from "zod";
++import { computeBillingAccess, addMonths, addDays, type BillingAccess } from "@/lib/billing";
++import { platformSettingsService } from "@/modules/platformSettings/service";
++
++/**
++ * Cobro mensual de la suscripción de TAPI (software) — el dinero entra a la
++ * cuenta de Mercado Pago de JOSE (token de plataforma en MP_PLATFORM_ACCESS_TOKEN),
++ * NO a la de cada restaurante (esas son las de MercadoPagoAccount, vía OAuth).
++ *
++ * Modelo: Suscripciones de Mercado Pago (/preapproval). El restaurante autoriza
++ * una vez el cargo recurrente mensual; Mercado Pago cobra solo cada mes y nos
++ * avisa por webhook (/api/billing/webhook). Cada aviso se VERIFICA consultando
++ * a Mercado Pago con nuestro token (nunca confiamos en el body del webhook),
++ * y los pagos son idempotentes por mpPaymentId.
++ *
++ * El acceso NO depende de un cron: se calcula con fechas (ver src/lib/billing.ts).
++ */
++
++const MP_API = "https://api.mercadopago.com";
++
++function requirePlatformToken(): string {
++  const token = process.env.MP_PLATFORM_ACCESS_TOKEN;
++  if (!token) {
++    throw new Error("Falta configurar MP_PLATFORM_ACCESS_TOKEN (token de la cuenta de Mercado Pago de Jose) en las variables de entorno");
++  }
++  return token;
++}
++
++function appBaseUrl(): string {
++  const explicit = process.env.APP_URL;
++  if (explicit) return explicit.replace(/\/$/, "");
++  const redirect = process.env.MERCADOPAGO_REDIRECT_URI;
++  if (redirect) return redirect.replace("/api/mercadopago/oauth/callback", "").replace(/\/$/, "");
++  throw new Error("Falta configurar APP_URL (ej. https://www.tappysoftware.com) en las variables de entorno");
++}
++
++async function mpFetch<T>(path: string, init?: RequestInit): Promise<T> {
++  const res = await fetch(`${MP_API}${path}`, {
++    ...init,
++    headers: {
++      "Content-Type": "application/json",
++      Authorization: `Bearer ${requirePlatformToken()}`,
++      ...(init?.headers ?? {}),
++    },
++  });
++  if (!res.ok) {
++    const body = await res.text();
++    throw new Error(`Mercado Pago respondió ${res.status}: ${body}`);
++  }
++  return (await res.json()) as T;
++}
++
++interface MpPreapproval {
++  id: string;
++  status: string; // pending | authorized | paused | cancelled
++  external_reference?: string;
++  init_point?: string;
++}
++
++interface MpAuthorizedPayment {
++  id: number | string;
++  preapproval_id?: string;
++  status?: string; // scheduled | processed | recycling | cancelled
++  transaction_amount?: number;
++  payment?: { id?: number | string; status?: string };
++}
++
++export const manualPaymentSchema = z.object({
++  months: z.coerce.number().int().min(1).max(24).default(1),
++  amountMxn: z.coerce.number().min(0).optional(),
++  note: z.string().max(200).optional(),
++});
++
++export const checkoutSchema = z.object({
++  payerEmail: z.string().email("Escribe el correo de la cuenta de Mercado Pago con la que vas a pagar"),
++});
++
++type SubWithPlan = {
++  id: string;
++  companyId: string;
++  status: "TRIALING" | "ACTIVE" | "PAST_DUE" | "CANCELED";
++  trialEndsAt: Date | null;
++  renewalDate: Date | null;
++  useCustomPlan: boolean;
++  customPriceMxn: unknown;
++  plan: { name: string; priceMxn: unknown };
++};
++
++/** Precio mensual real que paga la empresa (personalizado si lo tiene). */
++export function effectivePriceMxn(sub: Pick<SubWithPlan, "useCustomPlan" | "customPriceMxn" | "plan">): number {
++  if (sub.useCustomPlan && sub.customPriceMxn !== null && sub.customPriceMxn !== undefined) {
++    return Number(sub.customPriceMxn);
++  }
++  return Number(sub.plan.priceMxn);
++}
++
++function isUniqueViolation(err: unknown): boolean {
++  return typeof err === "object" && err !== null && (err as { code?: string }).code === "P2002";
++}
++
++export const billingService = {
++  /** ¿Puede esta empresa usar Tappy hoy? Se llama desde layout/POS/cocina. */
++  async getAccess(companyId: string): Promise<BillingAccess> {
++    const [company, settings] = await Promise.all([
++      prisma.company.findUnique({
++        where: { id: companyId },
++        select: {
++          status: true,
++          subscription: { select: { status: true, trialEndsAt: true, renewalDate: true } },
++        },
++      }),
++      platformSettingsService.get(),
++    ]);
++
++    if (!company) {
++      return computeBillingAccess({ companyStatus: "CANCELLED", subscription: null, graceDays: settings.graceDays });
++    }
++
++    return computeBillingAccess({
++      companyStatus: company.status,
++      subscription: company.subscription,
++      graceDays: settings.graceDays,
++    });
++  },
++
++  /** Todo lo que necesita la pantalla /facturacion. */
++  async getOverview(companyId: string) {
++    const [company, access] = await Promise.all([
++      prisma.company.findUnique({
++        where: { id: companyId },
++        select: {
++          name: true,
++          status: true,
++          subscription: { include: { plan: true } },
++        },
++      }),
++      this.getAccess(companyId),
++    ]);
++    if (!company) throw new Error("Empresa no encontrada");
++
++    const payments = await prisma.subscriptionPayment.findMany({
++      where: { companyId },
++      orderBy: { createdAt: "desc" },
++      take: 12,
++    });
++
++    const sub = company.subscription;
++    return {
++      companyName: company.name,
++      companyStatus: company.status,
++      planName: sub?.plan.name ?? null,
++      priceMxn: sub ? effectivePriceMxn(sub) : null,
++      hasRecurringCharge: !!sub?.mpPreapprovalId,
++      access: {
++        state: access.state,
++        allowed: access.allowed,
++        endsAt: access.endsAt ? access.endsAt.toISOString() : null,
++        graceEndsAt: access.graceEndsAt ? access.graceEndsAt.toISOString() : null,
++        daysLeft: access.daysLeft,
++        graceDaysLeft: access.graceDaysLeft,
++        blockReason: access.blockReason ?? null,
++      },
++      payments: payments.map((p) => ({
++        id: p.id,
++        amountMxn: Number(p.amountMxn),
++        status: p.status,
++        method: p.method,
++        paidAt: p.paidAt ? p.paidAt.toISOString() : null,
++        periodEnd: p.periodEnd ? p.periodEnd.toISOString() : null,
++        note: p.note,
++      })),
++    };
++  },
++
++  /**
++   * Crea la suscripción recurrente en Mercado Pago y devuelve el link donde
++   * el restaurante autoriza el pago. Si todavía está en demo, el primer cobro
++   * se programa para el día que termina el demo (start_date).
++   */
++  async createCheckout(companyId: string, userId: string, input: z.infer<typeof checkoutSchema>) {
++    const sub = await prisma.subscription.findUnique({
++      where: { companyId },
++      include: { plan: true, company: true },
++    });
++    if (!sub) throw new Error("Esta empresa no tiene una suscripción registrada");
++    if (sub.company.status !== "ACTIVE") {
++      throw new Error("Tu cuenta está suspendida. Contacta a soporte de Tappy.");
++    }
++
++    const price = effectivePriceMxn(sub);
++    if (!(price > 0)) {
++      throw new Error("Tu plan no tiene un precio mensual configurado. Contacta a soporte de Tappy.");
++    }
++
++    if (sub.mpPreapprovalId) {
++      const existing = await mpFetch<MpPreapproval>(`/preapproval/${sub.mpPreapprovalId}`).catch(() => null);
++      if (existing?.status === "authorized") {
++        throw new Error("Ya tienes un cobro automático activo. Si necesitas cambiarlo, contacta a soporte de Tappy.");
++      }
++    }
++
++    // Fecha del primer cobro: fin del demo (o del periodo ya pagado) si todavía está en el futuro.
++    const now = new Date();
++    const firstChargeAt = sub.status === "TRIALING" ? sub.trialEndsAt : sub.renewalDate;
++    const startDate = firstChargeAt && firstChargeAt.getTime() > now.getTime() + 60 * 60 * 1000 ? firstChargeAt : null;
++
++    const created = await mpFetch<MpPreapproval>("/preapproval", {
++      method: "POST",
++      body: JSON.stringify({
++        reason: `Tappy ${sub.plan.name} — ${sub.company.name}`,
++        external_reference: `tappysub:${companyId}`,
++        payer_email: input.payerEmail,
++        auto_recurring: {
++          frequency: 1,
++          frequency_type: "months",
++          transaction_amount: price,
++          currency_id: "MXN",
++          ...(startDate ? { start_date: startDate.toISOString() } : {}),
++        },
++        back_url: `${appBaseUrl()}/facturacion?retorno=1`,
++        status: "pending",
++      }),
++    });
++
++    if (!created.init_point) {
++      throw new Error("Mercado Pago no devolvió el link de pago");
++    }
++
++    await prisma.subscription.update({
++      where: { id: sub.id },
++      data: { mpPreapprovalId: created.id, payerEmail: input.payerEmail },
++    });
++
++    await prisma.auditLog.create({
++      data: {
++        companyId,
++        userId,
++        action: "SUBSCRIPTION_CHECKOUT_CREATED",
++        entity: "Subscription",
++        entityId: sub.id,
++        newData: { preapprovalId: created.id, amountMxn: price, firstChargeAt: startDate ? startDate.toISOString() : null },
++      },
++    });
++
++    return { checkoutUrl: created.init_point };
++  },
++
++  /**
++   * Punto de entrada del webhook. `topic` y `resourceId` vienen del aviso de
++   * Mercado Pago, pero lo único que usamos de ahí es el id: todo lo demás se
++   * consulta a Mercado Pago con nuestro token.
++   */
++  async handleNotification(topic: string, resourceId: string) {
++    if (topic === "subscription_preapproval" || topic === "preapproval") {
++      return this.syncPreapproval(resourceId);
++    }
++    if (topic === "subscription_authorized_payment") {
++      return this.processAuthorizedPayment(resourceId);
++    }
++    return { skipped: true as const };
++  },
++
++  async syncPreapproval(preapprovalId: string) {
++    const pre = await mpFetch<MpPreapproval>(`/preapproval/${preapprovalId}`);
++    const sub = await prisma.subscription.findUnique({ where: { mpPreapprovalId: preapprovalId } });
++    if (!sub) return { skipped: true as const, reason: "preapproval desconocido" };
++
++    await prisma.auditLog.create({
++      data: {
++        companyId: sub.companyId,
++        action: `SUBSCRIPTION_PREAPPROVAL_${pre.status.toUpperCase()}`,
++        entity: "Subscription",
++        entityId: sub.id,
++        newData: { preapprovalId, status: pre.status },
++      },
++    });
++    // Cancelar/pausar el cobro automático NO corta el acceso: el acceso
++    // sigue hasta renewalDate (+ gracia). Solo queda registrado.
++    return { ok: true as const, status: pre.status };
++  },
++
++  async processAuthorizedPayment(authorizedPaymentId: string) {
++    const ap = await mpFetch<MpAuthorizedPayment>(`/authorized_payments/${authorizedPaymentId}`);
++    if (!ap.preapproval_id) return { skipped: true as const, reason: "sin preapproval_id" };
++
++    const sub = await prisma.subscription.findUnique({
++      where: { mpPreapprovalId: ap.preapproval_id },
++      include: { plan: true },
++    });
++    if (!sub) return { skipped: true as const, reason: "preapproval desconocido" };
++
++    const paymentStatus = ap.payment?.status;
++
++    if (paymentStatus === "approved") {
++      const mpPaymentId = String(ap.payment?.id ?? `auth:${ap.id}`);
++      const amount = typeof ap.transaction_amount === "number" ? ap.transaction_amount : effectivePriceMxn(sub);
++      return this.recordApprovedPayment({
++        sub,
++        amountMxn: amount,
++        method: "MERCADOPAGO",
++        mpPaymentId,
++        months: 1,
++      });
++    }
++
++    if (paymentStatus === "rejected" || ap.status === "recycling") {
++      if (sub.status === "ACTIVE") {
++        await prisma.subscription.update({ where: { id: sub.id }, data: { status: "PAST_DUE" } });
++      }
++      await prisma.auditLog.create({
++        data: {
++          companyId: sub.companyId,
++          action: "SUBSCRIPTION_PAYMENT_REJECTED",
++          entity: "Subscription",
++          entityId: sub.id,
++          newData: { authorizedPaymentId: String(ap.id), status: ap.status ?? null, paymentStatus: paymentStatus ?? null },
++        },
++      });
++      return { ok: true as const, rejected: true as const };
++    }
++
++    return { skipped: true as const, reason: "pago aún sin resolver" };
++  },
++
++  /**
++   * Registra un pago aprobado (Mercado Pago o manual) y mueve "pagado hasta".
++   * El periodo arranca en el MAYOR entre hoy y el fin del demo/periodo actual,
++   * así pagar antes de tiempo nunca regala ni quita días.
++   */
++  async recordApprovedPayment(params: {
++    sub: SubWithPlan;
++    amountMxn: number;
++    method: "MERCADOPAGO" | "MANUAL";
++    mpPaymentId?: string;
++    months: number;
++    note?: string;
++    performedById?: string;
++  }) {
++    const { sub } = params;
++
++    if (params.mpPaymentId) {
++      const existing = await prisma.subscriptionPayment.findUnique({ where: { mpPaymentId: params.mpPaymentId } });
++      if (existing) return { ok: true as const, duplicate: true as const };
++    }
++
++    const now = new Date();
++    const currentEnd = sub.status === "TRIALING" ? sub.trialEndsAt : sub.renewalDate;
++    const periodStart = currentEnd && currentEnd.getTime() > now.getTime() ? currentEnd : now;
++    const periodEnd = addMonths(periodStart, params.months);
++
++    try {
++      await prisma.$transaction([
++        prisma.subscriptionPayment.create({
++          data: {
++            companyId: sub.companyId,
++            subscriptionId: sub.id,
++            amountMxn: params.amountMxn,
++            status: "APPROVED",
++            method: params.method,
++            mpPaymentId: params.mpPaymentId ?? null,
++            periodStart,
++            periodEnd,
++            paidAt: now,
++            note: params.note ?? null,
++          },
++        }),
++        prisma.subscription.update({
++          where: { id: sub.id },
++          data: { status: "ACTIVE", renewalDate: periodEnd },
++        }),
++        prisma.auditLog.create({
++          data: {
++            companyId: sub.companyId,
++            userId: params.performedById ?? null,
++            action: params.method === "MANUAL" ? "SUBSCRIPTION_PAYMENT_MANUAL" : "SUBSCRIPTION_PAYMENT_APPROVED",
++            entity: "Subscription",
++            entityId: sub.id,
++            newData: {
++              amountMxn: params.amountMxn,
++              months: params.months,
++              periodEnd: periodEnd.toISOString(),
++              mpPaymentId: params.mpPaymentId ?? null,
++              note: params.note ?? null,
++            },
++          },
++        }),
++      ]);
++    } catch (err) {
++      // Dos avisos simultáneos del mismo pago: el segundo choca con el índice único.
++      if (isUniqueViolation(err)) return { ok: true as const, duplicate: true as const };
++      throw err;
++    }
++
++    return { ok: true as const, periodEnd: periodEnd.toISOString() };
++  },
++
++  /** Super Admin: pago recibido por fuera (SPEI, efectivo...). */
++  async markManualPayment(companyId: string, performedById: string, input: z.infer<typeof manualPaymentSchema>) {
++    const sub = await prisma.subscription.findUnique({ where: { companyId }, include: { plan: true } });
++    if (!sub) throw new Error("Esta empresa no tiene una suscripción registrada");
++    if (sub.status === "CANCELED") throw new Error("La suscripción está cancelada");
++
++    const amount = input.amountMxn ?? effectivePriceMxn(sub) * input.months;
++    return this.recordApprovedPayment({
++      sub,
++      amountMxn: amount,
++      method: "MANUAL",
++      months: input.months,
++      note: input.note,
++      performedById,
++    });
++  },
++
++  /** Super Admin: alargar (o fijar, si no tenía fecha) el demo de una empresa en TRIALING. */
++  async extendTrial(companyId: string, performedById: string, days: number) {
++    const sub = await prisma.subscription.findUnique({ where: { companyId } });
++    if (!sub) throw new Error("Esta empresa no tiene una suscripción registrada");
++    if (sub.status !== "TRIALING") {
++      throw new Error("Solo se puede extender el demo de una empresa que sigue en demo");
++    }
++
++    const now = new Date();
++    const base = sub.trialEndsAt && sub.trialEndsAt.getTime() > now.getTime() ? sub.trialEndsAt : now;
++    const trialEndsAt = addDays(base, days);
++
++    await prisma.subscription.update({ where: { id: sub.id }, data: { trialEndsAt } });
++    await prisma.auditLog.create({
++      data: {
++        companyId,
++        userId: performedById,
++        action: "SUBSCRIPTION_TRIAL_EXTENDED",
++        entity: "Subscription",
++        entityId: sub.id,
++        previousData: { trialEndsAt: sub.trialEndsAt ? sub.trialEndsAt.toISOString() : null },
++        newData: { trialEndsAt: trialEndsAt.toISOString(), days },
++      },
++    });
++
++    return { trialEndsAt };
++  },
++};
+diff --git a/src/modules/companies/service.ts b/src/modules/companies/service.ts
+index 4aa46dc..0006ca2 100644
+--- a/src/modules/companies/service.ts
++++ b/src/modules/companies/service.ts
+@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
+ import { z } from "zod";
+ import { hardwareFinancingService } from "@/modules/hardwareFinancing/service";
+ import { platformSettingsService } from "@/modules/platformSettings/service";
++import { addDays } from "@/lib/billing";
+ 
+ export const createCompanySchema = z.object({
+   name: z.string().min(2, "El nombre es obligatorio"),
+@@ -29,6 +30,9 @@ export const companiesService = {
+     const plan = await prisma.plan.findUnique({ where: { id: input.planId } });
+     if (!plan) throw new Error("El plan seleccionado no existe");
+ 
++    const settings = await platformSettingsService.get();
++    const trialEndsAt = addDays(new Date(), settings.defaultTrialDays);
++
+     return prisma.company.create({
+       data: {
+         name: input.name,
+@@ -40,6 +44,7 @@ export const companiesService = {
+           create: {
+             planId: plan.id,
+             status: "TRIALING",
++            trialEndsAt,
+             license: {
+               create: {
+                 allowedBranches: plan.maxBranches,
+diff --git a/src/modules/platformSettings/service.ts b/src/modules/platformSettings/service.ts
+index b77b5c0..2ba4c9b 100644
+--- a/src/modules/platformSettings/service.ts
++++ b/src/modules/platformSettings/service.ts
+@@ -11,7 +11,7 @@ export const platformSettingsService = {
+     return prisma.platformSettings.create({ data: {} });
+   },
+ 
+-  async update(data: { blockCancellationWithPendingFinancing?: boolean }) {
++  async update(data: { blockCancellationWithPendingFinancing?: boolean; defaultTrialDays?: number; graceDays?: number }) {
+     const current = await platformSettingsService.get();
+     return prisma.platformSettings.update({ where: { id: current.id }, data });
+   },
+-- 
+2.43.0
+

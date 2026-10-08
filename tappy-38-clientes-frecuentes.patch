@@ -1,0 +1,2225 @@
+diff --git a/prisma/migrations/20261005120000_clientes_frecuentes/migration.sql b/prisma/migrations/20261005120000_clientes_frecuentes/migration.sql
+new file mode 100644
+index 0000000..d1625f1
+--- /dev/null
++++ b/prisma/migrations/20261005120000_clientes_frecuentes/migration.sql
+@@ -0,0 +1,94 @@
++-- CreateEnum
++CREATE TYPE "LoyaltyDiscountType" AS ENUM ('PERCENT', 'FIXED');
++
++-- AlterTable
++ALTER TABLE "customers" ADD COLUMN     "cardToken" TEXT,
++ADD COLUMN     "lastVisitAt" TIMESTAMP(3),
++ADD COLUMN     "loyaltyJoinedAt" TIMESTAMP(3),
++ADD COLUMN     "shortCode" TEXT,
++ADD COLUMN     "visitsInCycle" INTEGER NOT NULL DEFAULT 0;
++
++-- CreateTable
++CREATE TABLE "loyalty_programs" (
++    "id" TEXT NOT NULL,
++    "companyId" TEXT NOT NULL,
++    "isActive" BOOLEAN NOT NULL DEFAULT true,
++    "visitsRequired" INTEGER NOT NULL DEFAULT 7,
++    "discountType" "LoyaltyDiscountType" NOT NULL DEFAULT 'PERCENT',
++    "discountValue" DECIMAL(10,2) NOT NULL DEFAULT 10,
++    "oneVisitPerDay" BOOLEAN NOT NULL DEFAULT true,
++    "signupToken" TEXT NOT NULL,
++    "displayName" TEXT,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++
++    CONSTRAINT "loyalty_programs_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateTable
++CREATE TABLE "loyalty_visits" (
++    "id" TEXT NOT NULL,
++    "companyId" TEXT NOT NULL,
++    "customerId" TEXT NOT NULL,
++    "branchId" TEXT,
++    "userId" TEXT,
++    "orderId" TEXT,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++
++    CONSTRAINT "loyalty_visits_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateTable
++CREATE TABLE "loyalty_redemptions" (
++    "id" TEXT NOT NULL,
++    "companyId" TEXT NOT NULL,
++    "customerId" TEXT NOT NULL,
++    "branchId" TEXT,
++    "userId" TEXT,
++    "orderId" TEXT,
++    "discountType" "LoyaltyDiscountType" NOT NULL,
++    "discountValue" DECIMAL(10,2) NOT NULL,
++    "visitsUsed" INTEGER NOT NULL,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++
++    CONSTRAINT "loyalty_redemptions_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateIndex
++CREATE UNIQUE INDEX "loyalty_programs_companyId_key" ON "loyalty_programs"("companyId");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "loyalty_programs_signupToken_key" ON "loyalty_programs"("signupToken");
++
++-- CreateIndex
++CREATE INDEX "loyalty_visits_companyId_createdAt_idx" ON "loyalty_visits"("companyId", "createdAt");
++
++-- CreateIndex
++CREATE INDEX "loyalty_visits_customerId_createdAt_idx" ON "loyalty_visits"("customerId", "createdAt");
++
++-- CreateIndex
++CREATE INDEX "loyalty_redemptions_companyId_createdAt_idx" ON "loyalty_redemptions"("companyId", "createdAt");
++
++-- CreateIndex
++CREATE INDEX "loyalty_redemptions_customerId_idx" ON "loyalty_redemptions"("customerId");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "customers_cardToken_key" ON "customers"("cardToken");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "customers_companyId_shortCode_key" ON "customers"("companyId", "shortCode");
++
++-- AddForeignKey
++ALTER TABLE "loyalty_programs" ADD CONSTRAINT "loyalty_programs_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "loyalty_visits" ADD CONSTRAINT "loyalty_visits_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "loyalty_visits" ADD CONSTRAINT "loyalty_visits_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "customers"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "loyalty_redemptions" ADD CONSTRAINT "loyalty_redemptions_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "loyalty_redemptions" ADD CONSTRAINT "loyalty_redemptions_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "customers"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 314a37a..2de11e9 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -45,6 +45,10 @@ model Company {
+ 
+   stockTransfers  StockTransfer[]
+ 
++  loyaltyProgram     LoyaltyProgram?
++  loyaltyVisits      LoyaltyVisit[]
++  loyaltyRedemptions LoyaltyRedemption[]
++
+   @@map("companies")
+ }
+ 
+@@ -654,12 +658,91 @@ model Customer {
+   email     String?
+   createdAt DateTime @default(now())
+ 
+-  orders Order[]
+-
++  // Programa de clientes frecuentes (opcional: solo se llena si el cliente
++  // se registró en el programa). cardToken es el contenido del QR personal
++  // (largo y aleatorio, no adivinable); shortCode es el respaldo corto que
++  // el cajero puede teclear si la cámara falla.
++  cardToken       String?   @unique
++  shortCode       String?
++  visitsInCycle   Int       @default(0)
++  lastVisitAt     DateTime?
++  loyaltyJoinedAt DateTime?
++
++  orders      Order[]
++  visits      LoyaltyVisit[]
++  redemptions LoyaltyRedemption[]
++
++  @@unique([companyId, shortCode])
+   @@index([companyId])
+   @@map("customers")
+ }
+ 
++// ------------------------------------------------------------
++// PROGRAMA DE CLIENTES FRECUENTES
++// ------------------------------------------------------------
++
++enum LoyaltyDiscountType {
++  PERCENT
++  FIXED
++}
++
++/// Configuración del programa de cada empresa (una por empresa). El
++/// signupToken es el QR fijo del mostrador con el que el cliente se registra.
++model LoyaltyProgram {
++  id             String   @id @default(uuid())
++  companyId      String   @unique
++  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
++
++  isActive       Boolean  @default(true)
++  visitsRequired Int      @default(7)
++  discountType   LoyaltyDiscountType @default(PERCENT)
++  discountValue  Decimal  @default(10) @db.Decimal(10, 2)
++  oneVisitPerDay Boolean  @default(true)
++  signupToken    String   @unique
++  displayName    String? // nombre que ve el cliente en su tarjeta (si no, el de la empresa)
++  createdAt      DateTime @default(now())
++  updatedAt      DateTime @updatedAt
++
++  @@map("loyalty_programs")
++}
++
++/// Una visita (compra verificada por el personal) de un cliente.
++model LoyaltyVisit {
++  id         String   @id @default(uuid())
++  companyId  String
++  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
++  customerId String
++  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
++  branchId   String?
++  userId     String?
++  orderId    String? // se llena cuando la visita viene de una venta de Tappy (integración con Caja)
++  createdAt  DateTime @default(now())
++
++  @@index([companyId, createdAt])
++  @@index([customerId, createdAt])
++  @@map("loyalty_visits")
++}
++
++/// Un descuento canjeado. Guarda las condiciones vigentes al momento del canje.
++model LoyaltyRedemption {
++  id            String   @id @default(uuid())
++  companyId     String
++  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
++  customerId    String
++  customer      Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
++  branchId      String?
++  userId        String?
++  orderId       String?
++  discountType  LoyaltyDiscountType
++  discountValue Decimal  @db.Decimal(10, 2)
++  visitsUsed    Int
++  createdAt     DateTime @default(now())
++
++  @@index([companyId, createdAt])
++  @@index([customerId])
++  @@map("loyalty_redemptions")
++}
++
+ // ------------------------------------------------------------
+ // AUDITORÍA
+ // ------------------------------------------------------------
+diff --git a/src/app/(company)/clientes-frecuentes/escanear/page.tsx b/src/app/(company)/clientes-frecuentes/escanear/page.tsx
+new file mode 100644
+index 0000000..11c16ac
+--- /dev/null
++++ b/src/app/(company)/clientes-frecuentes/escanear/page.tsx
+@@ -0,0 +1,36 @@
++import { redirect } from "next/navigation";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
++import { hasFeature, isLoyaltyOnly } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { ScanClient } from "./scan-client";
++
++export const dynamic = "force-dynamic";
++
++export default async function EscanearPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++  const companyId = session.user.companyId;
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.LOYALTY_SCAN)) {
++    redirect(getHomeRoute(session.user.permissions, { loyaltyOnly: await isLoyaltyOnly(companyId) }));
++  }
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.CLIENTES_FRECUENTES))) {
++    return (
++      <div>
++        <h1 className="font-display text-3xl font-semibold mb-1">Escanear cliente</h1>
++        <p className="text-muted text-sm max-w-md mt-6">El programa de clientes frecuentes no está incluido en tu plan.</p>
++      </div>
++    );
++  }
++
++  return (
++    <div>
++      <h1 className="font-display text-3xl font-semibold mb-1">Escanear cliente</h1>
++      <p className="text-muted text-sm mb-6">Escanea la tarjeta del cliente para sumar su visita o canjear su descuento.</p>
++      <ScanClient />
++    </div>
++  );
++}
+diff --git a/src/app/(company)/clientes-frecuentes/escanear/scan-client.tsx b/src/app/(company)/clientes-frecuentes/escanear/scan-client.tsx
+new file mode 100644
+index 0000000..4bbbeb6
+--- /dev/null
++++ b/src/app/(company)/clientes-frecuentes/escanear/scan-client.tsx
+@@ -0,0 +1,316 @@
++"use client";
++
++import { useCallback, useEffect, useRef, useState } from "react";
++import jsQR from "jsqr";
++import { Button, Card } from "@/components/ui";
++import { Field, inputClass } from "@/components/ui/modal";
++import { QrImage } from "@/components/loyalty/qr-image";
++
++type CustomerSummary = {
++  id: string;
++  name: string;
++  phone: string | null;
++  shortCode: string | null;
++  visits: number;
++  required: number;
++  rewardAvailable: boolean;
++  visitedToday: boolean;
++  programActive: boolean;
++  discountText: string;
++  redeemed?: string;
++};
++
++export function ScanClient() {
++  const videoRef = useRef<HTMLVideoElement>(null);
++  const canvasRef = useRef<HTMLCanvasElement>(null);
++  const streamRef = useRef<MediaStream | null>(null);
++  const rafRef = useRef<number>(0);
++  const lastScanRef = useRef(0);
++  const lockedRef = useRef(false); // true mientras hay un resultado en pantalla o una búsqueda en curso
++
++  const [cameraOn, setCameraOn] = useState(false);
++  const [customer, setCustomer] = useState<CustomerSummary | null>(null);
++  const [enrolledToken, setEnrolledToken] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState("");
++  const [message, setMessage] = useState("");
++  const [manualCode, setManualCode] = useState("");
++  const [showEnroll, setShowEnroll] = useState(false);
++  const [newName, setNewName] = useState("");
++  const [newPhone, setNewPhone] = useState("");
++
++  const stopCamera = useCallback(() => {
++    cancelAnimationFrame(rafRef.current);
++    streamRef.current?.getTracks().forEach((t) => t.stop());
++    streamRef.current = null;
++    setCameraOn(false);
++  }, []);
++
++  useEffect(() => stopCamera, [stopCamera]);
++
++  const lookup = useCallback(async (code: string) => {
++    lockedRef.current = true;
++    setBusy(true);
++    setError("");
++    setMessage("");
++    const res = await fetch("/api/loyalty/lookup", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ code }),
++    });
++    const data = await res.json().catch(() => ({}));
++    setBusy(false);
++    if (!res.ok) {
++      setError(data.error ?? "No se pudo buscar la tarjeta");
++      // se libera el escáner unos segundos después para no repetir el mismo error en bucle
++      setTimeout(() => {
++        lockedRef.current = false;
++      }, 2000);
++      return;
++    }
++    setCustomer(data.customer);
++    setEnrolledToken(null);
++    navigator.vibrate?.(60);
++  }, []);
++
++  const tick = useCallback(() => {
++    const video = videoRef.current;
++    const canvas = canvasRef.current;
++    const now = Date.now();
++    if (video && canvas && !lockedRef.current && now - lastScanRef.current > 150 && video.readyState === video.HAVE_ENOUGH_DATA) {
++      lastScanRef.current = now;
++      const scale = Math.min(1, 640 / video.videoWidth);
++      const w = Math.floor(video.videoWidth * scale);
++      const h = Math.floor(video.videoHeight * scale);
++      canvas.width = w;
++      canvas.height = h;
++      const ctx = canvas.getContext("2d", { willReadFrequently: true });
++      if (ctx) {
++        ctx.drawImage(video, 0, 0, w, h);
++        const img = ctx.getImageData(0, 0, w, h);
++        const result = jsQR(img.data, w, h, { inversionAttempts: "dontInvert" });
++        if (result?.data) lookup(result.data);
++      }
++    }
++    rafRef.current = requestAnimationFrame(tick);
++  }, [lookup]);
++
++  async function startCamera() {
++    setError("");
++    try {
++      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
++      streamRef.current = stream;
++      const video = videoRef.current!;
++      video.srcObject = stream;
++      await video.play();
++      setCameraOn(true);
++      rafRef.current = requestAnimationFrame(tick);
++    } catch {
++      setError("No se pudo abrir la cámara. Revisa el permiso del navegador o escribe el código de la tarjeta.");
++    }
++  }
++
++  function next() {
++    setCustomer(null);
++    setEnrolledToken(null);
++    setMessage("");
++    setError("");
++    setManualCode("");
++    lockedRef.current = false;
++  }
++
++  async function act(kind: "visit" | "redeem") {
++    if (!customer) return;
++    setBusy(true);
++    setError("");
++    setMessage("");
++    const res = await fetch(`/api/loyalty/${kind}`, {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ customerId: customer.id }),
++    });
++    const data = await res.json().catch(() => ({}));
++    setBusy(false);
++    if (!res.ok) {
++      setError(data.error ?? "No se pudo completar la acción");
++      return;
++    }
++    setCustomer(data.customer);
++    setMessage(kind === "visit" ? "Visita registrada" : `Descuento canjeado: ${data.customer.redeemed}`);
++    navigator.vibrate?.(100);
++  }
++
++  async function submitManual(e: React.FormEvent) {
++    e.preventDefault();
++    if (manualCode.trim()) await lookup(manualCode.trim());
++  }
++
++  async function submitEnroll(e: React.FormEvent) {
++    e.preventDefault();
++    setBusy(true);
++    setError("");
++    const res = await fetch("/api/loyalty/enroll", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ name: newName, phone: newPhone }),
++    });
++    const data = await res.json().catch(() => ({}));
++    setBusy(false);
++    if (!res.ok) {
++      setError(data.error ?? "No se pudo registrar al cliente");
++      return;
++    }
++    lockedRef.current = true;
++    setCustomer(data.customer);
++    setEnrolledToken(data.cardToken);
++    setMessage(data.created ? "Cliente registrado" : "Ese cliente ya estaba registrado");
++    setShowEnroll(false);
++    setNewName("");
++    setNewPhone("");
++  }
++
++  return (
++    <div className="max-w-md space-y-5">
++      <Card className="overflow-hidden">
++        <div className={cameraOn ? "relative bg-black" : "hidden"}>
++          <video ref={videoRef} className="w-full aspect-square object-cover" playsInline muted />
++          <div className="pointer-events-none absolute inset-8 border-2 border-white/70 rounded-xl" />
++        </div>
++        <canvas ref={canvasRef} className="hidden" />
++        {!cameraOn && (
++          <div className="p-6 text-center">
++            <p className="text-sm text-muted mb-4">Abre la cámara y apunta al QR de la tarjeta del cliente.</p>
++            <Button onClick={startCamera}>Abrir cámara</Button>
++          </div>
++        )}
++        {cameraOn && (
++          <div className="p-3 text-right">
++            <Button variant="ghost" onClick={stopCamera}>
++              Cerrar cámara
++            </Button>
++          </div>
++        )}
++      </Card>
++
++      {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2">{error}</p>}
++      {message && <p className="text-sm bg-sage-light text-sage rounded-md px-3 py-2">{message}</p>}
++
++      {customer && (
++        <Card className="p-5">
++          <p className="font-display text-2xl font-semibold">{customer.name}</p>
++          {customer.phone && <p className="text-sm text-muted">{customer.phone}</p>}
++
++          <p className="font-display text-4xl font-semibold mt-4">
++            {customer.visits} <span className="text-muted text-2xl">/ {customer.required} visitas</span>
++          </p>
++          <div className="flex flex-wrap gap-1.5 mt-3 mb-4">
++            {Array.from({ length: customer.required }).map((_, i) => (
++              <span
++                key={i}
++                className={`h-4 w-4 rounded-full border ${
++                  i < Math.min(customer.visits, customer.required) ? "bg-ember border-ember" : "border-line"
++                }`}
++              />
++            ))}
++          </div>
++
++          {customer.rewardAvailable && (
++            <p className="text-sm font-medium bg-sage-light text-sage rounded-md px-3 py-2 mb-4">
++              ¡Tiene {customer.discountText} disponible!
++            </p>
++          )}
++          {!customer.programActive && (
++            <p className="text-sm bg-marigold/10 rounded-md px-3 py-2 mb-4">El programa está pausado.</p>
++          )}
++
++          <div className="flex flex-col gap-2">
++            {customer.rewardAvailable && (
++              <Button onClick={() => act("redeem")} disabled={busy || !customer.programActive}>
++                Canjear descuento ({customer.discountText})
++              </Button>
++            )}
++            <Button
++              variant={customer.rewardAvailable ? "secondary" : "primary"}
++              onClick={() => act("visit")}
++              disabled={busy || customer.visitedToday || !customer.programActive}
++            >
++              {customer.visitedToday ? "Ya registró su visita hoy" : "Registrar visita"}
++            </Button>
++            <p className="text-[11px] text-muted">Registra la visita solo si el cliente compró algo.</p>
++            <Button variant="ghost" onClick={next}>
++              Escanear otro cliente
++            </Button>
++          </div>
++
++          {enrolledToken && (
++            <div className="mt-5 pt-5 border-t border-line flex flex-col items-center gap-2">
++              <p className="text-sm text-muted text-center">
++                Pídele que escanee este código con la cámara de su celular para guardar su tarjeta.
++              </p>
++              <div className="bg-white border border-line rounded-lg p-3">
++                <QrImage path={`/tarjeta/${enrolledToken}`} size={180} />
++              </div>
++              {customer.shortCode && (
++                <p className="text-xs text-muted">
++                  Código: <span className="font-mono tracking-widest text-ink">{customer.shortCode}</span>
++                </p>
++              )}
++            </div>
++          )}
++        </Card>
++      )}
++
++      {!customer && (
++        <>
++          <Card className="p-5">
++            <form onSubmit={submitManual}>
++              <Field label="¿Sin cámara? Escribe el código de la tarjeta">
++                <input
++                  className={`${inputClass} font-mono uppercase tracking-widest`}
++                  value={manualCode}
++                  onChange={(e) => setManualCode(e.target.value)}
++                  placeholder="ABC234"
++                  maxLength={12}
++                />
++              </Field>
++              <Button type="submit" variant="secondary" disabled={busy || !manualCode.trim()}>
++                Buscar
++              </Button>
++            </form>
++          </Card>
++
++          <Card className="p-5">
++            {!showEnroll ? (
++              <Button variant="ghost" onClick={() => setShowEnroll(true)}>
++                + Registrar cliente nuevo
++              </Button>
++            ) : (
++              <form onSubmit={submitEnroll}>
++                <Field label="Nombre">
++                  <input className={inputClass} value={newName} onChange={(e) => setNewName(e.target.value)} required />
++                </Field>
++                <Field label="Celular (10 dígitos)">
++                  <input
++                    className={inputClass}
++                    value={newPhone}
++                    onChange={(e) => setNewPhone(e.target.value)}
++                    inputMode="tel"
++                    required
++                  />
++                </Field>
++                <div className="flex gap-2">
++                  <Button type="submit" disabled={busy}>
++                    Registrar
++                  </Button>
++                  <Button type="button" variant="ghost" onClick={() => setShowEnroll(false)}>
++                    Cancelar
++                  </Button>
++                </div>
++              </form>
++            )}
++          </Card>
++        </>
++      )}
++    </div>
++  );
++}
+diff --git a/src/app/(company)/clientes-frecuentes/loyalty-admin-client.tsx b/src/app/(company)/clientes-frecuentes/loyalty-admin-client.tsx
+new file mode 100644
+index 0000000..cf2049a
+--- /dev/null
++++ b/src/app/(company)/clientes-frecuentes/loyalty-admin-client.tsx
+@@ -0,0 +1,314 @@
++"use client";
++
++import { useState } from "react";
++import { Button, Card, StatCard } from "@/components/ui";
++import { Modal, Field, inputClass } from "@/components/ui/modal";
++import { QrImage, downloadQrPng } from "@/components/loyalty/qr-image";
++
++type Program = {
++  isActive: boolean;
++  visitsRequired: number;
++  discountType: "PERCENT" | "FIXED";
++  discountValue: number;
++  oneVisitPerDay: boolean;
++  signupToken: string;
++  displayName: string | null;
++};
++type Stats = { customers: number; visits30d: number; redemptions30d: number; pendingRewards: number };
++type CustomerRow = {
++  id: string;
++  name: string;
++  phone: string | null;
++  cardToken: string | null;
++  shortCode: string | null;
++  visitsInCycle: number;
++  lastVisitAt: string | null;
++};
++
++export function LoyaltyAdminClient({
++  initialProgram,
++  initialStats,
++  initialCustomers,
++}: {
++  initialProgram: Program;
++  initialStats: Stats;
++  initialCustomers: CustomerRow[];
++}) {
++  const [program, setProgram] = useState(initialProgram);
++  const [stats] = useState(initialStats);
++  const [customers, setCustomers] = useState(initialCustomers);
++
++  // formulario de configuración
++  const [isActive, setIsActive] = useState(program.isActive);
++  const [visitsRequired, setVisitsRequired] = useState(String(program.visitsRequired));
++  const [discountType, setDiscountType] = useState(program.discountType);
++  const [discountValue, setDiscountValue] = useState(String(program.discountValue));
++  const [oneVisitPerDay, setOneVisitPerDay] = useState(program.oneVisitPerDay);
++  const [displayName, setDisplayName] = useState(program.displayName ?? "");
++  const [saving, setSaving] = useState(false);
++  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
++
++  const [search, setSearch] = useState("");
++  const [cardModal, setCardModal] = useState<CustomerRow | null>(null);
++  const [copied, setCopied] = useState(false);
++
++  const signupPath = `/registro/${program.signupToken}`;
++
++  async function saveConfig(e: React.FormEvent) {
++    e.preventDefault();
++    setSaving(true);
++    setMessage(null);
++    const res = await fetch("/api/loyalty/program", {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({
++        isActive,
++        visitsRequired: Number(visitsRequired),
++        discountType,
++        discountValue: Number(discountValue),
++        oneVisitPerDay,
++        displayName: displayName.trim() || null,
++      }),
++    });
++    const data = await res.json();
++    setSaving(false);
++    if (!res.ok) {
++      setMessage({ ok: false, text: data.error ?? "No se pudo guardar" });
++      return;
++    }
++    setProgram(data.program);
++    setMessage({ ok: true, text: "Cambios guardados" });
++  }
++
++  async function rotateSignup() {
++    if (
++      !window.confirm(
++        "Se generará un QR de registro nuevo y el que tienes impreso dejará de funcionar. Las tarjetas de tus clientes NO cambian. ¿Continuar?"
++      )
++    )
++      return;
++    const res = await fetch("/api/loyalty/program/rotate-token", { method: "POST" });
++    const data = await res.json();
++    if (res.ok) setProgram(data.program);
++    else setMessage({ ok: false, text: data.error ?? "No se pudo generar el QR" });
++  }
++
++  async function runSearch(q: string) {
++    setSearch(q);
++    const res = await fetch(`/api/loyalty/customers?q=${encodeURIComponent(q)}`);
++    if (res.ok) setCustomers((await res.json()).customers);
++  }
++
++  function cardUrl(c: CustomerRow) {
++    return `${window.location.origin}/tarjeta/${c.cardToken}`;
++  }
++
++  async function copyCardLink(c: CustomerRow) {
++    await navigator.clipboard.writeText(cardUrl(c));
++    setCopied(true);
++    setTimeout(() => setCopied(false), 2000);
++  }
++
++  function whatsappLink(c: CustomerRow) {
++    const text = `Hola ${c.name}, esta es tu tarjeta de cliente frecuente: ${cardUrl(c)}`;
++    const phone = c.phone ? `52${c.phone}` : "";
++    return `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
++  }
++
++  return (
++    <div className="space-y-8">
++      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
++        <StatCard label="Clientes registrados" value={stats.customers} />
++        <StatCard label="Visitas (30 días)" value={stats.visits30d} />
++        <StatCard label="Descuentos canjeados (30 días)" value={stats.redemptions30d} />
++        <StatCard label="Con descuento disponible" value={stats.pendingRewards} tone="sage" />
++      </div>
++
++      <div className="grid lg:grid-cols-2 gap-6">
++        <Card className="p-6">
++          <h2 className="font-display text-xl font-semibold mb-4">Configuración</h2>
++          <form onSubmit={saveConfig}>
++            <label className="flex items-center gap-2 text-sm mb-5">
++              <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
++              Programa activo (si lo pausas no se registran visitas ni canjes)
++            </label>
++
++            <Field label="Visitas necesarias para el descuento">
++              <input
++                className={inputClass}
++                type="number"
++                min={2}
++                max={50}
++                value={visitsRequired}
++                onChange={(e) => setVisitsRequired(e.target.value)}
++              />
++            </Field>
++
++            <div className="grid grid-cols-2 gap-3">
++              <Field label="Tipo de descuento">
++                <select
++                  className={inputClass}
++                  value={discountType}
++                  onChange={(e) => setDiscountType(e.target.value as "PERCENT" | "FIXED")}
++                >
++                  <option value="PERCENT">Porcentaje (%)</option>
++                  <option value="FIXED">Monto fijo (MXN)</option>
++                </select>
++              </Field>
++              <Field label={discountType === "PERCENT" ? "Porcentaje" : "Monto (MXN)"}>
++                <input
++                  className={inputClass}
++                  type="number"
++                  min={1}
++                  max={discountType === "PERCENT" ? 100 : undefined}
++                  step="any"
++                  value={discountValue}
++                  onChange={(e) => setDiscountValue(e.target.value)}
++                />
++              </Field>
++            </div>
++
++            <Field label="Nombre en la tarjeta (opcional)">
++              <input
++                className={inputClass}
++                value={displayName}
++                onChange={(e) => setDisplayName(e.target.value)}
++                placeholder="Si lo dejas vacío se usa el nombre de tu empresa"
++              />
++            </Field>
++
++            <label className="flex items-center gap-2 text-sm mb-5">
++              <input type="checkbox" checked={oneVisitPerDay} onChange={(e) => setOneVisitPerDay(e.target.checked)} />
++              Máximo una visita por cliente al día
++            </label>
++
++            {message && (
++              <p
++                className={`text-sm rounded-md px-3 py-2 mb-4 ${
++                  message.ok ? "bg-sage-light text-sage" : "bg-ember/10 text-ember-dark"
++                }`}
++              >
++                {message.text}
++              </p>
++            )}
++            <Button type="submit" disabled={saving}>
++              {saving ? "Guardando..." : "Guardar cambios"}
++            </Button>
++          </form>
++        </Card>
++
++        <Card className="p-6">
++          <h2 className="font-display text-xl font-semibold mb-1">QR de registro del mostrador</h2>
++          <p className="text-sm text-muted mb-4">
++            Imprímelo y ponlo en el mostrador o las mesas. El cliente lo escanea con su celular, deja su nombre y
++            celular y recibe su tarjeta digital.
++          </p>
++          <div className="flex flex-col items-center gap-3">
++            <div className="bg-white border border-line rounded-lg p-3">
++              <QrImage path={signupPath} size={200} />
++            </div>
++            <div className="flex flex-wrap justify-center gap-2">
++              <Button variant="secondary" onClick={() => downloadQrPng(signupPath, "qr-registro-clientes.png")}>
++                Descargar QR (PNG)
++              </Button>
++              <Button variant="ghost" onClick={rotateSignup}>
++                Generar QR nuevo
++              </Button>
++            </div>
++            <p className="text-[11px] text-muted break-all text-center">
++              {typeof window !== "undefined" ? window.location.origin : ""}
++              {signupPath}
++            </p>
++          </div>
++        </Card>
++      </div>
++
++      <div>
++        <div className="flex items-center justify-between gap-3 mb-3">
++          <h2 className="font-display text-xl font-semibold">Clientes</h2>
++          <input
++            className={`${inputClass} max-w-xs`}
++            placeholder="Buscar por nombre, celular o código"
++            value={search}
++            onChange={(e) => runSearch(e.target.value)}
++          />
++        </div>
++        <Card className="overflow-hidden">
++          <table className="w-full text-sm">
++            <thead>
++              <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
++                <th className="px-5 py-3 font-medium">Cliente</th>
++                <th className="px-5 py-3 font-medium">Celular</th>
++                <th className="px-5 py-3 font-medium">Visitas</th>
++                <th className="px-5 py-3 font-medium">Última visita</th>
++                <th className="px-5 py-3 font-medium"></th>
++              </tr>
++            </thead>
++            <tbody>
++              {customers.length === 0 && (
++                <tr>
++                  <td colSpan={5} className="px-5 py-8 text-center text-muted">
++                    Aún no hay clientes registrados. Comparte el QR del mostrador para empezar.
++                  </td>
++                </tr>
++              )}
++              {customers.map((c) => {
++                const ready = c.visitsInCycle >= program.visitsRequired;
++                return (
++                  <tr key={c.id} className="border-b border-line last:border-0">
++                    <td className="px-5 py-3 font-medium">{c.name}</td>
++                    <td className="px-5 py-3 text-muted">{c.phone ?? "—"}</td>
++                    <td className="px-5 py-3">
++                      {c.visitsInCycle}/{program.visitsRequired}
++                      {ready && (
++                        <span className="ml-2 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-sage/15 text-sage">
++                          Descuento disponible
++                        </span>
++                      )}
++                    </td>
++                    <td className="px-5 py-3 text-muted">
++                      {c.lastVisitAt ? new Date(c.lastVisitAt).toLocaleDateString("es-MX") : "—"}
++                    </td>
++                    <td className="px-5 py-3 text-right">
++                      <Button variant="ghost" onClick={() => setCardModal(c)}>
++                        Ver tarjeta
++                      </Button>
++                    </td>
++                  </tr>
++                );
++              })}
++            </tbody>
++          </table>
++        </Card>
++      </div>
++
++      <Modal open={!!cardModal} onClose={() => setCardModal(null)} title={cardModal?.name ?? "Tarjeta"}>
++        {cardModal?.cardToken && (
++          <div className="flex flex-col items-center gap-3">
++            <div className="bg-white border border-line rounded-lg p-3">
++              <QrImage path={`/tarjeta/${cardModal.cardToken}`} size={200} />
++            </div>
++            {cardModal.shortCode && (
++              <p className="text-xs text-muted">
++                Código: <span className="font-mono tracking-widest text-ink">{cardModal.shortCode}</span>
++              </p>
++            )}
++            <div className="flex flex-wrap justify-center gap-2">
++              <Button variant="secondary" onClick={() => copyCardLink(cardModal)}>
++                {copied ? "¡Copiado!" : "Copiar enlace"}
++              </Button>
++              <a
++                href={whatsappLink(cardModal)}
++                target="_blank"
++                rel="noreferrer"
++                className="inline-flex items-center justify-center rounded-md px-4 py-2.5 text-sm font-medium bg-ember text-white hover:bg-ember-dark"
++              >
++                Enviar por WhatsApp
++              </a>
++            </div>
++          </div>
++        )}
++      </Modal>
++    </div>
++  );
++}
+diff --git a/src/app/(company)/clientes-frecuentes/page.tsx b/src/app/(company)/clientes-frecuentes/page.tsx
+new file mode 100644
+index 0000000..10ea93f
+--- /dev/null
++++ b/src/app/(company)/clientes-frecuentes/page.tsx
+@@ -0,0 +1,52 @@
++import { redirect } from "next/navigation";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
++import { hasFeature, isLoyaltyOnly } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { loyaltyService } from "@/modules/loyalty/service";
++import { LoyaltyAdminClient } from "./loyalty-admin-client";
++
++export const dynamic = "force-dynamic";
++
++export default async function ClientesFrecuentesPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++  const companyId = session.user.companyId;
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.LOYALTY_MANAGE)) {
++    redirect(getHomeRoute(session.user.permissions, { loyaltyOnly: await isLoyaltyOnly(companyId) }));
++  }
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.CLIENTES_FRECUENTES))) {
++    return (
++      <div>
++        <h1 className="font-display text-3xl font-semibold mb-1">Clientes frecuentes</h1>
++        <p className="text-muted text-sm max-w-md mt-6">
++          El programa de clientes frecuentes no está incluido en tu plan. Contacta a Tappy para activarlo como
++          complemento.
++        </p>
++      </div>
++    );
++  }
++
++  const [program, stats, customers] = await Promise.all([
++    loyaltyService.getProgram(companyId),
++    loyaltyService.stats(companyId),
++    loyaltyService.listCustomers(companyId),
++  ]);
++
++  return (
++    <div>
++      <h1 className="font-display text-3xl font-semibold mb-1">Clientes frecuentes</h1>
++      <p className="text-muted text-sm mb-8">
++        Premia a quien te visita seguido: tarjeta digital con QR, visitas y descuento automático.
++      </p>
++      <LoyaltyAdminClient
++        initialProgram={JSON.parse(JSON.stringify(program))}
++        initialStats={stats}
++        initialCustomers={JSON.parse(JSON.stringify(customers))}
++      />
++    </div>
++  );
++}
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index 72b4598..4c849df 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -1,10 +1,11 @@
+ import { redirect } from "next/navigation";
++import { headers } from "next/headers";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
+ import { SidebarNav } from "@/components/sidebar-nav";
+-import { hasFeature } from "@/lib/feature-gating";
++import { hasFeature, getEffectiveFeatureKeys } from "@/lib/feature-gating";
+ import { FEATURE_KEYS } from "@/lib/plan-features";
+-import { hasPermission, PERMISSIONS, type PermissionKey } from "@/lib/permissions";
++import { hasPermission, PERMISSIONS, getHomeRoute, type PermissionKey } from "@/lib/permissions";
+ import { requireBillingAccess } from "@/lib/billing-gate";
+ import Link from "next/link";
+ import { alertsService, alertBranchScope } from "@/modules/alerts/service";
+@@ -41,6 +42,19 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+   const showBillingBanner =
+     billing.state === "GRACE" || (billing.state === "DEMO" && billing.daysLeft !== null && billing.daysLeft <= 5);
+ 
++  // Programa de clientes frecuentes: opción independiente. Con "solo_clientes_frecuentes" la
++  // empresa NO tiene POS: el panel se limita a las pantallas de lealtad (y Usuarios).
++  const featureKeys = await getEffectiveFeatureKeys(session.user.companyId);
++  const loyaltyEnabled = featureKeys.has(FEATURE_KEYS.CLIENTES_FRECUENTES);
++  const loyaltyOnly = loyaltyEnabled && featureKeys.has(FEATURE_KEYS.SOLO_CLIENTES_FRECUENTES);
++  if (loyaltyOnly) {
++    const pathname = headers().get("x-pathname") ?? "";
++    const allowed = ["/clientes-frecuentes", "/users"];
++    if (pathname && !allowed.some((p) => pathname.startsWith(p))) {
++      redirect(getHomeRoute(session.user.permissions, { loyaltyOnly: true }));
++    }
++  }
++
+   // El nav en sí no reemplaza el gating real (page.tsx de cada ruta valida
+   // hasFeature/hasPermission de nuevo) — esto es solo para no mostrar un
+   // link a algo que la empresa no tiene contratado, o que este usuario no
+@@ -81,6 +95,23 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+     navItems = [...navItems.slice(0, inventoryIndex + 1), alertItem, ...navItems.slice(inventoryIndex + 1)];
+   }
+ 
++  if (loyaltyOnly) {
++    navItems = [
++      { href: "/clientes-frecuentes/escanear", label: "Escanear cliente", permission: PERMISSIONS.LOYALTY_SCAN },
++      { href: "/clientes-frecuentes", label: "Clientes frecuentes", permission: PERMISSIONS.LOYALTY_MANAGE },
++      { href: "/users", label: "Usuarios", permission: PERMISSIONS.USERS_MANAGE },
++      { href: "/facturacion", label: "Mi plan y pagos", permission: PERMISSIONS.SETTINGS_MANAGE },
++    ];
++  } else if (loyaltyEnabled) {
++    const loyaltyItems = [
++      { href: "/clientes-frecuentes/escanear", label: "Escanear cliente", permission: PERMISSIONS.LOYALTY_SCAN },
++      { href: "/clientes-frecuentes", label: "Clientes frecuentes", permission: PERMISSIONS.LOYALTY_MANAGE },
++    ];
++    const cashIndex = navItems.findIndex((item) => item.href === "/cash");
++    const at = cashIndex === -1 ? navItems.length : cashIndex + 1;
++    navItems = [...navItems.slice(0, at), ...loyaltyItems, ...navItems.slice(at)];
++  }
++
+   // Sucursal activa: si la empresa tiene varias sucursales activas, el nav muestra
+   // dónde se está operando, y quien administra sucursales puede cambiar de una a otra.
+   const activeBranches = await prisma.branch.findMany({
+diff --git a/src/app/api/cash/open/route.ts b/src/app/api/cash/open/route.ts
+index 6fa2769..5ee94a6 100644
+--- a/src/app/api/cash/open/route.ts
++++ b/src/app/api/cash/open/route.ts
+@@ -3,11 +3,16 @@ import { getTenantContext, requireCompanyId, resolveBranchId } from "@/lib/tenan
+ import { cashService, openRegisterSchema } from "@/modules/cash/service";
+ import { hasPermission, PERMISSIONS } from "@/lib/permissions";
+ import { prisma } from "@/lib/prisma";
++import { isLoyaltyOnly } from "@/lib/feature-gating";
+ 
+ export async function POST(req: Request) {
+   const ctx = await getTenantContext();
+   const companyId = requireCompanyId(ctx);
+ 
++  if (await isLoyaltyOnly(companyId)) {
++    return NextResponse.json({ error: "Tu plan no incluye el Punto de Venta" }, { status: 403 });
++  }
++
+   if (!hasPermission(ctx.permissions, PERMISSIONS.CASH_OPEN)) {
+     return NextResponse.json({ error: "No tienes permiso para abrir caja" }, { status: 403 });
+   }
+diff --git a/src/app/api/loyalty/customers/route.ts b/src/app/api/loyalty/customers/route.ts
+new file mode 100644
+index 0000000..1b83f3e
+--- /dev/null
++++ b/src/app/api/loyalty/customers/route.ts
+@@ -0,0 +1,17 @@
++import { NextResponse } from "next/server";
++import { PERMISSIONS } from "@/lib/permissions";
++import { loyaltyService } from "@/modules/loyalty/service";
++import { loyaltyGuard, errorResponse } from "@/modules/loyalty/guard";
++
++export async function GET(req: Request) {
++  const g = await loyaltyGuard(PERMISSIONS.LOYALTY_MANAGE);
++  if (g.error) return g.error;
++
++  const q = new URL(req.url).searchParams.get("q") ?? undefined;
++  try {
++    const customers = await loyaltyService.listCustomers(g.companyId, q);
++    return NextResponse.json({ customers });
++  } catch (err) {
++    return errorResponse(err, "No se pudieron cargar los clientes");
++  }
++}
+diff --git a/src/app/api/loyalty/enroll/route.ts b/src/app/api/loyalty/enroll/route.ts
+new file mode 100644
+index 0000000..78adf2d
+--- /dev/null
++++ b/src/app/api/loyalty/enroll/route.ts
+@@ -0,0 +1,18 @@
++import { NextResponse } from "next/server";
++import { PERMISSIONS } from "@/lib/permissions";
++import { loyaltyService, enrollSchema } from "@/modules/loyalty/service";
++import { loyaltyGuard, errorResponse } from "@/modules/loyalty/guard";
++
++export async function POST(req: Request) {
++  const g = await loyaltyGuard(PERMISSIONS.LOYALTY_SCAN);
++  if (g.error) return g.error;
++
++  const parsed = enrollSchema.safeParse(await req.json());
++  if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  try {
++    const result = await loyaltyService.enrollByStaff(g.companyId, g.ctx.userId, parsed.data);
++    return NextResponse.json(result, { status: result.created ? 201 : 200 });
++  } catch (err) {
++    return errorResponse(err, "No se pudo registrar al cliente");
++  }
++}
+diff --git a/src/app/api/loyalty/lookup/route.ts b/src/app/api/loyalty/lookup/route.ts
+new file mode 100644
+index 0000000..f2db913
+--- /dev/null
++++ b/src/app/api/loyalty/lookup/route.ts
+@@ -0,0 +1,21 @@
++import { NextResponse } from "next/server";
++import { z } from "zod";
++import { PERMISSIONS } from "@/lib/permissions";
++import { loyaltyService } from "@/modules/loyalty/service";
++import { loyaltyGuard, errorResponse } from "@/modules/loyalty/guard";
++
++const schema = z.object({ code: z.string().min(1).max(500) });
++
++export async function POST(req: Request) {
++  const g = await loyaltyGuard(PERMISSIONS.LOYALTY_SCAN);
++  if (g.error) return g.error;
++
++  const parsed = schema.safeParse(await req.json());
++  if (!parsed.success) return NextResponse.json({ error: "Código inválido" }, { status: 400 });
++  try {
++    const customer = await loyaltyService.lookup(g.companyId, parsed.data.code);
++    return NextResponse.json({ customer });
++  } catch (err) {
++    return errorResponse(err, "No se pudo buscar la tarjeta");
++  }
++}
+diff --git a/src/app/api/loyalty/program/rotate-token/route.ts b/src/app/api/loyalty/program/rotate-token/route.ts
+new file mode 100644
+index 0000000..6b96cb6
+--- /dev/null
++++ b/src/app/api/loyalty/program/rotate-token/route.ts
+@@ -0,0 +1,15 @@
++import { NextResponse } from "next/server";
++import { PERMISSIONS } from "@/lib/permissions";
++import { loyaltyService } from "@/modules/loyalty/service";
++import { loyaltyGuard, errorResponse } from "@/modules/loyalty/guard";
++
++export async function POST() {
++  const g = await loyaltyGuard(PERMISSIONS.LOYALTY_MANAGE);
++  if (g.error) return g.error;
++  try {
++    const program = await loyaltyService.rotateSignupToken(g.companyId, g.ctx.userId);
++    return NextResponse.json({ program });
++  } catch (err) {
++    return errorResponse(err, "No se pudo generar el QR nuevo");
++  }
++}
+diff --git a/src/app/api/loyalty/program/route.ts b/src/app/api/loyalty/program/route.ts
+new file mode 100644
+index 0000000..eb2c7a2
+--- /dev/null
++++ b/src/app/api/loyalty/program/route.ts
+@@ -0,0 +1,28 @@
++import { NextResponse } from "next/server";
++import { PERMISSIONS } from "@/lib/permissions";
++import { loyaltyService, programSchema } from "@/modules/loyalty/service";
++import { loyaltyGuard, errorResponse } from "@/modules/loyalty/guard";
++
++export async function GET() {
++  const g = await loyaltyGuard(PERMISSIONS.LOYALTY_MANAGE);
++  if (g.error) return g.error;
++
++  const [program, stats] = await Promise.all([loyaltyService.getProgram(g.companyId), loyaltyService.stats(g.companyId)]);
++  return NextResponse.json({ program, stats });
++}
++
++export async function PATCH(req: Request) {
++  const g = await loyaltyGuard(PERMISSIONS.LOYALTY_MANAGE);
++  if (g.error) return g.error;
++
++  const parsed = programSchema.safeParse(await req.json());
++  if (!parsed.success) {
++    return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  }
++  try {
++    const program = await loyaltyService.updateProgram(g.companyId, g.ctx.userId, parsed.data);
++    return NextResponse.json({ program });
++  } catch (err) {
++    return errorResponse(err, "No se pudo guardar el programa");
++  }
++}
+diff --git a/src/app/api/loyalty/public/register/route.ts b/src/app/api/loyalty/public/register/route.ts
+new file mode 100644
+index 0000000..eaf297b
+--- /dev/null
++++ b/src/app/api/loyalty/public/register/route.ts
+@@ -0,0 +1,37 @@
++import { NextResponse } from "next/server";
++import { z } from "zod";
++import { rateLimit } from "@/lib/rate-limit";
++import { loyaltyService, enrollSchema } from "@/modules/loyalty/service";
++
++/**
++ * Registro PÚBLICO (sin sesión): el cliente escanea el QR fijo del mostrador, deja nombre y
++ * celular y recibe su tarjeta. Solo crea la tarjeta; nunca suma visitas.
++ */
++const schema = enrollSchema.extend({
++  signupToken: z.string().min(10).max(100),
++  acceptedPrivacy: z.literal(true, { errorMap: () => ({ message: "Debes aceptar el aviso de privacidad" }) }),
++});
++
++export async function POST(req: Request) {
++  const ip = req.headers.get("x-forwarded-for")?.split(",")[0].trim() ?? "unknown";
++
++  const parsed = schema.safeParse(await req.json().catch(() => null));
++  if (!parsed.success) {
++    return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  }
++
++  // 8 registros por hora por IP y 60 por hora por QR: frena el spam sin molestar a un restaurante lleno.
++  if (!rateLimit(`loyalty-reg-ip:${ip}`, 8, 60 * 60 * 1000) || !rateLimit(`loyalty-reg-token:${parsed.data.signupToken}`, 60, 60 * 60 * 1000)) {
++    return NextResponse.json({ error: "Demasiados intentos. Intenta de nuevo más tarde." }, { status: 429 });
++  }
++
++  try {
++    const result = await loyaltyService.registerPublic(parsed.data.signupToken, {
++      name: parsed.data.name,
++      phone: parsed.data.phone,
++    });
++    return NextResponse.json(result, { status: 201 });
++  } catch (err) {
++    return NextResponse.json({ error: err instanceof Error ? err.message : "No se pudo completar el registro" }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/loyalty/redeem/route.ts b/src/app/api/loyalty/redeem/route.ts
+new file mode 100644
+index 0000000..8f63043
+--- /dev/null
++++ b/src/app/api/loyalty/redeem/route.ts
+@@ -0,0 +1,23 @@
++import { NextResponse } from "next/server";
++import { z } from "zod";
++import { PERMISSIONS } from "@/lib/permissions";
++import { resolveBranchId } from "@/lib/tenant-context";
++import { loyaltyService } from "@/modules/loyalty/service";
++import { loyaltyGuard, errorResponse } from "@/modules/loyalty/guard";
++
++const schema = z.object({ customerId: z.string().min(1) });
++
++export async function POST(req: Request) {
++  const g = await loyaltyGuard(PERMISSIONS.LOYALTY_SCAN);
++  if (g.error) return g.error;
++
++  const parsed = schema.safeParse(await req.json());
++  if (!parsed.success) return NextResponse.json({ error: "Cliente inválido" }, { status: 400 });
++  try {
++    const branchId = await resolveBranchId(g.ctx, g.companyId);
++    const customer = await loyaltyService.redeem(g.companyId, g.ctx.userId, branchId, parsed.data.customerId);
++    return NextResponse.json({ customer });
++  } catch (err) {
++    return errorResponse(err, "No se pudo canjear el descuento");
++  }
++}
+diff --git a/src/app/api/loyalty/visit/route.ts b/src/app/api/loyalty/visit/route.ts
+new file mode 100644
+index 0000000..38f2d73
+--- /dev/null
++++ b/src/app/api/loyalty/visit/route.ts
+@@ -0,0 +1,23 @@
++import { NextResponse } from "next/server";
++import { z } from "zod";
++import { PERMISSIONS } from "@/lib/permissions";
++import { resolveBranchId } from "@/lib/tenant-context";
++import { loyaltyService } from "@/modules/loyalty/service";
++import { loyaltyGuard, errorResponse } from "@/modules/loyalty/guard";
++
++const schema = z.object({ customerId: z.string().min(1) });
++
++export async function POST(req: Request) {
++  const g = await loyaltyGuard(PERMISSIONS.LOYALTY_SCAN);
++  if (g.error) return g.error;
++
++  const parsed = schema.safeParse(await req.json());
++  if (!parsed.success) return NextResponse.json({ error: "Cliente inválido" }, { status: 400 });
++  try {
++    const branchId = await resolveBranchId(g.ctx, g.companyId);
++    const customer = await loyaltyService.registerVisit(g.companyId, g.ctx.userId, branchId, parsed.data.customerId);
++    return NextResponse.json({ customer });
++  } catch (err) {
++    return errorResponse(err, "No se pudo registrar la visita");
++  }
++}
+diff --git a/src/app/api/sales/route.ts b/src/app/api/sales/route.ts
+index 8da509c..8b1073f 100644
+--- a/src/app/api/sales/route.ts
++++ b/src/app/api/sales/route.ts
+@@ -3,11 +3,16 @@ import { getTenantContext, requireCompanyId, resolveBranchId } from "@/lib/tenan
+ import { salesService, saleSchema } from "@/modules/sales/service";
+ import { hasPermission, PERMISSIONS } from "@/lib/permissions";
+ import { prisma } from "@/lib/prisma";
++import { isLoyaltyOnly } from "@/lib/feature-gating";
+ 
+ export async function POST(req: Request) {
+   const ctx = await getTenantContext();
+   const companyId = requireCompanyId(ctx);
+ 
++  if (await isLoyaltyOnly(companyId)) {
++    return NextResponse.json({ error: "Tu plan no incluye el Punto de Venta" }, { status: 403 });
++  }
++
+   if (!hasPermission(ctx.permissions, PERMISSIONS.SALES_CREATE)) {
+     return NextResponse.json({ error: "No tienes permiso para registrar ventas" }, { status: 403 });
+   }
+diff --git a/src/app/kitchen/page.tsx b/src/app/kitchen/page.tsx
+index d7d67e3..d610824 100644
+--- a/src/app/kitchen/page.tsx
++++ b/src/app/kitchen/page.tsx
+@@ -4,6 +4,7 @@ import { authOptions } from "@/lib/auth";
+ import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+ import { kitchenService } from "@/modules/kitchen/service";
+ import { requireBillingAccess } from "@/lib/billing-gate";
++import { requirePosAccess } from "@/lib/feature-gating";
+ import { KitchenClient } from "./kitchen-client";
+ import Link from "next/link";
+ 
+@@ -12,6 +13,7 @@ export default async function KitchenPage() {
+   if (!session?.user?.companyId) redirect("/login");
+ 
+   await requireBillingAccess(session.user.companyId);
++  await requirePosAccess(session.user.companyId);
+ 
+   if (!hasPermission(session.user.permissions, PERMISSIONS.KITCHEN_VIEW)) {
+     redirect(getHomeRoute(session.user.permissions));
+diff --git a/src/app/pos/page.tsx b/src/app/pos/page.tsx
+index 5febff0..c8d9394 100644
+--- a/src/app/pos/page.tsx
++++ b/src/app/pos/page.tsx
+@@ -6,7 +6,7 @@ import { productsService } from "@/modules/products/service";
+ import { hasPermission, PERMISSIONS } from "@/lib/permissions";
+ import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
+ import { cashService } from "@/modules/cash/service";
+-import { hasFeature } from "@/lib/feature-gating";
++import { hasFeature, requirePosAccess } from "@/lib/feature-gating";
+ import { FEATURE_KEYS } from "@/lib/plan-features";
+ import { tablesService } from "@/modules/tables/service";
+ import { mercadoPagoService } from "@/modules/mercadoPago/service";
+@@ -19,6 +19,7 @@ export default async function PosPage() {
+   if (!session?.user?.companyId) redirect("/login");
+ 
+   await requireBillingAccess(session.user.companyId);
++  await requirePosAccess(session.user.companyId);
+ 
+   if (!hasPermission(session.user.permissions, PERMISSIONS.SALES_CREATE)) {
+     redirect("/dashboard");
+diff --git a/src/app/redirect-after-login/page.tsx b/src/app/redirect-after-login/page.tsx
+index ae7608d..79d6918 100644
+--- a/src/app/redirect-after-login/page.tsx
++++ b/src/app/redirect-after-login/page.tsx
+@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
+ import { getHomeRoute } from "@/lib/permissions";
++import { isLoyaltyOnly } from "@/lib/feature-gating";
+ 
+ export default async function RedirectAfterLogin() {
+   const session = await getServerSession(authOptions);
+@@ -17,5 +18,6 @@ export default async function RedirectAfterLogin() {
+   // Antes mandaba a todos a /dashboard, pero un Mesero/Cajero/Cocinero ya
+   // no tiene acceso ahí (sin REPORTS_VIEW) — cada quien entra a la primera
+   // pantalla que sí puede usar.
+-  redirect(getHomeRoute(session.user.permissions));
++  const loyaltyOnly = session.user.companyId ? await isLoyaltyOnly(session.user.companyId) : false;
++  redirect(getHomeRoute(session.user.permissions, { loyaltyOnly }));
+ }
+diff --git a/src/app/registro/[token]/page.tsx b/src/app/registro/[token]/page.tsx
+new file mode 100644
+index 0000000..252c08e
+--- /dev/null
++++ b/src/app/registro/[token]/page.tsx
+@@ -0,0 +1,35 @@
++import type { Metadata } from "next";
++import { loyaltyService } from "@/modules/loyalty/service";
++import { RegisterForm } from "./register-form";
++
++export const dynamic = "force-dynamic";
++export const metadata: Metadata = { title: "Únete al programa de clientes frecuentes", robots: { index: false, follow: false } };
++
++export default async function RegistroPage({ params }: { params: { token: string } }) {
++  const info = await loyaltyService.getSignupInfo(params.token);
++
++  if (!info) {
++    return (
++      <main className="min-h-screen flex items-center justify-center bg-paper px-6">
++        <div className="text-center max-w-sm">
++          <p className="font-display text-2xl font-semibold mb-2">Programa no disponible</p>
++          <p className="text-muted text-sm">Este código QR ya no está activo. Pregunta en el mostrador por el vigente.</p>
++        </div>
++      </main>
++    );
++  }
++
++  return (
++    <main className="min-h-screen bg-paper flex items-center justify-center px-5 py-10">
++      <div className="w-full max-w-sm">
++        <p className="text-xs uppercase tracking-wide text-muted mb-2">Clientes frecuentes</p>
++        <h1 className="font-display text-3xl font-semibold mb-2">{info.restaurantName}</h1>
++        <p className="text-sm text-muted mb-6">
++          Registra tu tarjeta digital. Después de <strong className="text-ink">{info.visitsRequired} visitas</strong> con
++          compra, obtienes <strong className="text-ink">{info.discountText}</strong>.
++        </p>
++        <RegisterForm signupToken={params.token} restaurantName={info.restaurantName} />
++      </div>
++    </main>
++  );
++}
+diff --git a/src/app/registro/[token]/register-form.tsx b/src/app/registro/[token]/register-form.tsx
+new file mode 100644
+index 0000000..f8a299c
+--- /dev/null
++++ b/src/app/registro/[token]/register-form.tsx
+@@ -0,0 +1,65 @@
++"use client";
++
++import { useState } from "react";
++import { useRouter } from "next/navigation";
++import { Button } from "@/components/ui";
++import { Field, inputClass } from "@/components/ui/modal";
++
++export function RegisterForm({ signupToken, restaurantName }: { signupToken: string; restaurantName: string }) {
++  const router = useRouter();
++  const [name, setName] = useState("");
++  const [phone, setPhone] = useState("");
++  const [accepted, setAccepted] = useState(false);
++  const [saving, setSaving] = useState(false);
++  const [error, setError] = useState("");
++
++  async function submit(e: React.FormEvent) {
++    e.preventDefault();
++    setSaving(true);
++    setError("");
++    const res = await fetch("/api/loyalty/public/register", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ signupToken, name, phone, acceptedPrivacy: accepted }),
++    });
++    const data = await res.json().catch(() => ({}));
++    setSaving(false);
++    if (!res.ok) {
++      setError(data.error ?? "No se pudo completar el registro");
++      return;
++    }
++    router.push(`/tarjeta/${data.cardToken}`);
++  }
++
++  return (
++    <form onSubmit={submit}>
++      <Field label="Tu nombre">
++        <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" required />
++      </Field>
++      <Field label="Tu celular (10 dígitos)">
++        <input
++          className={inputClass}
++          value={phone}
++          onChange={(e) => setPhone(e.target.value)}
++          inputMode="tel"
++          autoComplete="tel"
++          placeholder="81 1234 5678"
++          required
++        />
++      </Field>
++
++      <label className="flex items-start gap-2 text-xs text-muted mb-5">
++        <input type="checkbox" checked={accepted} onChange={(e) => setAccepted(e.target.checked)} className="mt-0.5" />
++        <span>
++          Acepto que {restaurantName} use mi nombre y celular únicamente para administrar mi tarjeta de clientes
++          frecuentes y mis descuentos. Puedo pedir que borren mis datos en el mostrador.
++        </span>
++      </label>
++
++      {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
++      <Button type="submit" className="w-full" disabled={saving || !accepted}>
++        {saving ? "Creando tarjeta..." : "Crear mi tarjeta"}
++      </Button>
++    </form>
++  );
++}
+diff --git a/src/app/tarjeta/[token]/page.tsx b/src/app/tarjeta/[token]/page.tsx
+new file mode 100644
+index 0000000..4a8d0b3
+--- /dev/null
++++ b/src/app/tarjeta/[token]/page.tsx
+@@ -0,0 +1,72 @@
++import type { Metadata } from "next";
++import { loyaltyService } from "@/modules/loyalty/service";
++import { QrImage } from "@/components/loyalty/qr-image";
++
++export const dynamic = "force-dynamic";
++export const metadata: Metadata = { title: "Mi tarjeta de cliente frecuente", robots: { index: false, follow: false } };
++
++export default async function TarjetaPage({ params }: { params: { token: string } }) {
++  const card = await loyaltyService.getCard(params.token);
++
++  if (!card) {
++    return (
++      <main className="min-h-screen flex items-center justify-center bg-paper px-6">
++        <div className="text-center max-w-sm">
++          <p className="font-display text-2xl font-semibold mb-2">Tarjeta no disponible</p>
++          <p className="text-muted text-sm">No encontramos esta tarjeta. Pide ayuda en el mostrador.</p>
++        </div>
++      </main>
++    );
++  }
++
++  const shown = Math.min(card.visits, card.required);
++
++  return (
++    <main className="min-h-screen bg-paper flex items-center justify-center px-5 py-10">
++      <div className="w-full max-w-sm">
++        <div className="bg-ink-950 text-white rounded-2xl p-6 shadow-xl">
++          <p className="text-xs uppercase tracking-wide text-white/50">Clientes frecuentes</p>
++          <h1 className="font-display text-2xl font-semibold mt-1">{card.restaurantName}</h1>
++          <p className="text-sm text-white/70 mt-1">{card.name}</p>
++
++          <div className="bg-white rounded-xl p-4 mt-5 flex flex-col items-center">
++            <QrImage path={`/tarjeta/${params.token}`} size={208} />
++            {card.shortCode && (
++              <p className="text-[11px] text-muted mt-2">
++                Código: <span className="font-mono tracking-widest text-ink">{card.shortCode}</span>
++              </p>
++            )}
++          </div>
++
++          <p className="text-xs text-white/60 mt-5 mb-2">
++            {card.visits} de {card.required} visitas
++          </p>
++          <div className="flex flex-wrap gap-2">
++            {Array.from({ length: card.required }).map((_, i) => (
++              <span
++                key={i}
++                className={`h-5 w-5 rounded-full border ${i < shown ? "bg-marigold border-marigold" : "border-white/30"}`}
++              />
++            ))}
++          </div>
++        </div>
++
++        {card.rewardAvailable ? (
++          <p className="mt-5 text-center text-sm font-medium bg-sage-light text-sage rounded-lg px-4 py-3">
++            ¡Tienes {card.discountText}! Muestra esta tarjeta al pagar.
++          </p>
++        ) : (
++          <p className="mt-5 text-center text-xs text-muted">
++            Muestra este código en cada visita. Al llegar a {card.required} visitas obtienes {card.discountText}.
++          </p>
++        )}
++        {!card.programActive && (
++          <p className="mt-3 text-center text-xs text-muted">El programa está pausado por el momento.</p>
++        )}
++        <p className="mt-6 text-center text-[11px] text-muted">
++          Tip: guarda esta página en tu pantalla de inicio para tenerla siempre a la mano.
++        </p>
++      </div>
++    </main>
++  );
++}
+diff --git a/src/components/loyalty/qr-image.tsx b/src/components/loyalty/qr-image.tsx
+new file mode 100644
+index 0000000..1fe3e66
+--- /dev/null
++++ b/src/components/loyalty/qr-image.tsx
+@@ -0,0 +1,53 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import QRCode from "qrcode";
++
++/**
++ * Dibuja un QR. Pasa `path` (ej. "/tarjeta/abc") para que el QR contenga la URL
++ * absoluta del sitio actual, o `value` para un texto cualquiera.
++ */
++export function QrImage({
++  path,
++  value,
++  size = 224,
++  className,
++}: {
++  path?: string;
++  value?: string;
++  size?: number;
++  className?: string;
++}) {
++  const [src, setSrc] = useState<string>("");
++
++  useEffect(() => {
++    const content = value ?? (path ? `${window.location.origin}${path}` : "");
++    if (!content) return;
++    let cancelled = false;
++    QRCode.toDataURL(content, { width: size * 2, margin: 1, errorCorrectionLevel: "M" })
++      .then((url) => {
++        if (!cancelled) setSrc(url);
++      })
++      .catch(() => {});
++    return () => {
++      cancelled = true;
++    };
++  }, [path, value, size]);
++
++  if (!src) return <div style={{ width: size, height: size }} className={className} />;
++  // eslint-disable-next-line @next/next/no-img-element
++  return <img src={src} width={size} height={size} alt="Código QR" className={className} />;
++}
++
++/** Descarga el QR como PNG grande (para imprimir el QR del mostrador). */
++export async function downloadQrPng(path: string, filename: string) {
++  const url = await QRCode.toDataURL(`${window.location.origin}${path}`, {
++    width: 1000,
++    margin: 2,
++    errorCorrectionLevel: "M",
++  });
++  const a = document.createElement("a");
++  a.href = url;
++  a.download = filename;
++  a.click();
++}
+diff --git a/src/components/sidebar-nav.tsx b/src/components/sidebar-nav.tsx
+index 71f54d7..1123f04 100644
+--- a/src/components/sidebar-nav.tsx
++++ b/src/components/sidebar-nav.tsx
+@@ -21,6 +21,10 @@ export function SidebarNav({
+   branchName?: string | null;
+ }) {
+   const pathname = usePathname();
++  // Se resalta solo la opción más específica (ej. "/clientes-frecuentes/escanear" y no también "/clientes-frecuentes").
++  const activeHref = items
++    .filter((i) => pathname === i.href || pathname.startsWith(i.href + "/"))
++    .sort((a, b) => b.href.length - a.href.length)[0]?.href;
+ 
+   async function changeBranch(branchId: string) {
+     const res = await fetch("/api/branches/active", {
+@@ -57,7 +61,7 @@ export function SidebarNav({
+         </div>
+         <nav className="px-3 py-4 flex flex-col gap-1">
+           {items.map((item) => {
+-            const active = pathname.startsWith(item.href);
++            const active = item.href === activeHref;
+             return (
+               <Link
+                 key={item.href}
+diff --git a/src/lib/feature-gating.ts b/src/lib/feature-gating.ts
+index 49fb2b0..f23e049 100644
+--- a/src/lib/feature-gating.ts
++++ b/src/lib/feature-gating.ts
+@@ -1,3 +1,4 @@
++import { redirect } from "next/navigation";
+ import { prisma } from "@/lib/prisma";
+ import { VALID_FEATURE_KEYS } from "@/lib/plan-features";
+ 
+@@ -38,3 +39,20 @@ export async function hasFeature(companyId: string, featureKey: string): Promise
+   const keys = await getEffectiveFeatureKeys(companyId);
+   return keys.has(featureKey);
+ }
++
++/**
++ * ¿La empresa contrató el programa de clientes frecuentes SIN el POS?
++ * (feature "solo_clientes_frecuentes"). En ese modo el menú solo muestra las
++ * pantallas de lealtad y /pos, /kitchen y el resto del panel redirigen aquí.
++ */
++export async function isLoyaltyOnly(companyId: string): Promise<boolean> {
++  const keys = await getEffectiveFeatureKeys(companyId);
++  return keys.has("solo_clientes_frecuentes") && keys.has("clientes_frecuentes");
++}
++
++/** Para páginas del POS (/pos, /kitchen): si la empresa es "solo clientes frecuentes", no entra. */
++export async function requirePosAccess(companyId: string) {
++  if (await isLoyaltyOnly(companyId)) {
++    redirect("/clientes-frecuentes/escanear");
++  }
++}
+diff --git a/src/lib/permissions.ts b/src/lib/permissions.ts
+index 89ac4c0..d7eec10 100644
+--- a/src/lib/permissions.ts
++++ b/src/lib/permissions.ts
+@@ -22,6 +22,8 @@ export const PERMISSIONS = {
+   HARDWARE_FINANCING_MANAGE: "hardware_financing.manage", // solo SUPER_ADMIN: crear/liquidar/reestructurar financiamientos
+   TABLES_MANAGE: "tables.manage", // requiere además la feature de plan "gestion_mesas" — ver hasFeature()
+   KITCHEN_VIEW: "kitchen.view", // ver/avanzar comandas en la Pantalla de Cocina
++  LOYALTY_MANAGE: "loyalty.manage", // configurar el programa de clientes frecuentes (requiere la feature "clientes_frecuentes")
++  LOYALTY_SCAN: "loyalty.scan", // escanear tarjetas, registrar visitas y canjear descuentos
+ } as const;
+ 
+ export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
+@@ -53,6 +55,8 @@ const ADMIN_PERMISSIONS: PermissionKey[] = [
+   PERMISSIONS.SETTINGS_MANAGE,
+   PERMISSIONS.TABLES_MANAGE,
+   PERMISSIONS.KITCHEN_VIEW,
++  PERMISSIONS.LOYALTY_MANAGE,
++  PERMISSIONS.LOYALTY_SCAN,
+ ];
+ 
+ const VENTAS_PERMISSIONS: PermissionKey[] = [
+@@ -62,6 +66,7 @@ const VENTAS_PERMISSIONS: PermissionKey[] = [
+   PERMISSIONS.CASH_CLOSE,
+   PERMISSIONS.CASH_MOVEMENT,
+   PERMISSIONS.TABLES_MANAGE,
++  PERMISSIONS.LOYALTY_SCAN,
+ ];
+ 
+ export const DEFAULT_ROLE_PERMISSIONS: Record<string, PermissionKey[]> = {
+@@ -86,7 +91,13 @@ export function hasPermission(
+  * REPORTS_VIEW, así que caería en un loop de redirección si esa fuera la
+  * meta fija. Cada página gateada debe usar esto en vez de un href fijo.
+  */
+-export function getHomeRoute(userPermissions: string[]): string {
++export function getHomeRoute(userPermissions: string[], opts?: { loyaltyOnly?: boolean }): string {
++  // Empresas con el programa de clientes frecuentes SIN POS: solo existen las pantallas de lealtad.
++  if (opts?.loyaltyOnly) {
++    if (hasPermission(userPermissions, PERMISSIONS.LOYALTY_SCAN)) return "/clientes-frecuentes/escanear";
++    if (hasPermission(userPermissions, PERMISSIONS.LOYALTY_MANAGE)) return "/clientes-frecuentes";
++    return "/login";
++  }
+   if (hasPermission(userPermissions, PERMISSIONS.REPORTS_VIEW)) return "/dashboard";
+   if (hasPermission(userPermissions, PERMISSIONS.SALES_CREATE)) return "/pos";
+   if (hasPermission(userPermissions, PERMISSIONS.KITCHEN_VIEW)) return "/kitchen";
+diff --git a/src/lib/plan-features.ts b/src/lib/plan-features.ts
+index d44943a..30fed7d 100644
+--- a/src/lib/plan-features.ts
++++ b/src/lib/plan-features.ts
+@@ -40,6 +40,12 @@ export const FEATURE_CATALOG: FeatureDef[] = [
+   { key: "pagos_integrados", label: "Pagos integrados (tarjetas desde el POS)", status: "live", enforced: true },
+   { key: "whatsapp_business", label: "WhatsApp Business", status: "live", enforced: true },
+   { key: "dashboard_empresarial", label: "Dashboard empresarial", status: "live", enforced: true },
++  // Programa de clientes frecuentes: opción independiente. No viene incluida en ningún plan
++  // por defecto; se activa por plan o por empresa (plan personalizado) desde Super Admin.
++  { key: "clientes_frecuentes", label: "Programa de clientes frecuentes (tarjeta digital con QR)", status: "live", enforced: true },
++  // Modo "solo clientes frecuentes": para restaurantes que contratan el programa SIN el POS.
++  // Marcar esta casilla (junto con clientes_frecuentes) oculta y bloquea Punto de Venta, Caja, etc.
++  { key: "solo_clientes_frecuentes", label: "Modo solo clientes frecuentes (sin Punto de Venta)", status: "live", enforced: true },
+ 
+   // ── Construidas pero disponibles en todos los planes (marcarlas no cambia nada todavía) ──
+   { key: "comandas_cocina", label: "Comandas digitales para cocina", status: "live", enforced: false },
+diff --git a/src/lib/rate-limit.ts b/src/lib/rate-limit.ts
+new file mode 100644
+index 0000000..e84bd21
+--- /dev/null
++++ b/src/lib/rate-limit.ts
+@@ -0,0 +1,26 @@
++/**
++ * Limitador simple en memoria para endpoints públicos (registro de clientes).
++ * Por instancia del servidor: en serverless no es una garantía global, pero
++ * frena el abuso casual (spam de registros desde un mismo IP/QR). Si algún día
++ * se necesita algo estricto, se cambia por Redis/Upstash sin tocar a quien lo usa.
++ */
++const hits = new Map<string, { count: number; resetAt: number }>();
++
++export function rateLimit(key: string, max: number, windowMs: number): boolean {
++  const now = Date.now();
++  const entry = hits.get(key);
++
++  if (!entry || entry.resetAt <= now) {
++    hits.set(key, { count: 1, resetAt: now + windowMs });
++    // limpieza ocasional para que el Map no crezca sin límite
++    if (hits.size > 5000) {
++      hits.forEach((v, k) => {
++        if (v.resetAt <= now) hits.delete(k);
++      });
++    }
++    return true;
++  }
++
++  entry.count += 1;
++  return entry.count <= max;
++}
+diff --git a/src/middleware.ts b/src/middleware.ts
+index ec1cc2f..ca083e4 100644
+--- a/src/middleware.ts
++++ b/src/middleware.ts
+@@ -19,12 +19,16 @@ export default withAuth(
+     // SUPER_ADMIN no opera el panel ni el POS de un restaurante individual
+     if (
+       role === "SUPER_ADMIN" &&
+-      ["/dashboard", "/products", "/categories", "/branches", "/users", "/pos", "/cash", "/reports", "/inventory", "/kitchen"].some((p) => pathname.startsWith(p))
++      ["/dashboard", "/products", "/categories", "/branches", "/users", "/pos", "/cash", "/reports", "/inventory", "/kitchen", "/clientes-frecuentes"].some((p) => pathname.startsWith(p))
+     ) {
+       return NextResponse.redirect(new URL("/plataforma/dashboard", req.url));
+     }
+ 
+-    return NextResponse.next();
++    // Pasa la ruta actual a los server components (el layout de empresa la usa para
++    // aplicar el modo "solo clientes frecuentes").
++    const requestHeaders = new Headers(req.headers);
++    requestHeaders.set("x-pathname", pathname);
++    return NextResponse.next({ request: { headers: requestHeaders } });
+   },
+   {
+     callbacks: {
+@@ -35,5 +39,5 @@ export default withAuth(
+ );
+ 
+ export const config = {
+-  matcher: ["/dashboard/:path*", "/products/:path*", "/categories/:path*", "/branches/:path*", "/users/:path*", "/pos/:path*", "/cash/:path*", "/reports/:path*", "/inventory/:path*", "/kitchen/:path*", "/plataforma/:path*", "/facturacion/:path*"],
++  matcher: ["/dashboard/:path*", "/products/:path*", "/categories/:path*", "/branches/:path*", "/users/:path*", "/pos/:path*", "/cash/:path*", "/reports/:path*", "/inventory/:path*", "/kitchen/:path*", "/clientes-frecuentes/:path*", "/plataforma/:path*", "/facturacion/:path*"],
+ };
+diff --git a/src/modules/loyalty/guard.ts b/src/modules/loyalty/guard.ts
+new file mode 100644
+index 0000000..9d415d1
+--- /dev/null
++++ b/src/modules/loyalty/guard.ts
+@@ -0,0 +1,36 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, type TenantContext } from "@/lib/tenant-context";
++import { hasPermission, type PermissionKey } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++
++/**
++ * Validación común de las rutas de /api/loyalty (staff): sesión, empresa, permiso y que la
++ * empresa tenga la feature "clientes_frecuentes" en su plan.
++ */
++export async function loyaltyGuard(
++  permission: PermissionKey
++): Promise<{ ctx: TenantContext; companyId: string; error?: undefined } | { error: NextResponse }> {
++  let ctx: TenantContext;
++  try {
++    ctx = await getTenantContext();
++  } catch {
++    return { error: NextResponse.json({ error: "No autenticado" }, { status: 401 }) };
++  }
++  if (!ctx.companyId) {
++    return { error: NextResponse.json({ error: "Se requiere una empresa" }, { status: 403 }) };
++  }
++  if (!hasPermission(ctx.permissions, permission)) {
++    return { error: NextResponse.json({ error: "No tienes permiso para esta acción" }, { status: 403 }) };
++  }
++  if (!(await hasFeature(ctx.companyId, FEATURE_KEYS.CLIENTES_FRECUENTES))) {
++    return {
++      error: NextResponse.json({ error: "Tu plan no incluye el programa de clientes frecuentes" }, { status: 403 }),
++    };
++  }
++  return { ctx, companyId: ctx.companyId };
++}
++
++export function errorResponse(err: unknown, fallback: string) {
++  return NextResponse.json({ error: err instanceof Error ? err.message : fallback }, { status: 400 });
++}
+diff --git a/src/modules/loyalty/service.ts b/src/modules/loyalty/service.ts
+new file mode 100644
+index 0000000..2629c3e
+--- /dev/null
++++ b/src/modules/loyalty/service.ts
+@@ -0,0 +1,404 @@
++import { randomBytes, randomInt } from "crypto";
++import { z } from "zod";
++import { prisma } from "@/lib/prisma";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++
++/**
++ * Programa de clientes frecuentes.
++ *
++ * Cada cliente tiene una tarjeta digital con un QR personal fijo (Customer.cardToken).
++ * El personal del restaurante escanea ese QR para registrar una visita (compra) y,
++ * al llegar a `visitsRequired`, canjea el descuento. Funciona con o sin POS.
++ *
++ * Reglas de seguridad:
++ *  - Solo el personal con sesión iniciada puede registrar visitas y canjes (el cliente
++ *    tiene que estar presente); el cliente nunca se auto-suma visitas.
++ *  - Todo se filtra por companyId; el token del QR por sí solo no da acceso a otra empresa.
++ *  - Visita y canje se hacen dentro de una transacción con bloqueo de fila, para que dos
++ *    escaneos simultáneos no sumen doble ni canjeen dos veces.
++ */
++
++const TZ = "America/Monterrey";
++const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // sin 0/O/1/I para que sea fácil de teclear
++
++const newToken = (bytes: number) => randomBytes(bytes).toString("base64url");
++
++function newShortCode(): string {
++  let code = "";
++  for (let i = 0; i < 6; i++) code += CODE_ALPHABET[randomInt(CODE_ALPHABET.length)];
++  return code;
++}
++
++/** Día calendario ("YYYY-MM-DD") en la zona horaria de México, para "una visita por día". */
++function dayKey(date: Date): string {
++  return new Intl.DateTimeFormat("en-CA", { timeZone: TZ }).format(date);
++}
++
++export function normalizePhone(raw: string): string {
++  let digits = raw.replace(/\D/g, "");
++  if (digits.length === 13 && digits.startsWith("521")) digits = digits.slice(3);
++  else if (digits.length === 12 && digits.startsWith("52")) digits = digits.slice(2);
++  if (digits.length !== 10) throw new Error("Escribe un celular de 10 dígitos");
++  return digits;
++}
++
++export function describeDiscount(type: "PERCENT" | "FIXED", value: number): string {
++  return type === "PERCENT" ? `${value}% de descuento` : `$${value} MXN de descuento`;
++}
++
++export const programSchema = z
++  .object({
++    isActive: z.boolean().optional(),
++    visitsRequired: z.coerce.number().int("Debe ser un número entero").min(2, "Mínimo 2 visitas").max(50, "Máximo 50 visitas").optional(),
++    discountType: z.enum(["PERCENT", "FIXED"]).optional(),
++    discountValue: z.coerce.number().positive("El descuento debe ser mayor a 0").max(100000).optional(),
++    oneVisitPerDay: z.boolean().optional(),
++    displayName: z.string().trim().max(60).nullable().optional(),
++  })
++  .refine((v) => !(v.discountType === "PERCENT" && v.discountValue !== undefined && v.discountValue > 100), {
++    message: "Un descuento en porcentaje no puede pasar de 100",
++  });
++
++export const enrollSchema = z.object({
++  name: z.string().trim().min(2, "Escribe tu nombre").max(80),
++  phone: z.string().trim().min(1, "Escribe tu celular"),
++});
++
++type ProgramRow = NonNullable<Awaited<ReturnType<typeof prisma.loyaltyProgram.findUnique>>>;
++
++function serializeProgram(p: ProgramRow) {
++  return {
++    id: p.id,
++    isActive: p.isActive,
++    visitsRequired: p.visitsRequired,
++    discountType: p.discountType as "PERCENT" | "FIXED",
++    discountValue: Number(p.discountValue),
++    oneVisitPerDay: p.oneVisitPerDay,
++    signupToken: p.signupToken,
++    displayName: p.displayName,
++  };
++}
++
++type CustomerRow = {
++  id: string;
++  name: string;
++  phone: string | null;
++  shortCode: string | null;
++  visitsInCycle: number;
++  lastVisitAt: Date | null;
++};
++
++function summarize(customer: CustomerRow, program: ProgramRow) {
++  const required = program.visitsRequired;
++  const visitedToday =
++    program.oneVisitPerDay && !!customer.lastVisitAt && dayKey(customer.lastVisitAt) === dayKey(new Date());
++  return {
++    id: customer.id,
++    name: customer.name,
++    phone: customer.phone,
++    shortCode: customer.shortCode,
++    visits: customer.visitsInCycle,
++    required,
++    rewardAvailable: customer.visitsInCycle >= required,
++    visitedToday,
++    lastVisitAt: customer.lastVisitAt,
++    programActive: program.isActive,
++    discountText: describeDiscount(program.discountType as "PERCENT" | "FIXED", Number(program.discountValue)),
++  };
++}
++
++async function getProgramRow(companyId: string): Promise<ProgramRow> {
++  // upsert: la primera vez que la empresa entra al módulo se crea su programa con el QR de alta.
++  return prisma.loyaltyProgram.upsert({
++    where: { companyId },
++    update: {},
++    create: { companyId, signupToken: newToken(16) },
++  });
++}
++
++async function uniqueShortCode(companyId: string): Promise<string> {
++  for (let i = 0; i < 10; i++) {
++    const code = newShortCode();
++    const taken = await prisma.customer.findFirst({ where: { companyId, shortCode: code }, select: { id: true } });
++    if (!taken) return code;
++  }
++  throw new Error("No se pudo generar el código de la tarjeta, intenta de nuevo");
++}
++
++async function enroll(
++  companyId: string,
++  input: z.infer<typeof enrollSchema>,
++  opts: { userId?: string }
++) {
++  const phone = normalizePhone(input.phone);
++  const existing = await prisma.customer.findFirst({ where: { companyId, phone } });
++
++  if (existing?.cardToken) {
++    // Registro público: NO se entrega la tarjeta de alguien que ya la tiene (si no, cualquiera que
++    // conozca un celular podría quedarse con su tarjeta). El personal sí puede recuperarla.
++    if (!opts.userId) {
++      throw new Error("Este número ya está registrado. Pide tu tarjeta al personal del restaurante.");
++    }
++    return { customer: existing, created: false };
++  }
++
++  const cardData = {
++    cardToken: newToken(24),
++    shortCode: await uniqueShortCode(companyId),
++    loyaltyJoinedAt: new Date(),
++  };
++
++  const customer = existing
++    ? await prisma.customer.update({ where: { id: existing.id }, data: cardData })
++    : await prisma.customer.create({ data: { companyId, name: input.name, phone, ...cardData } });
++
++  if (opts.userId) {
++    await prisma.auditLog.create({
++      data: {
++        companyId,
++        userId: opts.userId,
++        action: "LOYALTY_ENROLL",
++        entity: "Customer",
++        entityId: customer.id,
++        newData: { name: customer.name },
++      },
++    });
++  }
++  return { customer, created: true };
++}
++
++/** Bloquea la fila del cliente durante la transacción (evita doble visita / doble canje simultáneos). */
++async function lockCustomer(tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0], companyId: string, customerId: string) {
++  const rows = await tx.$queryRaw<{ id: string }[]>`
++    SELECT id FROM customers WHERE id = ${customerId} AND "companyId" = ${companyId} FOR UPDATE`;
++  if (rows.length === 0) throw new Error("Cliente no encontrado");
++}
++
++export const loyaltyService = {
++  // ───────────── Administración (LOYALTY_MANAGE) ─────────────
++  async getProgram(companyId: string) {
++    return serializeProgram(await getProgramRow(companyId));
++  },
++
++  async updateProgram(companyId: string, userId: string, input: z.infer<typeof programSchema>) {
++    const before = await getProgramRow(companyId);
++    const type = input.discountType ?? before.discountType;
++    const value = input.discountValue ?? Number(before.discountValue);
++    if (type === "PERCENT" && value > 100) throw new Error("Un descuento en porcentaje no puede pasar de 100");
++
++    const updated = await prisma.loyaltyProgram.update({
++      where: { companyId },
++      data: {
++        ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
++        ...(input.visitsRequired !== undefined ? { visitsRequired: input.visitsRequired } : {}),
++        ...(input.discountType !== undefined ? { discountType: input.discountType } : {}),
++        ...(input.discountValue !== undefined ? { discountValue: input.discountValue } : {}),
++        ...(input.oneVisitPerDay !== undefined ? { oneVisitPerDay: input.oneVisitPerDay } : {}),
++        ...(input.displayName !== undefined ? { displayName: input.displayName || null } : {}),
++      },
++    });
++
++    await prisma.auditLog.create({
++      data: {
++        companyId,
++        userId,
++        action: "LOYALTY_PROGRAM_UPDATE",
++        entity: "LoyaltyProgram",
++        entityId: updated.id,
++        previousData: serializeProgram(before) as object,
++        newData: serializeProgram(updated) as object,
++      },
++    });
++    return serializeProgram(updated);
++  },
++
++  /** Genera un QR de alta nuevo (el anterior deja de funcionar). Útil si alguien lo está usando mal. */
++  async rotateSignupToken(companyId: string, userId: string) {
++    await getProgramRow(companyId);
++    const updated = await prisma.loyaltyProgram.update({ where: { companyId }, data: { signupToken: newToken(16) } });
++    await prisma.auditLog.create({
++      data: { companyId, userId, action: "LOYALTY_SIGNUP_QR_ROTATE", entity: "LoyaltyProgram", entityId: updated.id },
++    });
++    return serializeProgram(updated);
++  },
++
++  async stats(companyId: string) {
++    const program = await getProgramRow(companyId);
++    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
++    const [customers, visits, redemptions, pending] = await Promise.all([
++      prisma.customer.count({ where: { companyId, cardToken: { not: null } } }),
++      prisma.loyaltyVisit.count({ where: { companyId, createdAt: { gte: since } } }),
++      prisma.loyaltyRedemption.count({ where: { companyId, createdAt: { gte: since } } }),
++      prisma.customer.count({
++        where: { companyId, cardToken: { not: null }, visitsInCycle: { gte: program.visitsRequired } },
++      }),
++    ]);
++    return { customers, visits30d: visits, redemptions30d: redemptions, pendingRewards: pending };
++  },
++
++  async listCustomers(companyId: string, q?: string) {
++    const term = q?.trim();
++    const digits = term?.replace(/\D/g, "");
++    return prisma.customer.findMany({
++      where: {
++        companyId,
++        cardToken: { not: null },
++        ...(term
++          ? {
++              OR: [
++                { name: { contains: term, mode: "insensitive" as const } },
++                ...(digits ? [{ phone: { contains: digits } }] : []),
++                { shortCode: { equals: term.toUpperCase() } },
++              ],
++            }
++          : {}),
++      },
++      orderBy: [{ lastVisitAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
++      take: 200,
++      select: {
++        id: true,
++        name: true,
++        phone: true,
++        cardToken: true,
++        shortCode: true,
++        visitsInCycle: true,
++        lastVisitAt: true,
++        createdAt: true,
++      },
++    });
++  },
++
++  // ───────────── Operación del personal (LOYALTY_SCAN) ─────────────
++  /** Acepta el contenido del QR (URL de la tarjeta), el token solo, o el código corto de 6 caracteres. */
++  async lookup(companyId: string, rawCode: string) {
++    const code = rawCode.trim();
++    if (!code) throw new Error("Escanea una tarjeta o escribe el código");
++
++    const fromUrl = code.match(/tarjeta\/([A-Za-z0-9_-]{20,})/);
++    const token = fromUrl ? fromUrl[1] : /^[A-Za-z0-9_-]{20,}$/.test(code) ? code : null;
++
++    const customer = token
++      ? await prisma.customer.findFirst({ where: { companyId, cardToken: token } })
++      : await prisma.customer.findFirst({
++          where: { companyId, shortCode: code.toUpperCase().replace(/[^A-Z0-9]/g, "") },
++        });
++    if (!customer) throw new Error("No encontramos esa tarjeta en este restaurante");
++
++    return summarize(customer, await getProgramRow(companyId));
++  },
++
++  async enrollByStaff(companyId: string, userId: string, input: z.infer<typeof enrollSchema>) {
++    const { customer, created } = await enroll(companyId, input, { userId });
++    const program = await getProgramRow(companyId);
++    return { customer: summarize(customer, program), cardToken: customer.cardToken as string, created };
++  },
++
++  async registerVisit(companyId: string, userId: string, branchId: string | null, customerId: string) {
++    return prisma.$transaction(async (tx) => {
++      await lockCustomer(tx, companyId, customerId);
++      const customer = await tx.customer.findFirstOrThrow({ where: { id: customerId, companyId } });
++      const program = await tx.loyaltyProgram.findUnique({ where: { companyId } });
++      if (!program || !program.isActive) throw new Error("El programa de clientes frecuentes está pausado");
++
++      const now = new Date();
++      if (program.oneVisitPerDay && customer.lastVisitAt && dayKey(customer.lastVisitAt) === dayKey(now)) {
++        throw new Error("Este cliente ya registró una visita hoy");
++      }
++
++      await tx.loyaltyVisit.create({ data: { companyId, customerId, branchId, userId } });
++      const updated = await tx.customer.update({
++        where: { id: customerId },
++        data: { visitsInCycle: { increment: 1 }, lastVisitAt: now },
++      });
++      return summarize(updated, program);
++    });
++  },
++
++  async redeem(companyId: string, userId: string, branchId: string | null, customerId: string) {
++    return prisma.$transaction(async (tx) => {
++      await lockCustomer(tx, companyId, customerId);
++      const customer = await tx.customer.findFirstOrThrow({ where: { id: customerId, companyId } });
++      const program = await tx.loyaltyProgram.findUnique({ where: { companyId } });
++      if (!program || !program.isActive) throw new Error("El programa de clientes frecuentes está pausado");
++      if (customer.visitsInCycle < program.visitsRequired) {
++        throw new Error(`Aún no llega a ${program.visitsRequired} visitas`);
++      }
++
++      const redemption = await tx.loyaltyRedemption.create({
++        data: {
++          companyId,
++          customerId,
++          branchId,
++          userId,
++          discountType: program.discountType,
++          discountValue: program.discountValue,
++          visitsUsed: program.visitsRequired,
++        },
++      });
++      // Se descuentan solo las visitas del ciclo: si el cliente ya llevaba de más, el excedente se conserva.
++      const updated = await tx.customer.update({
++        where: { id: customerId },
++        data: { visitsInCycle: { decrement: program.visitsRequired } },
++      });
++      await tx.auditLog.create({
++        data: {
++          companyId,
++          userId,
++          action: "LOYALTY_REDEEM",
++          entity: "Customer",
++          entityId: customerId,
++          newData: {
++            redemptionId: redemption.id,
++            discountType: program.discountType,
++            discountValue: Number(program.discountValue),
++            visitsUsed: program.visitsRequired,
++          },
++        },
++      });
++      return { ...summarize(updated, program), redeemed: describeDiscount(program.discountType as "PERCENT" | "FIXED", Number(program.discountValue)) };
++    });
++  },
++
++  // ───────────── Público (cliente final, sin sesión) ─────────────
++  /** Datos de la página de registro. null = el programa no existe, está pausado o la empresa no lo tiene contratado. */
++  async getSignupInfo(signupToken: string) {
++    const program = await prisma.loyaltyProgram.findUnique({
++      where: { signupToken },
++      include: { company: { select: { name: true, status: true } } },
++    });
++    if (!program || !program.isActive || program.company.status !== "ACTIVE") return null;
++    if (!(await hasFeature(program.companyId, FEATURE_KEYS.CLIENTES_FRECUENTES))) return null;
++    return {
++      restaurantName: program.displayName || program.company.name,
++      visitsRequired: program.visitsRequired,
++      discountText: describeDiscount(program.discountType as "PERCENT" | "FIXED", Number(program.discountValue)),
++    };
++  },
++
++  async registerPublic(signupToken: string, input: z.infer<typeof enrollSchema>) {
++    const program = await prisma.loyaltyProgram.findUnique({ where: { signupToken } });
++    if (!program || !program.isActive) throw new Error("Este programa no está disponible");
++    if (!(await hasFeature(program.companyId, FEATURE_KEYS.CLIENTES_FRECUENTES))) {
++      throw new Error("Este programa no está disponible");
++    }
++    const { customer } = await enroll(program.companyId, input, {});
++    return { cardToken: customer.cardToken as string };
++  },
++
++  /** Datos de la tarjeta digital del cliente. */
++  async getCard(cardToken: string) {
++    const customer = await prisma.customer.findUnique({
++      where: { cardToken },
++      include: { company: { select: { name: true, status: true } } },
++    });
++    if (!customer || customer.company.status !== "ACTIVE") return null;
++    if (!(await hasFeature(customer.companyId, FEATURE_KEYS.CLIENTES_FRECUENTES))) return null;
++
++    const program = await getProgramRow(customer.companyId);
++    return {
++      ...summarize(customer, program),
++      restaurantName: program.displayName || customer.company.name,
++    };
++  },
++};

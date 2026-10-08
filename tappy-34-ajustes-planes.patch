@@ -1,0 +1,261 @@
+From 8e37c6aa00e948e1e04dda22ed99da97b063d8f9 Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Sat, 3 Oct 2026 16:56:35 +0000
+Subject: [PATCH] Planes: quitar duplicados en tarjetas, estatus reales de las
+ extensiones, catalogo cubre la pagina publica, arreglar caracteres raros
+
+---
+ src/app/api/plans/[id]/route.ts               | 22 +++++
+ .../plataforma/companies/companies-table.tsx  |  2 +-
+ src/app/plataforma/plans/plans-client.tsx     | 84 +++++++++++++------
+ src/lib/plan-features.ts                      | 72 +++++++++++-----
+ 4 files changed, 131 insertions(+), 49 deletions(-)
+
+diff --git a/src/app/api/plans/[id]/route.ts b/src/app/api/plans/[id]/route.ts
+index 59f3580..c59f599 100644
+--- a/src/app/api/plans/[id]/route.ts
++++ b/src/app/api/plans/[id]/route.ts
+@@ -24,5 +24,27 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
+   }
+ 
+   const plan = await prisma.plan.update({ where: { id: params.id }, data: parsed.data });
++
++  // Los límites reales que se aplican a cada empresa viven en su License
++  // (se copian del plan al crear la empresa o al cambiarle de plan). Si Jose
++  // cambia aquí sucursales/usuarios/cajas, las empresas que ya están en este
++  // plan deben recibir el nuevo límite también; si no, el cambio solo
++  // afectaría a las empresas que se den de alta después.
++  const limitsChanged =
++    parsed.data.maxBranches !== undefined ||
++    parsed.data.maxUsers !== undefined ||
++    parsed.data.maxCashRegisters !== undefined;
++
++  if (limitsChanged) {
++    await prisma.license.updateMany({
++      where: { subscription: { planId: plan.id } },
++      data: {
++        allowedBranches: plan.maxBranches,
++        allowedUsers: plan.maxUsers,
++        allowedCashRegisters: plan.maxCashRegisters,
++      },
++    });
++  }
++
+   return NextResponse.json({ plan });
+ }
+diff --git a/src/app/plataforma/companies/companies-table.tsx b/src/app/plataforma/companies/companies-table.tsx
+index 8d1e5a4..2ba7c41 100644
+--- a/src/app/plataforma/companies/companies-table.tsx
++++ b/src/app/plataforma/companies/companies-table.tsx
+@@ -232,7 +232,7 @@ export function CompaniesTable({
+                     )}
+                     {c.status !== "CANCELLED" && (
+                       <Button variant="ghost" onClick={() => cancelSubscription(c)} className="text-ember-dark hover:bg-ember/10">
+-                        Cancelar suscripci\u00f3n
++                        Cancelar suscripción
+                       </Button>
+                     )}
+                     <Button variant="ghost" onClick={() => deleteCompany(c)} className="text-ember-dark hover:bg-ember/10">
+diff --git a/src/app/plataforma/plans/plans-client.tsx b/src/app/plataforma/plans/plans-client.tsx
+index 62b0d5d..0fc7395 100644
+--- a/src/app/plataforma/plans/plans-client.tsx
++++ b/src/app/plataforma/plans/plans-client.tsx
+@@ -23,29 +23,50 @@ const PLAN_ACCENTS: Record<string, string> = {
+   Empresarial: "border-marigold",
+ };
+ 
+-export function PlansClient({ initialPlans }: { initialPlans: Plan[] }) {
+-  const [plans, setPlans] = useState(initialPlans);
+-  const [editing, setEditing] = useState<Plan | null>(null);
++// Strings viejos de prisma/seed.ts que describen capacidad ("1 sucursal",
++// "Hasta 3 usuarios", "Multi-sucursal", "Cajas ampliadas"...). La tarjeta ya
++// calcula esas líneas desde los números reales del plan (sucursales /
++// usuarios / cajas), así que mostrarlas otra vez las duplicaba. Solo se
++// OCULTAN en pantalla — el dato guardado en la base no se toca.
++const LEGACY_CAPACITY_RE =
++  /^(?:hasta\s+)?\d+\s+(?:sucursal(?:es)?|cajas?|usuarios?)$|^multi-?sucursal$|^cajas ampliadas$|^usuarios ampliados$/i;
+ 
+ function buildDisplayFeatures(plan: Plan): string[] {
+   // No tocar lo que ya funciona: cualquier string guardado que no sea una
+-  // key del catálogo nuevo (ej. las labels viejas de prisma/seed.ts como
+-  // "Auditoría" o "Pantalla de cocina (sin impresora)") se muestra tal cual,
+-  // sin filtrarlo. Solo las keys nuevas del catálogo se traducen a su label.
+-  const nonCapacity = (plan.features ?? []).map((f) => (VALID_FEATURE_KEYS.has(f) ? featureLabel(f) : f));
+-
+-  if (plan.name === "Empresarial") {
+-    return ["Multi-sucursal", `Hasta ${plan.maxCashRegisters} cajas`, `Hasta ${plan.maxUsers} usuarios`, ...nonCapacity];
+-  }
+-
+-  return [
+-    `${plan.maxBranches} sucursal${plan.maxBranches === 1 ? "" : "es"}`,
+-    `Hasta ${plan.maxCashRegisters} caja${plan.maxCashRegisters === 1 ? "" : "s"}`,
+-    `Hasta ${plan.maxUsers} usuario${plan.maxUsers === 1 ? "" : "s"}`,
+-    ...nonCapacity,
+-  ];
++  // key del catálogo (ej. las labels viejas de prisma/seed.ts como
++  // "Auditoría" o "Pantalla de cocina (sin impresora)") se muestra tal cual.
++  // Solo las keys del catálogo se traducen a su label.
++  const nonCapacity = (plan.features ?? [])
++    .map((f) => (VALID_FEATURE_KEYS.has(f) ? featureLabel(f) : f))
++    .filter((label) => !LEGACY_CAPACITY_RE.test(label.trim()));
++
++  const capacity =
++    plan.name === "Empresarial"
++      ? [
++          `Hasta ${plan.maxBranches} sucursales`,
++          `Hasta ${plan.maxCashRegisters} cajas`,
++          `Hasta ${plan.maxUsers} usuarios`,
++        ]
++      : [
++          `${plan.maxBranches} sucursal${plan.maxBranches === 1 ? "" : "es"}`,
++          `Hasta ${plan.maxCashRegisters} caja${plan.maxCashRegisters === 1 ? "" : "s"}`,
++          `Hasta ${plan.maxUsers} usuario${plan.maxUsers === 1 ? "" : "s"}`,
++        ];
++
++  // Sin repetidos (sin importar mayúsculas/acentos de más)
++  const seen = new Set<string>();
++  return [...capacity, ...nonCapacity].filter((label) => {
++    const key = label.trim().toLowerCase();
++    if (seen.has(key)) return false;
++    seen.add(key);
++    return true;
++  });
+ }
+ 
++export function PlansClient({ initialPlans }: { initialPlans: Plan[] }) {
++  const [plans, setPlans] = useState(initialPlans);
++  const [editing, setEditing] = useState<Plan | null>(null);
++
+   function handleUpdated(updated: Plan) {
+     setPlans((prev) => prev.map((p) => (p.id === updated.id ? { ...p, ...updated } : p)));
+     setEditing(null);
+@@ -160,7 +181,7 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () =>
+         </Field>
+ 
+         <Field label="Características incluidas">
+-          <div className="grid grid-cols-1 gap-1.5 max-h-56 overflow-y-auto border border-line rounded-md p-3">
++          <div className="grid grid-cols-1 gap-1.5 max-h-72 overflow-y-auto border border-line rounded-md p-3">
+             {FEATURE_CATALOG.map((feature) => (
+               <label key={feature.key} className="flex items-start gap-2 text-sm cursor-pointer">
+                 <input
+@@ -170,13 +191,24 @@ function EditPlanModal({ plan, onClose, onSaved }: { plan: Plan; onClose: () =>
+                   onChange={() => toggleFeature(feature.key)}
+                 />
+                 <span className="flex-1">{feature.label}</span>
+-                {feature.status !== "live" && (
+-                  <span
+-                    className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${
+-                      feature.status === "partial" ? "bg-marigold/20 text-marigold-dark" : "bg-ink-100 text-muted"
+-                    }`}
+-                  >
+-                    {feature.status === "partial" ? "parcial" : "sin construir"}
++                {feature.status === "planned" && (
++                  <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-ink-100 text-muted">
++                    sin construir
++                  </span>
++                )}
++                {feature.status === "partial" && (
++                  <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-marigold/20 text-marigold-dark">
++                    parcial
++                  </span>
++                )}
++                {feature.status === "live" && !feature.enforced && (
++                  <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-sage/15 text-sage">
++                    en todos los planes
++                  </span>
++                )}
++                {feature.status === "live" && feature.enforced && (
++                  <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-ember/10 text-ember-dark">
++                    se bloquea por plan
+                   </span>
+                 )}
+               </label>
+diff --git a/src/lib/plan-features.ts b/src/lib/plan-features.ts
+index ba9c0b5..7f7aa1a 100644
+--- a/src/lib/plan-features.ts
++++ b/src/lib/plan-features.ts
+@@ -25,31 +25,59 @@ export interface FeatureDef {
+   key: string;
+   label: string;
+   status: FeatureStatus;
++  /**
++   * true = el código SÍ bloquea esta función a las empresas cuyo plan no la
++   * incluye (hasFeature()). false = la función existe (o no) pero marcarla o
++   * desmarcarla en un plan todavía no cambia lo que la empresa puede hacer;
++   * hoy es solo la promesa comercial. El editor de planes lo muestra.
++   */
++  enforced: boolean;
+ }
+ 
+ export const FEATURE_CATALOG: FeatureDef[] = [
+-  { key: "menus_por_turno", label: "Menús por turno/hora", status: "planned" },
+-  { key: "gestion_mesas", label: "Gestión de mesas", status: "live" },
+-  { key: "comandas_cocina", label: "Comandas digitales para cocina", status: "live" },
+-  { key: "automatizaciones_avanzadas", label: "Automatizaciones avanzadas", status: "planned" },
+-  { key: "integracion_delivery", label: "Integración con delivery (Uber Eats, DoorDash, Rappi)", status: "planned" },
+-  { key: "whatsapp_business", label: "WhatsApp Business", status: "partial" },
+-  { key: "pagos_integrados", label: "Pagos integrados (tarjetas desde el POS)", status: "partial" },
+-  { key: "api_basica", label: "API básica", status: "planned" },
+-  { key: "conexion_contpaq_sat", label: "Conexión con Contpaq/SAT", status: "planned" },
+-  { key: "dashboard_avanzado", label: "Dashboard avanzado (15+ gráficos)", status: "partial" },
+-  { key: "control_acceso_rol", label: "Control de acceso por rol", status: "live" },
+-  { key: "auditoria_cajas", label: "Auditoría de cajas", status: "partial" },
+-  { key: "soporte_prioritario", label: "Soporte prioritario (4h)", status: "planned" },
+-  { key: "inventario_compartido", label: "Inventario compartido entre sucursales", status: "planned" },
+-  { key: "transferencias_automaticas", label: "Transferencias automáticas entre sucursales", status: "planned" },
+-  { key: "costeo_receta", label: "Costeo por receta", status: "planned" },
+-  { key: "dashboard_empresarial", label: "Dashboard empresarial (30+ métricas)", status: "planned" },
+-  { key: "reportes_consolidados", label: "Reportes consolidados", status: "planned" },
+-  { key: "proyecciones_ia", label: "Proyecciones con IA básica", status: "planned" },
+-  { key: "auditoria_avanzada", label: "Auditoría avanzada", status: "partial" },
+-  { key: "multi_moneda", label: "Multi-moneda", status: "planned" },
+-  { key: "soporte_247", label: "Soporte 24/7 con gestor de cuenta dedicado", status: "planned" },
++  // ── Construidas y bloqueadas por plan ───────────────────────────────
++  { key: "gestion_mesas", label: "Gestión de mesas", status: "live", enforced: true },
++  { key: "pagos_integrados", label: "Pagos integrados (tarjetas desde el POS)", status: "live", enforced: true },
++  { key: "whatsapp_business", label: "WhatsApp Business", status: "live", enforced: true },
++  { key: "dashboard_empresarial", label: "Dashboard empresarial", status: "live", enforced: true },
++
++  // ── Construidas pero disponibles en todos los planes (marcarlas no cambia nada todavía) ──
++  { key: "comandas_cocina", label: "Comandas digitales para cocina", status: "live", enforced: false },
++  { key: "control_acceso_rol", label: "Control de acceso por rol (Permisos por usuario)", status: "live", enforced: false },
++  { key: "auditoria_avanzada", label: "Auditoría avanzada", status: "live", enforced: false },
++  { key: "dashboard", label: "Dashboard", status: "live", enforced: false },
++  { key: "reportes_avanzados", label: "Reportes avanzados", status: "live", enforced: false },
++  { key: "historial_movimientos", label: "Historial de movimientos", status: "live", enforced: false },
++
++  // ── Construidas a medias ────────────────────────────────────────────
++  { key: "inventario_avanzado", label: "Inventario avanzado", status: "partial", enforced: false },
++  { key: "promociones_descuentos", label: "Promociones y descuentos", status: "partial", enforced: false },
++  { key: "multi_sucursal", label: "Multi-sucursal", status: "partial", enforced: false },
++  { key: "dashboard_avanzado", label: "Dashboard avanzado (15+ gráficos)", status: "partial", enforced: false },
++  { key: "auditoria_cajas", label: "Auditoría de cajas", status: "partial", enforced: false },
++
++  // ── Sin construir (hoy solo son promesa comercial) ──────────────────
++  { key: "compras_proveedores", label: "Compras y proveedores", status: "planned", enforced: false },
++  { key: "alertas", label: "Alertas", status: "planned", enforced: false },
++  { key: "exportacion_informacion", label: "Exportación de información", status: "planned", enforced: false },
++  { key: "automatizaciones_basicas", label: "Automatizaciones básicas", status: "planned", enforced: false },
++  { key: "automatizaciones_avanzadas", label: "Automatizaciones avanzadas", status: "planned", enforced: false },
++  { key: "api_basica", label: "API básica", status: "planned", enforced: false },
++  { key: "api_avanzada", label: "API avanzada", status: "planned", enforced: false },
++  { key: "permisos_avanzados", label: "Permisos avanzados", status: "planned", enforced: false },
++  { key: "inventario_compartido", label: "Inventario compartido entre sucursales", status: "planned", enforced: false },
++  { key: "reportes_consolidados", label: "Reportes consolidados", status: "planned", enforced: false },
++  { key: "transferencias_automaticas", label: "Transferencias automáticas entre sucursales", status: "planned", enforced: false },
++  { key: "menus_por_turno", label: "Menús por turno/hora", status: "planned", enforced: false },
++  { key: "integracion_delivery", label: "Integración con delivery (Uber Eats, DoorDash, Rappi)", status: "planned", enforced: false },
++  { key: "conexion_contpaq_sat", label: "Conexión con Contpaq/SAT", status: "planned", enforced: false },
++  { key: "costeo_receta", label: "Costeo por receta", status: "planned", enforced: false },
++  { key: "proyecciones_ia", label: "Proyecciones con IA básica", status: "planned", enforced: false },
++  { key: "multi_moneda", label: "Multi-moneda", status: "planned", enforced: false },
++
++  // ── Servicio humano (no es código, nunca debería bloquear nada) ─────
++  { key: "soporte_prioritario", label: "Soporte prioritario (4h)", status: "planned", enforced: false },
++  { key: "soporte_247", label: "Soporte 24/7 con gestor de cuenta dedicado", status: "planned", enforced: false },
+ ];
+ 
+ export const FEATURE_KEYS = FEATURE_CATALOG.reduce(
+-- 
+2.43.0
+

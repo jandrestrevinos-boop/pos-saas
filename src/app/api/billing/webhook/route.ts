@@ -34,8 +34,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, skipped: true });
   }
 
-  try {
+      try {
+    console.log("[billing-webhook] aviso recibido", { topic, resourceId });
     const result = await billingService.handleNotification(topic, String(resourceId));
+    console.log("[billing-webhook] resultado", JSON.stringify(result));
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     console.error("Error procesando webhook de cobro de suscripción:", err);

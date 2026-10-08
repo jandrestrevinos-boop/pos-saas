@@ -1,0 +1,850 @@
+From 760aa0fa918df41311bc28e47838d917963ce98e Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Sun, 4 Oct 2026 06:00:47 +0000
+Subject: [PATCH] Multi-sucursal base: crear/editar/desactivar sucursales con
+ limite del plan, selector de sucursal activa, usuarios por sucursal, planes
+ alineados con la pagina
+
+---
+ .../migration.sql                             |  40 ++++
+ .../(company)/branches/branches-client.tsx    | 191 ++++++++++++++++++
+ src/app/(company)/branches/page.tsx           |  55 ++---
+ src/app/(company)/layout.tsx                  |  23 ++-
+ src/app/(company)/users/page.tsx              |   9 +-
+ src/app/(company)/users/users-table.tsx       |  25 ++-
+ src/app/api/branches/[id]/route.ts            |  25 +++
+ src/app/api/branches/active/route.ts          |  34 ++++
+ src/app/api/branches/route.ts                 |  25 +++
+ src/components/sidebar-nav.tsx                |  33 +++
+ src/lib/plan-features.ts                      |   6 +-
+ src/lib/tenant-context.ts                     |  25 ++-
+ src/modules/branches/service.ts               | 115 +++++++++++
+ src/modules/users/service.ts                  |   8 +-
+ 14 files changed, 567 insertions(+), 47 deletions(-)
+ create mode 100644 prisma/migrations/20261004120000_planes_alineados_pagina/migration.sql
+ create mode 100644 src/app/(company)/branches/branches-client.tsx
+ create mode 100644 src/app/api/branches/[id]/route.ts
+ create mode 100644 src/app/api/branches/active/route.ts
+ create mode 100644 src/app/api/branches/route.ts
+ create mode 100644 src/modules/branches/service.ts
+
+diff --git a/prisma/migrations/20261004120000_planes_alineados_pagina/migration.sql b/prisma/migrations/20261004120000_planes_alineados_pagina/migration.sql
+new file mode 100644
+index 0000000..c253c96
+--- /dev/null
++++ b/prisma/migrations/20261004120000_planes_alineados_pagina/migration.sql
+@@ -0,0 +1,40 @@
++-- Alinea los planes con la página pública (tappysoftware.com).
++-- SOLO AGREGA características que faltan: nunca quita ni reordena las que ya
++-- tenga cada plan, así que no rompe lo que ya está configurado ni a las
++-- empresas actuales. (Para quitar algo de un plan, se hace desde Super Admin → Planes.)
++--
++-- Profesional y Empresarial reciben ACTIVAS las funciones de WhatsApp Business y
++-- Pagos integrados (Mercado Pago). Empresarial recibe además lo propio de multi-sucursal.
++
++UPDATE "plans" SET "features" = COALESCE("features", '[]'::jsonb) || (
++  SELECT COALESCE(jsonb_agg(k), '[]'::jsonb)
++  FROM jsonb_array_elements_text('[
++    "automatizaciones_basicas","comandas_cocina","control_acceso_rol","dashboard","reportes_avanzados",
++    "historial_movimientos","alertas","exportacion_informacion","inventario_avanzado"
++  ]'::jsonb) AS k
++  WHERE NOT (COALESCE("features", '[]'::jsonb) @> to_jsonb(k))
++)
++WHERE "name" = 'Básico';
++
++UPDATE "plans" SET "features" = COALESCE("features", '[]'::jsonb) || (
++  SELECT COALESCE(jsonb_agg(k), '[]'::jsonb)
++  FROM jsonb_array_elements_text('[
++    "automatizaciones_basicas","automatizaciones_avanzadas","whatsapp_business","pagos_integrados",
++    "comandas_cocina","control_acceso_rol","dashboard","reportes_avanzados",
++    "historial_movimientos","alertas","exportacion_informacion","inventario_avanzado"
++  ]'::jsonb) AS k
++  WHERE NOT (COALESCE("features", '[]'::jsonb) @> to_jsonb(k))
++)
++WHERE "name" = 'Profesional';
++
++UPDATE "plans" SET "features" = COALESCE("features", '[]'::jsonb) || (
++  SELECT COALESCE(jsonb_agg(k), '[]'::jsonb)
++  FROM jsonb_array_elements_text('[
++    "automatizaciones_basicas","automatizaciones_avanzadas","whatsapp_business","pagos_integrados",
++    "comandas_cocina","control_acceso_rol","dashboard","reportes_avanzados",
++    "historial_movimientos","alertas","exportacion_informacion","inventario_avanzado",
++    "dashboard_empresarial","multi_sucursal","auditoria_avanzada"
++  ]'::jsonb) AS k
++  WHERE NOT (COALESCE("features", '[]'::jsonb) @> to_jsonb(k))
++)
++WHERE "name" = 'Empresarial';
+diff --git a/src/app/(company)/branches/branches-client.tsx b/src/app/(company)/branches/branches-client.tsx
+new file mode 100644
+index 0000000..fa42925
+--- /dev/null
++++ b/src/app/(company)/branches/branches-client.tsx
+@@ -0,0 +1,191 @@
++"use client";
++
++import { useState } from "react";
++import { useRouter } from "next/navigation";
++import { Button, Card, StatusBadge } from "@/components/ui";
++import { Modal, Field, inputClass } from "@/components/ui/modal";
++
++type Branch = { id: string; name: string; address: string | null; isActive: boolean; _count: { users: number } };
++
++export function BranchesClient({
++  initialBranches,
++  limit,
++  activeBranchId,
++}: {
++  initialBranches: Branch[];
++  limit: number | null;
++  activeBranchId: string | null;
++}) {
++  const router = useRouter();
++  const [branches, setBranches] = useState(initialBranches);
++  const [modal, setModal] = useState<{ mode: "create" } | { mode: "edit"; branch: Branch } | null>(null);
++  const [name, setName] = useState("");
++  const [address, setAddress] = useState("");
++  const [saving, setSaving] = useState(false);
++  const [error, setError] = useState("");
++  const [pageError, setPageError] = useState("");
++
++  const activeCount = branches.filter((b) => b.isActive).length;
++  const atLimit = limit !== null && activeCount >= limit;
++
++  function openCreate() {
++    setName("");
++    setAddress("");
++    setError("");
++    setModal({ mode: "create" });
++  }
++
++  function openEdit(branch: Branch) {
++    setName(branch.name);
++    setAddress(branch.address ?? "");
++    setError("");
++    setModal({ mode: "edit", branch });
++  }
++
++  async function save(e: React.FormEvent) {
++    e.preventDefault();
++    if (!modal) return;
++    setSaving(true);
++    setError("");
++
++    const isEdit = modal.mode === "edit";
++    const res = await fetch(isEdit ? `/api/branches/${modal.branch.id}` : "/api/branches", {
++      method: isEdit ? "PATCH" : "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ name, address }),
++    });
++    const data = await res.json();
++    setSaving(false);
++
++    if (!res.ok) {
++      setError(data.error ?? "No se pudo guardar");
++      return;
++    }
++
++    if (isEdit) {
++      setBranches((prev) => prev.map((b) => (b.id === data.branch.id ? { ...b, ...data.branch } : b)));
++    } else {
++      setBranches((prev) => [...prev, { ...data.branch, _count: { users: 0 } }]);
++    }
++    setModal(null);
++    router.refresh(); // actualiza el selector de sucursal del menú
++  }
++
++  async function toggleActive(branch: Branch) {
++    setPageError("");
++    const res = await fetch(`/api/branches/${branch.id}`, {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ isActive: !branch.isActive }),
++    });
++    const data = await res.json();
++    if (!res.ok) {
++      setPageError(data.error ?? "No se pudo actualizar");
++      return;
++    }
++    setBranches((prev) => prev.map((b) => (b.id === branch.id ? { ...b, ...data.branch } : b)));
++    router.refresh();
++  }
++
++  async function switchTo(branch: Branch) {
++    setPageError("");
++    const res = await fetch("/api/branches/active", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ branchId: branch.id }),
++    });
++    if (!res.ok) {
++      const data = await res.json();
++      setPageError(data.error ?? "No se pudo cambiar de sucursal");
++      return;
++    }
++    window.location.reload();
++  }
++
++  return (
++    <>
++      <div className="flex items-center justify-end gap-3 mb-4">
++        {atLimit && (
++          <p className="text-xs text-muted">
++            Llegaste al límite de sucursales de tu plan{limit === 1 ? ". El plan Empresarial permite varias." : "."}
++          </p>
++        )}
++        <Button onClick={openCreate} disabled={atLimit}>
++          + Nueva sucursal
++        </Button>
++      </div>
++
++      {pageError && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{pageError}</p>}
++
++      <Card className="overflow-hidden">
++        <table className="w-full text-sm">
++          <thead>
++            <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
++              <th className="px-5 py-3 font-medium">Sucursal</th>
++              <th className="px-5 py-3 font-medium">Dirección</th>
++              <th className="px-5 py-3 font-medium">Usuarios</th>
++              <th className="px-5 py-3 font-medium">Estado</th>
++              <th className="px-5 py-3 font-medium"></th>
++            </tr>
++          </thead>
++          <tbody>
++            {branches.map((b) => (
++              <tr key={b.id} className="border-b border-line last:border-0">
++                <td className="px-5 py-3 font-medium">
++                  {b.name}
++                  {b.id === activeBranchId && (
++                    <span className="ml-2 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-sage/15 text-sage">
++                      Operando aquí
++                    </span>
++                  )}
++                </td>
++                <td className="px-5 py-3 text-muted">{b.address ?? "—"}</td>
++                <td className="px-5 py-3 text-muted">{b._count.users}</td>
++                <td className="px-5 py-3">
++                  <StatusBadge status={b.isActive ? "active" : "inactive"} label={b.isActive ? "Activa" : "Inactiva"} />
++                </td>
++                <td className="px-5 py-3 text-right space-x-1 whitespace-nowrap">
++                  {b.isActive && b.id !== activeBranchId && branches.filter((x) => x.isActive).length > 1 && (
++                    <Button variant="ghost" onClick={() => switchTo(b)}>
++                      Operar en esta
++                    </Button>
++                  )}
++                  <Button variant="ghost" onClick={() => openEdit(b)}>
++                    Editar
++                  </Button>
++                  <Button variant="ghost" onClick={() => toggleActive(b)}>
++                    {b.isActive ? "Desactivar" : "Activar"}
++                  </Button>
++                </td>
++              </tr>
++            ))}
++          </tbody>
++        </table>
++      </Card>
++
++      <Modal
++        open={modal !== null}
++        onClose={() => setModal(null)}
++        title={modal?.mode === "edit" ? "Editar sucursal" : "Nueva sucursal"}
++      >
++        <form onSubmit={save}>
++          <Field label="Nombre de la sucursal">
++            <input required className={inputClass} value={name} onChange={(e) => setName(e.target.value)} placeholder="Sucursal Centro" />
++          </Field>
++          <Field label="Dirección (opcional)">
++            <input className={inputClass} value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Av. Juárez 123, Monterrey" />
++          </Field>
++          {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
++          <div className="flex justify-end gap-2">
++            <Button type="button" variant="secondary" onClick={() => setModal(null)}>
++              Cancelar
++            </Button>
++            <Button type="submit" disabled={saving}>
++              {saving ? "Guardando..." : "Guardar"}
++            </Button>
++          </div>
++        </form>
++      </Modal>
++    </>
++  );
++}
+diff --git a/src/app/(company)/branches/page.tsx b/src/app/(company)/branches/page.tsx
+index e69a7f6..505d92c 100644
+--- a/src/app/(company)/branches/page.tsx
++++ b/src/app/(company)/branches/page.tsx
+@@ -2,8 +2,9 @@ import { redirect } from "next/navigation";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
+ import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+-import { prisma } from "@/lib/prisma";
+-import { Card, StatusBadge } from "@/components/ui";
++import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
++import { branchesService } from "@/modules/branches/service";
++import { BranchesClient } from "./branches-client";
+ 
+ export default async function BranchesPage() {
+   const session = await getServerSession(authOptions);
+@@ -13,44 +14,28 @@ export default async function BranchesPage() {
+     redirect(getHomeRoute(session.user.permissions));
+   }
+ 
+-  const branches = await prisma.branch.findMany({
+-    where: { companyId: session.user.companyId },
+-    orderBy: { createdAt: "asc" },
+-  });
+-  type BranchRow = (typeof branches)[number];
++  const ctx = await getTenantContext();
++  const [{ branches, limit, activeCount }, activeBranchId] = await Promise.all([
++    branchesService.overview(session.user.companyId),
++    resolveBranchId(ctx, session.user.companyId),
++  ]);
+ 
+   return (
+     <div>
+       <h1 className="font-display text-3xl font-semibold mb-1">Sucursales</h1>
+-      <p className="text-muted text-sm mb-8">Ubicaciones de tu restaurante.</p>
+-
+-      <Card className="overflow-hidden">
+-        <table className="w-full text-sm">
+-          <thead>
+-            <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
+-              <th className="px-5 py-3 font-medium">Sucursal</th>
+-              <th className="px-5 py-3 font-medium">Dirección</th>
+-              <th className="px-5 py-3 font-medium">Estado</th>
+-            </tr>
+-          </thead>
+-          <tbody>
+-            {branches.map((b: BranchRow) => (
+-              <tr key={b.id} className="border-b border-line last:border-0">
+-                <td className="px-5 py-3 font-medium">{b.name}</td>
+-                <td className="px-5 py-3 text-muted">{b.address ?? "—"}</td>
+-                <td className="px-5 py-3">
+-                  <StatusBadge status={b.isActive ? "active" : "inactive"} label={b.isActive ? "Activa" : "Inactiva"} />
+-                </td>
+-              </tr>
+-            ))}
+-          </tbody>
+-        </table>
+-      </Card>
+-
+-      <p className="text-xs text-muted mt-4">
+-        Crear y editar sucursales adicionales llega en la siguiente iteración — por ahora cada empresa nace con su
+-        sucursal principal.
++      <p className="text-muted text-sm mb-8">
++        Ubicaciones de tu restaurante.
++        {limit !== null && (
++          <span className="ml-2 text-xs font-medium">
++            ({activeCount} de {limit} sucursales de tu plan)
++          </span>
++        )}
+       </p>
++      <BranchesClient
++        initialBranches={JSON.parse(JSON.stringify(branches))}
++        limit={limit}
++        activeBranchId={activeBranchId}
++      />
+     </div>
+   );
+ }
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index 69f313d..1fad62f 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -8,6 +8,8 @@ import { hasPermission, PERMISSIONS, type PermissionKey } from "@/lib/permission
+ import { requireBillingAccess } from "@/lib/billing-gate";
+ import Link from "next/link";
+ import { alertsService } from "@/modules/alerts/service";
++import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
++import { prisma } from "@/lib/prisma";
+ 
+ const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey }[] = [
+   { href: "/pos", label: "Punto de Venta", permission: PERMISSIONS.SALES_CREATE },
+@@ -76,13 +78,32 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+     navItems = [...navItems.slice(0, inventoryIndex + 1), alertItem, ...navItems.slice(inventoryIndex + 1)];
+   }
+ 
++  // Sucursal activa: si la empresa tiene varias sucursales activas, el nav muestra
++  // dónde se está operando, y quien administra sucursales puede cambiar de una a otra.
++  const activeBranches = await prisma.branch.findMany({
++    where: { companyId: session.user.companyId, isActive: true },
++    select: { id: true, name: true },
++    orderBy: { createdAt: "asc" },
++  });
++  const tenantCtx = await getTenantContext();
++  const activeBranchId = await resolveBranchId(tenantCtx, session.user.companyId);
++  const hasManyBranches = activeBranches.length > 1;
++  const canSwitchBranch = hasManyBranches && hasPermission(session.user.permissions, PERMISSIONS.BRANCHES_MANAGE);
++  const activeBranchName = activeBranches.find((b) => b.id === activeBranchId)?.name ?? null;
++
+   const visibleNavItems = navItems.filter(
+     (item) => !item.permission || hasPermission(session.user.permissions, item.permission)
+   );
+ 
+   return (
+     <div className="min-h-screen flex">
+-      <SidebarNav items={visibleNavItems} brand="Mi Restaurante" userName={session.user.name ?? ""} />
++      <SidebarNav
++        items={visibleNavItems}
++        brand="Mi Restaurante"
++        userName={session.user.name ?? ""}
++        branchSwitcher={canSwitchBranch ? { branches: activeBranches, activeId: activeBranchId } : undefined}
++        branchName={hasManyBranches && !canSwitchBranch ? activeBranchName : null}
++      />
+       <main className="flex-1 p-8 bg-paper">
+         {showBillingBanner && (
+           <div className="mb-6 rounded-md border border-marigold/40 bg-marigold/10 px-4 py-3 text-sm">
+diff --git a/src/app/(company)/users/page.tsx b/src/app/(company)/users/page.tsx
+index 64c8913..0ad46e7 100644
+--- a/src/app/(company)/users/page.tsx
++++ b/src/app/(company)/users/page.tsx
+@@ -16,10 +16,11 @@ export default async function UsersPage() {
+ 
+   const companyId = session.user.companyId;
+ 
+-  const [users, roles, subscription] = await Promise.all([
++  const [users, roles, subscription, branches] = await Promise.all([
+     usersService.list(companyId),
+     prisma.role.findMany({ where: { name: { not: "SUPER_ADMIN" } }, orderBy: { name: "asc" } }),
+     prisma.subscription.findUnique({ where: { companyId }, include: { license: true, plan: true } }),
++    prisma.branch.findMany({ where: { companyId, isActive: true }, select: { id: true, name: true }, orderBy: { createdAt: "asc" } }),
+   ]);
+ 
+   const userLimit = subscription?.license?.allowedUsers ?? null;
+@@ -35,7 +36,11 @@ export default async function UsersPage() {
+           </span>
+         )}
+       </p>
+-      <UsersTable initialUsers={JSON.parse(JSON.stringify(users))} roles={JSON.parse(JSON.stringify(roles))} />
++      <UsersTable
++        initialUsers={JSON.parse(JSON.stringify(users))}
++        roles={JSON.parse(JSON.stringify(roles))}
++        branches={branches}
++      />
+     </div>
+   );
+ }
+diff --git a/src/app/(company)/users/users-table.tsx b/src/app/(company)/users/users-table.tsx
+index 1d6dfff..d15385e 100644
+--- a/src/app/(company)/users/users-table.tsx
++++ b/src/app/(company)/users/users-table.tsx
+@@ -22,12 +22,20 @@ const ROLE_LABELS: Record<string, string> = {
+   COCINERO: "Cocinero",
+ };
+ 
+-export function UsersTable({ initialUsers, roles }: { initialUsers: UserRow[]; roles: Role[] }) {
++export function UsersTable({
++  initialUsers,
++  roles,
++  branches,
++}: {
++  initialUsers: UserRow[];
++  roles: Role[];
++  branches: { id: string; name: string }[];
++}) {
+   const [users, setUsers] = useState(initialUsers);
+   const [modalOpen, setModalOpen] = useState(false);
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
+-  const [form, setForm] = useState({ name: "", email: "", password: "", roleId: roles[0]?.id ?? "" });
++  const [form, setForm] = useState({ name: "", email: "", password: "", roleId: roles[0]?.id ?? "", branchId: branches[0]?.id ?? "" });
+ 
+   async function handleCreate(e: React.FormEvent) {
+     e.preventDefault();
+@@ -49,7 +57,7 @@ export function UsersTable({ initialUsers, roles }: { initialUsers: UserRow[]; r
+ 
+     setUsers((prev) => [...prev, data.user]);
+     setModalOpen(false);
+-    setForm({ name: "", email: "", password: "", roleId: roles[0]?.id ?? "" });
++    setForm({ name: "", email: "", password: "", roleId: roles[0]?.id ?? "", branchId: branches[0]?.id ?? "" });
+   }
+ 
+   async function toggleActive(u: UserRow) {
+@@ -147,6 +155,17 @@ export function UsersTable({ initialUsers, roles }: { initialUsers: UserRow[]; r
+               ))}
+             </select>
+           </Field>
++          {branches.length > 1 && (
++            <Field label="Sucursal donde trabaja">
++              <select className={inputClass} value={form.branchId} onChange={(e) => setForm({ ...form, branchId: e.target.value })}>
++                {branches.map((b) => (
++                  <option key={b.id} value={b.id}>
++                    {b.name}
++                  </option>
++                ))}
++              </select>
++            </Field>
++          )}
+ 
+           {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
+ 
+diff --git a/src/app/api/branches/[id]/route.ts b/src/app/api/branches/[id]/route.ts
+new file mode 100644
+index 0000000..9261bcb
+--- /dev/null
++++ b/src/app/api/branches/[id]/route.ts
+@@ -0,0 +1,25 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { branchesService, branchUpdateSchema } from "@/modules/branches/service";
++
++export async function PATCH(req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!hasPermission(ctx.permissions, PERMISSIONS.BRANCHES_MANAGE)) {
++    return NextResponse.json({ error: "No tienes permiso para esta acción" }, { status: 403 });
++  }
++
++  const parsed = branchUpdateSchema.safeParse(await req.json());
++  if (!parsed.success) {
++    return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  }
++
++  try {
++    const branch = await branchesService.update(companyId, ctx.userId, params.id, parsed.data);
++    return NextResponse.json({ branch });
++  } catch (err) {
++    return NextResponse.json({ error: err instanceof Error ? err.message : "No se pudo actualizar la sucursal" }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/branches/active/route.ts b/src/app/api/branches/active/route.ts
+new file mode 100644
+index 0000000..93cdc24
+--- /dev/null
++++ b/src/app/api/branches/active/route.ts
+@@ -0,0 +1,34 @@
++import { NextResponse } from "next/server";
++import { z } from "zod";
++import { getTenantContext, requireCompanyId, ACTIVE_BRANCH_COOKIE } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { prisma } from "@/lib/prisma";
++
++/** POST /api/branches/active { branchId } — el administrador elige en qué sucursal operar. */
++export async function POST(req: Request) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!hasPermission(ctx.permissions, PERMISSIONS.BRANCHES_MANAGE)) {
++    return NextResponse.json({ error: "No tienes permiso para esta acción" }, { status: 403 });
++  }
++
++  const parsed = z.object({ branchId: z.string().min(1) }).safeParse(await req.json());
++  if (!parsed.success) return NextResponse.json({ error: "Sucursal no válida" }, { status: 400 });
++
++  const branch = await prisma.branch.findFirst({
++    where: { id: parsed.data.branchId, companyId, isActive: true },
++    select: { id: true, name: true },
++  });
++  if (!branch) return NextResponse.json({ error: "Sucursal no encontrada" }, { status: 404 });
++
++  const res = NextResponse.json({ ok: true, branch });
++  res.cookies.set(ACTIVE_BRANCH_COOKIE, branch.id, {
++    httpOnly: true,
++    sameSite: "lax",
++    secure: process.env.NODE_ENV === "production",
++    path: "/",
++    maxAge: 60 * 60 * 24 * 365,
++  });
++  return res;
++}
+diff --git a/src/app/api/branches/route.ts b/src/app/api/branches/route.ts
+new file mode 100644
+index 0000000..ddcc557
+--- /dev/null
++++ b/src/app/api/branches/route.ts
+@@ -0,0 +1,25 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { branchesService, branchSchema } from "@/modules/branches/service";
++
++export async function POST(req: Request) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!hasPermission(ctx.permissions, PERMISSIONS.BRANCHES_MANAGE)) {
++    return NextResponse.json({ error: "No tienes permiso para esta acción" }, { status: 403 });
++  }
++
++  const parsed = branchSchema.safeParse(await req.json());
++  if (!parsed.success) {
++    return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  }
++
++  try {
++    const branch = await branchesService.create(companyId, ctx.userId, parsed.data);
++    return NextResponse.json({ branch }, { status: 201 });
++  } catch (err) {
++    return NextResponse.json({ error: err instanceof Error ? err.message : "No se pudo crear la sucursal" }, { status: 400 });
++  }
++}
+diff --git a/src/components/sidebar-nav.tsx b/src/components/sidebar-nav.tsx
+index 6479ade..71f54d7 100644
+--- a/src/components/sidebar-nav.tsx
++++ b/src/components/sidebar-nav.tsx
+@@ -9,18 +9,51 @@ export function SidebarNav({
+   items,
+   brand,
+   userName,
++  branchSwitcher,
++  branchName,
+ }: {
+   items: { href: string; label: string }[];
+   brand: string;
+   userName: string;
++  /** Solo para quien administra sucursales y la empresa tiene más de una activa. */
++  branchSwitcher?: { branches: { id: string; name: string }[]; activeId: string | null };
++  /** Nombre de la sucursal donde se opera (se muestra si la empresa tiene varias). */
++  branchName?: string | null;
+ }) {
+   const pathname = usePathname();
+ 
++  async function changeBranch(branchId: string) {
++    const res = await fetch("/api/branches/active", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ branchId }),
++    });
++    if (res.ok) window.location.reload();
++  }
++
+   return (
+     <aside className="w-60 shrink-0 bg-ink-950 text-white flex flex-col justify-between min-h-screen">
+       <div>
+         <div className="px-6 py-6 border-b border-ink-line">
+           <p className="font-display text-lg font-semibold">{brand}</p>
++          {branchSwitcher ? (
++            <div className="mt-3">
++              <label className="block text-[10px] uppercase tracking-wide text-white/40 mb-1">Sucursal</label>
++              <select
++                value={branchSwitcher.activeId ?? ""}
++                onChange={(e) => changeBranch(e.target.value)}
++                className="w-full rounded-md bg-white/10 border border-white/10 text-sm text-white px-2 py-1.5"
++              >
++                {branchSwitcher.branches.map((b) => (
++                  <option key={b.id} value={b.id} className="text-ink">
++                    {b.name}
++                  </option>
++                ))}
++              </select>
++            </div>
++          ) : (
++            branchName && <p className="text-xs text-white/50 mt-1">{branchName}</p>
++          )}
+         </div>
+         <nav className="px-3 py-4 flex flex-col gap-1">
+           {items.map((item) => {
+diff --git a/src/lib/plan-features.ts b/src/lib/plan-features.ts
+index 0c6501b..d814255 100644
+--- a/src/lib/plan-features.ts
++++ b/src/lib/plan-features.ts
+@@ -52,7 +52,7 @@ export const FEATURE_CATALOG: FeatureDef[] = [
+   // ── Construidas a medias ────────────────────────────────────────────
+   { key: "inventario_avanzado", label: "Inventario avanzado (mínimos, alertas, movimientos)", status: "live", enforced: false },
+   { key: "promociones_descuentos", label: "Promociones y descuentos", status: "partial", enforced: false },
+-  { key: "multi_sucursal", label: "Multi-sucursal", status: "partial", enforced: false },
++  { key: "multi_sucursal", label: "Multi-sucursal (crear y operar varias sucursales)", status: "live", enforced: false },
+   { key: "dashboard_avanzado", label: "Dashboard avanzado (15+ gráficos)", status: "partial", enforced: false },
+   { key: "auditoria_cajas", label: "Auditoría de cajas", status: "partial", enforced: false },
+ 
+@@ -60,8 +60,8 @@ export const FEATURE_CATALOG: FeatureDef[] = [
+   { key: "compras_proveedores", label: "Compras y proveedores", status: "planned", enforced: false },
+   { key: "alertas", label: "Alertas", status: "live", enforced: false },
+   { key: "exportacion_informacion", label: "Exportación de información", status: "live", enforced: false },
+-  { key: "automatizaciones_basicas", label: "Automatizaciones básicas", status: "planned", enforced: false },
+-  { key: "automatizaciones_avanzadas", label: "Automatizaciones avanzadas", status: "planned", enforced: false },
++  { key: "automatizaciones_basicas", label: "Automatizaciones básicas (comandas a pantalla de cocina, sin impresora)", status: "live", enforced: false },
++  { key: "automatizaciones_avanzadas", label: "Automatizaciones avanzadas (WhatsApp + Mercado Pago)", status: "live", enforced: false },
+   { key: "api_basica", label: "API básica", status: "planned", enforced: false },
+   { key: "api_avanzada", label: "API avanzada", status: "planned", enforced: false },
+   { key: "permisos_avanzados", label: "Permisos avanzados", status: "planned", enforced: false },
+diff --git a/src/lib/tenant-context.ts b/src/lib/tenant-context.ts
+index ef5e72a..c558b09 100644
+--- a/src/lib/tenant-context.ts
++++ b/src/lib/tenant-context.ts
+@@ -1,5 +1,10 @@
+ import { getServerSession } from "next-auth";
++import { cookies } from "next/headers";
+ import { authOptions } from "./auth";
++import { hasPermission, PERMISSIONS } from "./permissions";
++
++/** Cookie donde se guarda la sucursal que el administrador eligió para operar. */
++export const ACTIVE_BRANCH_COOKIE = "tappy_branch";
+ 
+ export interface TenantContext {
+   userId: string;
+@@ -49,8 +54,26 @@ export function requireCompanyId(ctx: TenantContext): string {
+  * o la primera sucursal de la empresa como respaldo.
+  */
+ export async function resolveBranchId(ctx: TenantContext, companyId: string): Promise<string | null> {
+-  if (ctx.branchId) return ctx.branchId;
+   const { prisma } = await import("./prisma");
++
++  // Quien administra sucursales (dueño / admin) puede elegir en cuál operar.
++  // La cookie nunca se cree a ciegas: se valida que la sucursal sea de ESTA
++  // empresa y esté activa. Todo lo que ya usaba resolveBranchId (POS, caja,
++  // mesas, cocina, inventario...) queda automáticamente en la sucursal elegida.
++  if (hasPermission(ctx.permissions, PERMISSIONS.BRANCHES_MANAGE)) {
++    let chosen: string | undefined;
++    try {
++      chosen = cookies().get(ACTIVE_BRANCH_COOKIE)?.value;
++    } catch {
++      chosen = undefined; // fuera de un request (ej. scripts)
++    }
++    if (chosen) {
++      const branch = await prisma.branch.findFirst({ where: { id: chosen, companyId, isActive: true }, select: { id: true } });
++      if (branch) return branch.id;
++    }
++  }
++
++  if (ctx.branchId) return ctx.branchId;
+   const branch = await prisma.branch.findFirst({ where: { companyId } });
+   return branch?.id ?? null;
+ }
+diff --git a/src/modules/branches/service.ts b/src/modules/branches/service.ts
+new file mode 100644
+index 0000000..ab6e63f
+--- /dev/null
++++ b/src/modules/branches/service.ts
+@@ -0,0 +1,115 @@
++import { prisma } from "@/lib/prisma";
++import { z } from "zod";
++
++export const branchSchema = z.object({
++  name: z.string().trim().min(2, "El nombre de la sucursal es obligatorio").max(80),
++  address: z.string().trim().max(200).optional(),
++});
++
++export const branchUpdateSchema = z.object({
++  name: z.string().trim().min(2).max(80).optional(),
++  address: z.string().trim().max(200).nullable().optional(),
++  isActive: z.boolean().optional(),
++});
++
++/** Cuántas sucursales activas puede tener la empresa según su licencia (null = sin licencia registrada). */
++async function getBranchLimit(companyId: string): Promise<number | null> {
++  const sub = await prisma.subscription.findUnique({ where: { companyId }, include: { license: true } });
++  return sub?.license?.allowedBranches ?? null;
++}
++
++export const branchesService = {
++  async list(companyId: string) {
++    return prisma.branch.findMany({
++      where: { companyId },
++      orderBy: { createdAt: "asc" },
++      include: { _count: { select: { users: true } } },
++    });
++  },
++
++  async overview(companyId: string) {
++    const [branches, limit] = await Promise.all([this.list(companyId), getBranchLimit(companyId)]);
++    const activeCount = branches.filter((b) => b.isActive).length;
++    return { branches, limit, activeCount };
++  },
++
++  async create(companyId: string, userId: string, input: z.infer<typeof branchSchema>) {
++    const limit = await getBranchLimit(companyId);
++    if (limit !== null) {
++      const activeCount = await prisma.branch.count({ where: { companyId, isActive: true } });
++      if (activeCount >= limit) {
++        throw new Error(
++          limit === 1
++            ? "Tu plan incluye 1 sucursal. Para operar más sucursales necesitas el plan Empresarial."
++            : `Tu plan incluye hasta ${limit} sucursales y ya las tienes todas. Desactiva una o contacta a Tappy para ampliar tu plan.`
++        );
++      }
++    }
++
++    const duplicate = await prisma.branch.findFirst({
++      where: { companyId, name: { equals: input.name, mode: "insensitive" } },
++      select: { id: true },
++    });
++    if (duplicate) throw new Error("Ya tienes una sucursal con ese nombre");
++
++    const branch = await prisma.branch.create({
++      data: { companyId, name: input.name, address: input.address || null },
++    });
++
++    await prisma.auditLog.create({
++      data: { companyId, userId, action: "BRANCH_CREATE", entity: "Branch", entityId: branch.id, newData: { name: branch.name } },
++    });
++    return branch;
++  },
++
++  async update(companyId: string, userId: string, id: string, input: z.infer<typeof branchUpdateSchema>) {
++    const branch = await prisma.branch.findFirst({ where: { id, companyId } });
++    if (!branch) throw new Error("Sucursal no encontrada");
++
++    if (input.isActive === false && branch.isActive) {
++      const activeCount = await prisma.branch.count({ where: { companyId, isActive: true } });
++      if (activeCount <= 1) throw new Error("No puedes desactivar tu única sucursal activa");
++
++      const openRegisters = await prisma.cashRegister.count({ where: { branchId: id, status: "OPEN" } });
++      if (openRegisters > 0) throw new Error("Esta sucursal tiene una caja abierta. Haz el corte de caja antes de desactivarla.");
++    }
++
++    if (input.isActive === true && !branch.isActive) {
++      const limit = await getBranchLimit(companyId);
++      if (limit !== null) {
++        const activeCount = await prisma.branch.count({ where: { companyId, isActive: true } });
++        if (activeCount >= limit) throw new Error(`Tu plan incluye hasta ${limit} sucursales activas.`);
++      }
++    }
++
++    if (input.name && input.name.toLowerCase() !== branch.name.toLowerCase()) {
++      const duplicate = await prisma.branch.findFirst({
++        where: { companyId, id: { not: id }, name: { equals: input.name, mode: "insensitive" } },
++        select: { id: true },
++      });
++      if (duplicate) throw new Error("Ya tienes una sucursal con ese nombre");
++    }
++
++    const updated = await prisma.branch.update({
++      where: { id },
++      data: {
++        ...(input.name !== undefined ? { name: input.name } : {}),
++        ...(input.address !== undefined ? { address: input.address || null } : {}),
++        ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
++      },
++    });
++
++    await prisma.auditLog.create({
++      data: {
++        companyId,
++        userId,
++        action: "BRANCH_UPDATE",
++        entity: "Branch",
++        entityId: id,
++        previousData: { name: branch.name, address: branch.address, isActive: branch.isActive },
++        newData: { name: updated.name, address: updated.address, isActive: updated.isActive },
++      },
++    });
++    return updated;
++  },
++};
+diff --git a/src/modules/users/service.ts b/src/modules/users/service.ts
+index e6652dd..db5e437 100644
+--- a/src/modules/users/service.ts
++++ b/src/modules/users/service.ts
+@@ -43,8 +43,12 @@ export const usersService = {
+ 
+     // Si no se especifica sucursal, se asigna la primera de la empresa.
+     let branchId = input.branchId;
+-    if (!branchId) {
+-      const firstBranch = await prisma.branch.findFirst({ where: { companyId } });
++    if (branchId) {
++      // El branchId viene del navegador: debe ser una sucursal de ESTA empresa.
++      const owned = await prisma.branch.findFirst({ where: { id: branchId, companyId, isActive: true }, select: { id: true } });
++      if (!owned) throw new Error("La sucursal seleccionada no es válida");
++    } else {
++      const firstBranch = await prisma.branch.findFirst({ where: { companyId, isActive: true } });
+       branchId = firstBranch?.id;
+     }
+ 
+-- 
+2.43.0
+

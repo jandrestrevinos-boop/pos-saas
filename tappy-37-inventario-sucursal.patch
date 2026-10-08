@@ -1,0 +1,1461 @@
+From 156fa91c9bb796dfbc8931b837ee29c2b39f5460 Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Mon, 5 Oct 2026 09:37:11 +0000
+Subject: [PATCH] Inventario por sucursal: existencia propia por sucursal,
+ transferencias, alertas y WhatsApp por sucursal, exportacion por sucursal
+
+---
+ .../migration.sql                             |  78 ++++++
+ prisma/schema.prisma                          |  52 ++++
+ src/app/(company)/alerts/page.tsx             |  10 +-
+ .../(company)/inventory/inventory-client.tsx  | 177 +++++++++++-
+ src/app/(company)/inventory/page.tsx          |  24 +-
+ src/app/(company)/layout.tsx                  |   7 +-
+ src/app/(company)/products/page.tsx           |  17 +-
+ src/app/(company)/products/products-table.tsx |  10 +-
+ src/app/api/alerts/route.ts                   |   4 +-
+ src/app/api/export/route.ts                   |   3 +-
+ src/app/api/inventory/route.ts                |   4 +-
+ src/app/api/inventory/transfer/route.ts       |  30 ++
+ src/app/api/products/[id]/route.ts            |   5 +-
+ src/app/api/products/route.ts                 |   5 +-
+ src/components/export-button.tsx              |   2 +-
+ src/lib/plan-features.ts                      |   2 +-
+ src/modules/alerts/service.ts                 |  57 +++-
+ src/modules/exports/service.ts                |  38 ++-
+ src/modules/inventory/service.ts              | 263 ++++++++++++++----
+ src/modules/products/service.ts               |  39 ++-
+ src/modules/whatsapp/cartManager.ts           |   5 +-
+ src/modules/whatsapp/catalogService.ts        |  14 +-
+ src/modules/whatsapp/messageProcessor.ts      |   6 +-
+ 23 files changed, 743 insertions(+), 109 deletions(-)
+ create mode 100644 prisma/migrations/20261004180000_inventario_por_sucursal/migration.sql
+ create mode 100644 src/app/api/inventory/transfer/route.ts
+
+diff --git a/prisma/migrations/20261004180000_inventario_por_sucursal/migration.sql b/prisma/migrations/20261004180000_inventario_por_sucursal/migration.sql
+new file mode 100644
+index 0000000..5144ed5
+--- /dev/null
++++ b/prisma/migrations/20261004180000_inventario_por_sucursal/migration.sql
+@@ -0,0 +1,78 @@
++-- CreateTable
++CREATE TABLE "branch_stocks" (
++    "id" TEXT NOT NULL,
++    "productId" TEXT NOT NULL,
++    "branchId" TEXT NOT NULL,
++    "stock" INTEGER NOT NULL DEFAULT 0,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++
++    CONSTRAINT "branch_stocks_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateTable
++CREATE TABLE "stock_transfers" (
++    "id" TEXT NOT NULL,
++    "companyId" TEXT NOT NULL,
++    "productId" TEXT NOT NULL,
++    "fromBranchId" TEXT NOT NULL,
++    "toBranchId" TEXT NOT NULL,
++    "userId" TEXT NOT NULL,
++    "quantity" INTEGER NOT NULL,
++    "note" TEXT,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++
++    CONSTRAINT "stock_transfers_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateIndex
++CREATE INDEX "branch_stocks_branchId_idx" ON "branch_stocks"("branchId");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "branch_stocks_productId_branchId_key" ON "branch_stocks"("productId", "branchId");
++
++-- CreateIndex
++CREATE INDEX "stock_transfers_companyId_createdAt_idx" ON "stock_transfers"("companyId", "createdAt");
++
++-- AddForeignKey
++ALTER TABLE "branch_stocks" ADD CONSTRAINT "branch_stocks_productId_fkey" FOREIGN KEY ("productId") REFERENCES "products"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "branch_stocks" ADD CONSTRAINT "branch_stocks_branchId_fkey" FOREIGN KEY ("branchId") REFERENCES "branches"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "stock_transfers" ADD CONSTRAINT "stock_transfers_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "stock_transfers" ADD CONSTRAINT "stock_transfers_productId_fkey" FOREIGN KEY ("productId") REFERENCES "products"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "stock_transfers" ADD CONSTRAINT "stock_transfers_fromBranchId_fkey" FOREIGN KEY ("fromBranchId") REFERENCES "branches"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "stock_transfers" ADD CONSTRAINT "stock_transfers_toBranchId_fkey" FOREIGN KEY ("toBranchId") REFERENCES "branches"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "stock_transfers" ADD CONSTRAINT "stock_transfers_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- Respaldo de lo que ya tienes: la existencia actual de cada producto que controla
++-- inventario se queda en la sucursal MÁS ANTIGUA de su empresa; las demás sucursales
++-- empiezan en 0 (ahí se reparte con una transferencia o una entrada de mercancía).
++-- Product.stock no se toca: sigue siendo el total.
++INSERT INTO "branch_stocks" ("id", "productId", "branchId", "stock", "updatedAt")
++SELECT
++    gen_random_uuid()::text,
++    p."id",
++    b."id",
++    CASE
++        WHEN b."id" = (
++            SELECT b2."id" FROM "branches" b2
++            WHERE b2."companyId" = p."companyId"
++            ORDER BY b2."createdAt" ASC, b2."id" ASC
++            LIMIT 1
++        ) THEN p."stock"
++        ELSE 0
++    END,
++    CURRENT_TIMESTAMP
++FROM "products" p
++JOIN "branches" b ON b."companyId" = p."companyId"
++WHERE p."tracksInventory" = true;
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index bea4670..314a37a 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -43,6 +43,8 @@ model Company {
+ 
+   subscriptionPayments SubscriptionPayment[]
+ 
++  stockTransfers  StockTransfer[]
++
+   @@map("companies")
+ }
+ 
+@@ -116,6 +118,10 @@ model Branch {
+   mercadoPagoTerminal MercadoPagoTerminal?
+ 
+   @@index([companyId])
++  stocks          BranchStock[]
++  transfersOut    StockTransfer[] @relation("TransferFrom")
++  transfersIn     StockTransfer[] @relation("TransferTo")
++
+   @@map("branches")
+ }
+ 
+@@ -296,6 +302,8 @@ model User {
+   hardwareFinancingsCreated HardwareFinancing[]
+ 
+   @@index([companyId])
++  stockTransfers  StockTransfer[]
++
+   @@map("users")
+ }
+ 
+@@ -380,6 +388,9 @@ model Product {
+   hardwareFinancingItems HardwareFinancingItem[]
+ 
+   @@index([companyId])
++  branchStocks    BranchStock[]
++  stockTransfers  StockTransfer[]
++
+   @@map("products")
+ }
+ 
+@@ -884,3 +895,44 @@ model HardwareFinancingPayment {
+   @@index([status, dueDate])
+   @@map("hardware_financing_payments")
+ }
++
++/// Existencia de un producto EN UNA SUCURSAL. Es la fuente de verdad del
++/// inventario. Product.stock se mantiene como el TOTAL de todas las sucursales
++/// (suma) para que lo que lee el stock total siga funcionando.
++/// Si no hay fila para (producto, sucursal), la existencia ahí es 0.
++model BranchStock {
++  id        String   @id @default(uuid())
++  productId String
++  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
++  branchId  String
++  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
++  stock     Int      @default(0)
++  updatedAt DateTime @updatedAt
++
++  @@unique([productId, branchId])
++  @@index([branchId])
++  @@map("branch_stocks")
++}
++
++/// Traspaso de mercancía de una sucursal a otra (inmediato). Además de este
++/// registro se generan dos InventoryMovement (salida y entrada) para el historial.
++model StockTransfer {
++  id           String   @id @default(uuid())
++  companyId    String
++  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
++  productId    String
++  product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
++  fromBranchId String
++  fromBranch   Branch   @relation("TransferFrom", fields: [fromBranchId], references: [id])
++  toBranchId   String
++  toBranch     Branch   @relation("TransferTo", fields: [toBranchId], references: [id])
++  userId       String
++  user         User     @relation(fields: [userId], references: [id])
++
++  quantity  Int
++  note      String?
++  createdAt DateTime @default(now())
++
++  @@index([companyId, createdAt])
++  @@map("stock_transfers")
++}
+diff --git a/src/app/(company)/alerts/page.tsx b/src/app/(company)/alerts/page.tsx
+index cd953f3..7cad579 100644
+--- a/src/app/(company)/alerts/page.tsx
++++ b/src/app/(company)/alerts/page.tsx
+@@ -3,7 +3,8 @@ import Link from "next/link";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
+ import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+-import { alertsService, CASH_OPEN_ALERT_HOURS } from "@/modules/alerts/service";
++import { alertsService, alertBranchScope, CASH_OPEN_ALERT_HOURS } from "@/modules/alerts/service";
++import { getTenantContext } from "@/lib/tenant-context";
+ import { Card } from "@/components/ui";
+ 
+ export default async function AlertsPage() {
+@@ -14,7 +15,10 @@ export default async function AlertsPage() {
+     redirect(getHomeRoute(session.user.permissions));
+   }
+ 
+-  const { stockAlerts, cashAlerts, total } = await alertsService.getAlerts(session.user.companyId);
++  const ctx = await getTenantContext();
++  const scope = await alertBranchScope(ctx, session.user.companyId);
++  const { stockAlerts, cashAlerts, total } = await alertsService.getAlerts(session.user.companyId, scope);
++  const showBranch = new Set(stockAlerts.map((a) => a.branchName)).size > 1 || scope === undefined;
+ 
+   return (
+     <div>
+@@ -44,6 +48,7 @@ export default async function AlertsPage() {
+                 <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
+                   <th className="px-5 py-3 font-medium">Producto</th>
+                   <th className="px-5 py-3 font-medium">Categoría</th>
++                  {showBranch && <th className="px-5 py-3 font-medium">Sucursal</th>}
+                   <th className="px-5 py-3 font-medium">Existencia</th>
+                   <th className="px-5 py-3 font-medium">Mínimo</th>
+                   <th className="px-5 py-3 font-medium">Estado</th>
+@@ -54,6 +59,7 @@ export default async function AlertsPage() {
+                   <tr key={a.id} className="border-b border-line last:border-0">
+                     <td className="px-5 py-3 font-medium">{a.name}</td>
+                     <td className="px-5 py-3 text-muted">{a.category}</td>
++                    {showBranch && <td className="px-5 py-3 text-muted">{a.branchName}</td>}
+                     <td className="px-5 py-3 font-mono">{a.stock}</td>
+                     <td className="px-5 py-3 font-mono text-muted">{a.minStock > 0 ? a.minStock : "—"}</td>
+                     <td className="px-5 py-3">
+diff --git a/src/app/(company)/inventory/inventory-client.tsx b/src/app/(company)/inventory/inventory-client.tsx
+index b4ffde7..a87238a 100644
+--- a/src/app/(company)/inventory/inventory-client.tsx
++++ b/src/app/(company)/inventory/inventory-client.tsx
+@@ -5,12 +5,40 @@ import { Button, Card } from "@/components/ui";
+ import { Modal, Field, inputClass } from "@/components/ui/modal";
+ import { ExportButton } from "@/components/export-button";
+ 
+-type Product = { id: string; name: string; stock: number; minStock: number; category: { name: string } };
+-type Movement = { id: string; type: string; quantity: number; reason: string | null; createdAt: string; product: { name: string }; user: { name: string } };
++type Product = {
++  id: string;
++  name: string;
++  stock: number; // existencia en la sucursal activa
++  totalStock: number;
++  minStock: number;
++  category: { name: string };
++  otherBranches: { branchId: string; branchName: string; stock: number }[];
++};
++type Movement = {
++  id: string;
++  type: string;
++  quantity: number;
++  reason: string | null;
++  createdAt: string;
++  product: { name: string };
++  user: { name: string };
++  branch: { name: string };
++};
++type BranchOption = { id: string; name: string };
+ 
+ const TYPE_LABELS: Record<string, string> = { IN: "Entrada", OUT: "Salida", ADJUSTMENT: "Ajuste", WASTE: "Merma" };
+ 
+-export function InventoryClient() {
++export function InventoryClient({
++  branches,
++  activeBranchId,
++  canTransfer,
++}: {
++  branches: BranchOption[];
++  activeBranchId: string;
++  canTransfer: boolean;
++}) {
++  const multiBranch = branches.length > 1;
++  const [transferOpen, setTransferOpen] = useState(false);
+   const [products, setProducts] = useState<Product[]>([]);
+   const [movements, setMovements] = useState<Movement[]>([]);
+   const [loading, setLoading] = useState(true);
+@@ -35,12 +63,19 @@ export function InventoryClient() {
+   return (
+     <div>
+       <div className="flex justify-end gap-2 mb-4">
+-        <ExportButton dataset="products" label="Exportar existencias (CSV)" />
++        <ExportButton dataset={multiBranch ? "stock" : "products"} label="Exportar existencias (CSV)" />
+         <ExportButton dataset="movements" label="Exportar movimientos (CSV)" />
++        {multiBranch && canTransfer && (
++          <Button variant="secondary" onClick={() => setTransferOpen(true)}>
++            ⇄ Transferir entre sucursales
++          </Button>
++        )}
+         <Button onClick={() => setModalOpen(true)}>+ Registrar movimiento</Button>
+       </div>
+ 
+-      <p className="text-xs font-medium uppercase tracking-wide text-muted mb-3">Existencias actuales</p>
++      <p className="text-xs font-medium uppercase tracking-wide text-muted mb-3">
++        Existencias actuales{multiBranch ? ` — ${branches.find((b) => b.id === activeBranchId)?.name ?? "esta sucursal"}` : ""}
++      </p>
+       <Card className="overflow-hidden mb-8">
+         {products.length === 0 ? (
+           <p className="text-sm text-muted p-5">
+@@ -55,6 +90,7 @@ export function InventoryClient() {
+                 <th className="px-5 py-3 font-medium">Existencia</th>
+                 <th className="px-5 py-3 font-medium">Mínimo</th>
+                 <th className="px-5 py-3 font-medium">Estado</th>
++                {multiBranch && <th className="px-5 py-3 font-medium">Otras sucursales</th>}
+               </tr>
+             </thead>
+             <tbody>
+@@ -73,6 +109,11 @@ export function InventoryClient() {
+                       <span className="text-sage">OK</span>
+                     )}
+                   </td>
++                  {multiBranch && (
++                    <td className="px-5 py-3 text-xs text-muted">
++                      {p.otherBranches.map((o) => `${o.branchName}: ${o.stock}`).join(" · ")}
++                    </td>
++                  )}
+                 </tr>
+               ))}
+             </tbody>
+@@ -89,6 +130,7 @@ export function InventoryClient() {
+             <thead>
+               <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
+                 <th className="px-5 py-3 font-medium">Producto</th>
++                {multiBranch && <th className="px-5 py-3 font-medium">Sucursal</th>}
+                 <th className="px-5 py-3 font-medium">Tipo</th>
+                 <th className="px-5 py-3 font-medium">Cantidad</th>
+                 <th className="px-5 py-3 font-medium">Motivo</th>
+@@ -100,6 +142,7 @@ export function InventoryClient() {
+               {movements.map((m) => (
+                 <tr key={m.id} className="border-b border-line last:border-0">
+                   <td className="px-5 py-3 font-medium">{m.product.name}</td>
++                  {multiBranch && <td className="px-5 py-3 text-muted">{m.branch.name}</td>}
+                   <td className="px-5 py-3">{TYPE_LABELS[m.type] ?? m.type}</td>
+                   <td className="px-5 py-3 font-mono">{m.quantity}</td>
+                   <td className="px-5 py-3 text-muted">{m.reason ?? "—"}</td>
+@@ -114,6 +157,19 @@ export function InventoryClient() {
+         )}
+       </Card>
+ 
++      {transferOpen && (
++        <TransferModal
++          products={products}
++          branches={branches}
++          activeBranchId={activeBranchId}
++          onClose={() => setTransferOpen(false)}
++          onDone={() => {
++            setTransferOpen(false);
++            load();
++          }}
++        />
++      )}
++
+       {modalOpen && (
+         <MovementModal
+           products={products}
+@@ -219,3 +275,114 @@ function MovementModal({ products, onClose, onDone }: { products: Product[]; onC
+     </Modal>
+   );
+ }
++
++function TransferModal({
++  products,
++  branches,
++  activeBranchId,
++  onClose,
++  onDone,
++}: {
++  products: Product[];
++  branches: BranchOption[];
++  activeBranchId: string;
++  onClose: () => void;
++  onDone: () => void;
++}) {
++  const [productId, setProductId] = useState(products[0]?.id ?? "");
++  const [fromBranchId, setFromBranchId] = useState(activeBranchId);
++  const [toBranchId, setToBranchId] = useState(branches.find((b) => b.id !== activeBranchId)?.id ?? "");
++  const [quantity, setQuantity] = useState("");
++  const [note, setNote] = useState("");
++  const [error, setError] = useState("");
++  const [saving, setSaving] = useState(false);
++
++  const product = products.find((p) => p.id === productId);
++  function stockIn(branchId: string): number {
++    if (!product) return 0;
++    if (branchId === activeBranchId) return product.stock;
++    return product.otherBranches.find((o) => o.branchId === branchId)?.stock ?? 0;
++  }
++
++  async function handleSubmit(e: React.FormEvent) {
++    e.preventDefault();
++    setSaving(true);
++    setError("");
++    const res = await fetch("/api/inventory/transfer", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ productId, fromBranchId, toBranchId, quantity: parseInt(quantity, 10) || 0, note }),
++    });
++    const data = await res.json();
++    setSaving(false);
++    if (!res.ok) {
++      setError(data.error ?? "No se pudo hacer la transferencia");
++      return;
++    }
++    onDone();
++  }
++
++  if (products.length === 0) {
++    return (
++      <Modal open onClose={onClose} title="Transferir entre sucursales">
++        <p className="text-sm text-muted">No tienes productos con control de inventario activado.</p>
++        <div className="flex justify-end mt-4">
++          <Button variant="secondary" onClick={onClose}>
++            Cerrar
++          </Button>
++        </div>
++      </Modal>
++    );
++  }
++
++  return (
++    <Modal open onClose={onClose} title="Transferir entre sucursales">
++      <form onSubmit={handleSubmit}>
++        <Field label="Producto">
++          <select className={inputClass} value={productId} onChange={(e) => setProductId(e.target.value)}>
++            {products.map((p) => (
++              <option key={p.id} value={p.id}>
++                {p.name} (total en la empresa: {p.totalStock})
++              </option>
++            ))}
++          </select>
++        </Field>
++        <Field label="Sale de">
++          <select className={inputClass} value={fromBranchId} onChange={(e) => setFromBranchId(e.target.value)}>
++            {branches.map((b) => (
++              <option key={b.id} value={b.id}>
++                {b.name} (tiene {stockIn(b.id)})
++              </option>
++            ))}
++          </select>
++        </Field>
++        <Field label="Llega a">
++          <select className={inputClass} value={toBranchId} onChange={(e) => setToBranchId(e.target.value)}>
++            {branches
++              .filter((b) => b.id !== fromBranchId)
++              .map((b) => (
++                <option key={b.id} value={b.id}>
++                  {b.name} (tiene {stockIn(b.id)})
++                </option>
++              ))}
++          </select>
++        </Field>
++        <Field label="Cantidad">
++          <input required type="number" min={1} step="1" className={inputClass} value={quantity} onChange={(e) => setQuantity(e.target.value)} />
++        </Field>
++        <Field label="Nota (opcional)">
++          <input className={inputClass} value={note} maxLength={200} onChange={(e) => setNote(e.target.value)} placeholder="Ej. Reabasto semanal" />
++        </Field>
++        {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
++        <div className="flex justify-end gap-2">
++          <Button type="button" variant="secondary" onClick={onClose}>
++            Cancelar
++          </Button>
++          <Button type="submit" disabled={saving || !toBranchId || fromBranchId === toBranchId}>
++            {saving ? "Transfiriendo..." : "Transferir"}
++          </Button>
++        </div>
++      </form>
++    </Modal>
++  );
++}
+diff --git a/src/app/(company)/inventory/page.tsx b/src/app/(company)/inventory/page.tsx
+index 8a413f9..195eb29 100644
+--- a/src/app/(company)/inventory/page.tsx
++++ b/src/app/(company)/inventory/page.tsx
+@@ -2,6 +2,8 @@ import { redirect } from "next/navigation";
+ import { getServerSession } from "next-auth";
+ import { authOptions } from "@/lib/auth";
+ import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
++import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
++import { prisma } from "@/lib/prisma";
+ import { InventoryClient } from "./inventory-client";
+ 
+ export default async function InventoryPage() {
+@@ -12,11 +14,29 @@ export default async function InventoryPage() {
+     redirect(getHomeRoute(session.user.permissions));
+   }
+ 
++  const ctx = await getTenantContext();
++  const [branches, activeBranchId] = await Promise.all([
++    prisma.branch.findMany({
++      where: { companyId: session.user.companyId, isActive: true },
++      select: { id: true, name: true },
++      orderBy: { createdAt: "asc" },
++    }),
++    resolveBranchId(ctx, session.user.companyId),
++  ]);
++
+   return (
+     <div>
+       <h1 className="font-display text-3xl font-semibold mb-1">Inventario</h1>
+-      <p className="text-muted text-sm mb-8">Existencias y movimientos de los productos que controlas.</p>
+-      <InventoryClient />
++      <p className="text-muted text-sm mb-8">
++        {branches.length > 1
++          ? "Existencias de la sucursal en la que estás operando. Cambia de sucursal desde el menú."
++          : "Existencias y movimientos de los productos que controlas."}
++      </p>
++      <InventoryClient
++        branches={branches}
++        activeBranchId={activeBranchId ?? branches[0]?.id ?? ""}
++        canTransfer={hasPermission(session.user.permissions, PERMISSIONS.BRANCHES_MANAGE)}
++      />
+     </div>
+   );
+ }
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index 1fad62f..72b4598 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -7,7 +7,7 @@ import { FEATURE_KEYS } from "@/lib/plan-features";
+ import { hasPermission, PERMISSIONS, type PermissionKey } from "@/lib/permissions";
+ import { requireBillingAccess } from "@/lib/billing-gate";
+ import Link from "next/link";
+-import { alertsService } from "@/modules/alerts/service";
++import { alertsService, alertBranchScope } from "@/modules/alerts/service";
+ import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
+ import { prisma } from "@/lib/prisma";
+ 
+@@ -68,7 +68,10 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+ 
+   // Alertas (stock bajo / agotado / caja abierta de más): el nav muestra cuántas hay.
+   if (hasPermission(session.user.permissions, PERMISSIONS.INVENTORY_MANAGE)) {
+-    const alertCount = await alertsService.count(session.user.companyId);
++    const alertCount = await alertsService.count(
++      session.user.companyId,
++      await alertBranchScope(await getTenantContext(), session.user.companyId)
++    );
+     const inventoryIndex = navItems.findIndex((item) => item.href === "/inventory");
+     const alertItem = {
+       href: "/alerts",
+diff --git a/src/app/(company)/products/page.tsx b/src/app/(company)/products/page.tsx
+index af37010..7b4e9a4 100644
+--- a/src/app/(company)/products/page.tsx
++++ b/src/app/(company)/products/page.tsx
+@@ -4,6 +4,8 @@ import { authOptions } from "@/lib/auth";
+ import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
+ import { productsService } from "@/modules/products/service";
+ import { categoriesService } from "@/modules/categories/service";
++import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
++import { prisma } from "@/lib/prisma";
+ import { ProductsTable } from "./products-table";
+ 
+ export default async function ProductsPage() {
+@@ -16,11 +18,23 @@ export default async function ProductsPage() {
+ 
+   const companyId = session.user.companyId;
+ 
+-  const [products, categories] = await Promise.all([
++  const ctx = await getTenantContext();
++  const [rawProducts, categories, branchId, branchCount] = await Promise.all([
+     productsService.list(companyId),
+     categoriesService.list(companyId),
++    resolveBranchId(ctx, companyId),
++    prisma.branch.count({ where: { companyId, isActive: true } }),
+   ]);
+ 
++  // La existencia es por sucursal: la tabla muestra la de la sucursal donde se opera
++  // (en empresas de una sola sucursal coincide con el total de siempre).
++  const branchStocks = branchId
++    ? await prisma.branchStock.findMany({ where: { branchId, product: { companyId } }, select: { productId: true, stock: true } })
++    : [];
++  const stockByProduct = new Map(branchStocks.map((s) => [s.productId, s.stock]));
++  const products = rawProducts.map((p) => (p.tracksInventory ? { ...p, stock: stockByProduct.get(p.id) ?? 0 } : p));
++  const multiBranch = branchCount > 1;
++
+   return (
+     <div>
+       <h1 className="font-display text-3xl font-semibold mb-1">Productos</h1>
+@@ -37,6 +51,7 @@ export default async function ProductsPage() {
+         <ProductsTable
+           initialProducts={JSON.parse(JSON.stringify(products))}
+           categories={JSON.parse(JSON.stringify(categories))}
++          multiBranch={multiBranch}
+         />
+       )}
+     </div>
+diff --git a/src/app/(company)/products/products-table.tsx b/src/app/(company)/products/products-table.tsx
+index fce6f89..59abbe7 100644
+--- a/src/app/(company)/products/products-table.tsx
++++ b/src/app/(company)/products/products-table.tsx
+@@ -33,9 +33,12 @@ function marginPercent(price: string, cost: string | null): string {
+ export function ProductsTable({
+   initialProducts,
+   categories,
++  multiBranch = false,
+ }: {
+   initialProducts: Product[];
+   categories: Category[];
++  /** true si la empresa tiene varias sucursales: la existencia mostrada es la de la sucursal activa. */
++  multiBranch?: boolean;
+ }) {
+   const [products, setProducts] = useState(initialProducts);
+   const [modalOpen, setModalOpen] = useState(false);
+@@ -233,7 +236,7 @@ export function ProductsTable({
+           </Field>
+ 
+           {form.tracksInventory && (
+-            <Field label="Existencias iniciales">
++            <Field label={multiBranch ? "Existencias iniciales (en esta sucursal)" : "Existencias iniciales"}>
+               <input
+                 type="number"
+                 step="1"
+@@ -277,6 +280,7 @@ export function ProductsTable({
+         <EditProductModal
+           product={editing}
+           categories={categories}
++          multiBranch={multiBranch}
+           onClose={() => setEditing(null)}
+           onSaved={(updated) => {
+             setProducts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+@@ -291,11 +295,13 @@ export function ProductsTable({
+ function EditProductModal({
+   product,
+   categories,
++  multiBranch,
+   onClose,
+   onSaved,
+ }: {
+   product: Product;
+   categories: Category[];
++  multiBranch: boolean;
+   onClose: () => void;
+   onSaved: (p: Product) => void;
+ }) {
+@@ -401,7 +407,7 @@ function EditProductModal({
+         </Field>
+ 
+         {form.tracksInventory && (
+-          <Field label="Existencias">
++          <Field label={multiBranch ? "Existencias (en esta sucursal)" : "Existencias"}>
+             <input
+               type="number"
+               step="1"
+diff --git a/src/app/api/alerts/route.ts b/src/app/api/alerts/route.ts
+index 1158a44..d843870 100644
+--- a/src/app/api/alerts/route.ts
++++ b/src/app/api/alerts/route.ts
+@@ -1,9 +1,9 @@
+ import { NextResponse } from "next/server";
+ import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
+-import { alertsService } from "@/modules/alerts/service";
++import { alertsService, alertBranchScope } from "@/modules/alerts/service";
+ 
+ export async function GET() {
+   const ctx = await getTenantContext();
+   const companyId = requireCompanyId(ctx);
+-  return NextResponse.json(await alertsService.getAlerts(companyId));
++  return NextResponse.json(await alertsService.getAlerts(companyId, await alertBranchScope(ctx, companyId)));
+ }
+diff --git a/src/app/api/export/route.ts b/src/app/api/export/route.ts
+index 0b4a837..65f19a2 100644
+--- a/src/app/api/export/route.ts
++++ b/src/app/api/export/route.ts
+@@ -9,11 +9,12 @@ const REQUIRED_PERMISSION: Record<ExportDataset, PermissionKey> = {
+   sales: PERMISSIONS.REPORTS_VIEW,
+   customers: PERMISSIONS.REPORTS_VIEW,
+   products: PERMISSIONS.PRODUCTS_MANAGE,
++  stock: PERMISSIONS.INVENTORY_MANAGE,
+   movements: PERMISSIONS.INVENTORY_MANAGE,
+ };
+ 
+ /**
+- * GET /api/export?dataset=sales|products|movements|customers[&from=YYYY-MM-DD&to=YYYY-MM-DD]
++ * GET /api/export?dataset=sales|products|stock|movements|customers[&from=YYYY-MM-DD&to=YYYY-MM-DD]
+  * Descarga un CSV. from/to aplican a ventas y movimientos de inventario.
+  */
+ export async function GET(req: Request) {
+diff --git a/src/app/api/inventory/route.ts b/src/app/api/inventory/route.ts
+index c3e5df8..067b95f 100644
+--- a/src/app/api/inventory/route.ts
++++ b/src/app/api/inventory/route.ts
+@@ -6,9 +6,11 @@ import { hasPermission, PERMISSIONS } from "@/lib/permissions";
+ export async function GET() {
+   const ctx = await getTenantContext();
+   const companyId = requireCompanyId(ctx);
++  const branchId = await resolveBranchId(ctx, companyId);
++  if (!branchId) return NextResponse.json({ error: "Sin sucursales configuradas" }, { status: 400 });
+ 
+   const [products, movements] = await Promise.all([
+-    inventoryService.listTrackedProducts(companyId),
++    inventoryService.listTrackedProducts(companyId, branchId),
+     inventoryService.listMovements(companyId),
+   ]);
+ 
+diff --git a/src/app/api/inventory/transfer/route.ts b/src/app/api/inventory/transfer/route.ts
+new file mode 100644
+index 0000000..c5364a4
+--- /dev/null
++++ b/src/app/api/inventory/transfer/route.ts
+@@ -0,0 +1,30 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { inventoryService, transferSchema } from "@/modules/inventory/service";
++
++/**
++ * POST /api/inventory/transfer — pasa mercancía de una sucursal a otra.
++ * Exige poder administrar inventario Y sucursales: mover existencias entre
++ * sucursales es una decisión del dueño/administrador, no del cajero.
++ */
++export async function POST(req: Request) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!hasPermission(ctx.permissions, PERMISSIONS.INVENTORY_MANAGE) || !hasPermission(ctx.permissions, PERMISSIONS.BRANCHES_MANAGE)) {
++    return NextResponse.json({ error: "No tienes permiso para transferir inventario entre sucursales" }, { status: 403 });
++  }
++
++  const parsed = transferSchema.safeParse(await req.json());
++  if (!parsed.success) {
++    return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++  }
++
++  try {
++    const transfer = await inventoryService.transfer(companyId, ctx.userId, parsed.data);
++    return NextResponse.json({ transfer }, { status: 201 });
++  } catch (err) {
++    return NextResponse.json({ error: err instanceof Error ? err.message : "No se pudo hacer la transferencia" }, { status: 400 });
++  }
++}
+diff --git a/src/app/api/products/[id]/route.ts b/src/app/api/products/[id]/route.ts
+index 0b2857a..219760a 100644
+--- a/src/app/api/products/[id]/route.ts
++++ b/src/app/api/products/[id]/route.ts
+@@ -1,6 +1,6 @@
+ import { NextResponse } from "next/server";
+ import { prisma } from "@/lib/prisma";
+-import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { getTenantContext, requireCompanyId, resolveBranchId } from "@/lib/tenant-context";
+ import { productsService, productSchema } from "@/modules/products/service";
+ import { hasPermission, PERMISSIONS } from "@/lib/permissions";
+ 
+@@ -39,7 +39,8 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
+         ? await prisma.product.findUnique({ where: { id: params.id }, select: { price: true, name: true } })
+         : null;
+ 
+-    const product = await productsService.update(companyId, params.id, parsed.data);
++    const branchId = await resolveBranchId(ctx, companyId);
++    const product = await productsService.update(companyId, params.id, parsed.data, { branchId, userId: ctx.userId });
+ 
+     if (before && product && before.price.toString() !== product.price.toString()) {
+       await prisma.auditLog.create({
+diff --git a/src/app/api/products/route.ts b/src/app/api/products/route.ts
+index 7e81d1f..b2e5149 100644
+--- a/src/app/api/products/route.ts
++++ b/src/app/api/products/route.ts
+@@ -1,5 +1,5 @@
+ import { NextResponse } from "next/server";
+-import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { getTenantContext, requireCompanyId, resolveBranchId } from "@/lib/tenant-context";
+ import { productsService, productSchema } from "@/modules/products/service";
+ import { hasPermission, PERMISSIONS } from "@/lib/permissions";
+ 
+@@ -24,6 +24,7 @@ export async function POST(req: Request) {
+     return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
+   }
+ 
+-  const product = await productsService.create(companyId, parsed.data);
++  const branchId = await resolveBranchId(ctx, companyId);
++  const product = await productsService.create(companyId, parsed.data, { branchId, userId: ctx.userId });
+   return NextResponse.json({ product }, { status: 201 });
+ }
+diff --git a/src/components/export-button.tsx b/src/components/export-button.tsx
+index 3c6a12f..829a591 100644
+--- a/src/components/export-button.tsx
++++ b/src/components/export-button.tsx
+@@ -5,7 +5,7 @@ export function ExportButton({
+   to,
+   label = "Exportar CSV",
+ }: {
+-  dataset: "sales" | "products" | "movements" | "customers";
++  dataset: "sales" | "products" | "stock" | "movements" | "customers";
+   from?: string;
+   to?: string;
+   label?: string;
+diff --git a/src/lib/plan-features.ts b/src/lib/plan-features.ts
+index d814255..d44943a 100644
+--- a/src/lib/plan-features.ts
++++ b/src/lib/plan-features.ts
+@@ -65,7 +65,7 @@ export const FEATURE_CATALOG: FeatureDef[] = [
+   { key: "api_basica", label: "API básica", status: "planned", enforced: false },
+   { key: "api_avanzada", label: "API avanzada", status: "planned", enforced: false },
+   { key: "permisos_avanzados", label: "Permisos avanzados", status: "planned", enforced: false },
+-  { key: "inventario_compartido", label: "Inventario compartido entre sucursales", status: "planned", enforced: false },
++  { key: "inventario_compartido", label: "Inventario por sucursal y transferencias entre sucursales", status: "live", enforced: false },
+   { key: "reportes_consolidados", label: "Reportes consolidados", status: "planned", enforced: false },
+   { key: "transferencias_automaticas", label: "Transferencias automáticas entre sucursales", status: "planned", enforced: false },
+   { key: "menus_por_turno", label: "Menús por turno/hora", status: "planned", enforced: false },
+diff --git a/src/modules/alerts/service.ts b/src/modules/alerts/service.ts
+index b7cb3ca..35a52c6 100644
+--- a/src/modules/alerts/service.ts
++++ b/src/modules/alerts/service.ts
+@@ -1,12 +1,25 @@
+ import { prisma } from "@/lib/prisma";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { resolveBranchId, type TenantContext } from "@/lib/tenant-context";
++
++/**
++ * Qué sucursales revisa cada quien: quien administra sucursales ve las de toda la
++ * empresa (undefined = todas); el resto, solo la sucursal donde opera.
++ */
++export async function alertBranchScope(ctx: TenantContext, companyId: string): Promise<string[] | undefined> {
++  if (hasPermission(ctx.permissions, PERMISSIONS.BRANCHES_MANAGE)) return undefined;
++  const branchId = await resolveBranchId(ctx, companyId);
++  return branchId ? [branchId] : [];
++}
+ 
+ /** Horas que una caja puede seguir abierta antes de avisar (turno olvidado sin cerrar). */
+ export const CASH_OPEN_ALERT_HOURS = 14;
+ 
+ export type StockAlert = {
+-  id: string;
++  id: string; // productId:branchId (único por producto y sucursal)
+   name: string;
+   category: string;
++  branchName: string;
+   stock: number;
+   minStock: number;
+   level: "OUT" | "LOW";
+@@ -21,34 +34,50 @@ export type CashAlert = {
+ 
+ /**
+  * Alertas operativas de una empresa, calculadas al momento (sin cron):
+- *  - Sin existencia: producto que controla inventario y ya está en 0.
+- *  - Stock bajo: existencia <= mínimo configurado (solo si el mínimo > 0).
++ *  - Sin existencia / stock bajo: por PRODUCTO Y SUCURSAL (la existencia real es por sucursal).
+  *  - Caja abierta demasiado tiempo: turno que se quedó sin cerrar.
++ *
++ * `branchIds`: limita las alertas a esas sucursales (quien no administra sucursales
++ * solo ve las de la suya). Sin él, se revisan todas las sucursales activas.
+  */
+ export const alertsService = {
+-  async getAlerts(companyId: string) {
+-    const [products, openRegisters] = await Promise.all([
++  async getAlerts(companyId: string, branchIds?: string[]) {
++    const [products, branches, openRegisters] = await Promise.all([
+       prisma.product.findMany({
+         where: { companyId, isActive: true, tracksInventory: true },
+-        select: { id: true, name: true, stock: true, minStock: true, category: { select: { name: true } } },
++        select: {
++          id: true,
++          name: true,
++          minStock: true,
++          category: { select: { name: true } },
++          branchStocks: { select: { branchId: true, stock: true } },
++        },
+         orderBy: { name: "asc" },
+       }),
++      prisma.branch.findMany({
++        where: { companyId, isActive: true, ...(branchIds ? { id: { in: branchIds } } : {}) },
++        select: { id: true, name: true },
++        orderBy: { createdAt: "asc" },
++      }),
+       prisma.cashRegister.findMany({
+-        where: { status: "OPEN", branch: { companyId } },
++        where: { status: "OPEN", branch: { companyId, ...(branchIds ? { id: { in: branchIds } } : {}) } },
+         select: { id: true, openedAt: true, branch: { select: { name: true } } },
+       }),
+     ]);
+ 
+     const stockAlerts: StockAlert[] = [];
+     for (const p of products) {
+-      if (p.stock <= 0) {
+-        stockAlerts.push({ id: p.id, name: p.name, category: p.category.name, stock: p.stock, minStock: p.minStock, level: "OUT" });
+-      } else if (p.minStock > 0 && p.stock <= p.minStock) {
+-        stockAlerts.push({ id: p.id, name: p.name, category: p.category.name, stock: p.stock, minStock: p.minStock, level: "LOW" });
++      for (const b of branches) {
++        const stock = p.branchStocks.find((s) => s.branchId === b.id)?.stock ?? 0;
++        const base = { id: `${p.id}:${b.id}`, name: p.name, category: p.category.name, branchName: b.name, stock, minStock: p.minStock };
++        if (stock <= 0) stockAlerts.push({ ...base, level: "OUT" });
++        else if (p.minStock > 0 && stock <= p.minStock) stockAlerts.push({ ...base, level: "LOW" });
+       }
+     }
+     // Primero los agotados, luego los bajos
+-    stockAlerts.sort((a, b) => (a.level === b.level ? a.name.localeCompare(b.name) : a.level === "OUT" ? -1 : 1));
++    stockAlerts.sort((a, b) =>
++      a.level === b.level ? a.name.localeCompare(b.name) || a.branchName.localeCompare(b.branchName) : a.level === "OUT" ? -1 : 1
++    );
+ 
+     const now = Date.now();
+     const cashAlerts: CashAlert[] = openRegisters
+@@ -63,7 +92,7 @@ export const alertsService = {
+     return { stockAlerts, cashAlerts, total: stockAlerts.length + cashAlerts.length };
+   },
+ 
+-  async count(companyId: string): Promise<number> {
+-    return (await this.getAlerts(companyId)).total;
++  async count(companyId: string, branchIds?: string[]): Promise<number> {
++    return (await this.getAlerts(companyId, branchIds)).total;
+   },
+ };
+diff --git a/src/modules/exports/service.ts b/src/modules/exports/service.ts
+index 9a6286a..7489204 100644
+--- a/src/modules/exports/service.ts
++++ b/src/modules/exports/service.ts
+@@ -1,7 +1,7 @@
+ import { prisma } from "@/lib/prisma";
+ import { toCsv } from "@/lib/csv";
+ 
+-export const EXPORT_DATASETS = ["sales", "products", "movements", "customers"] as const;
++export const EXPORT_DATASETS = ["sales", "products", "stock", "movements", "customers"] as const;
+ export type ExportDataset = (typeof EXPORT_DATASETS)[number];
+ 
+ const MAX_ROWS = 20000;
+@@ -95,19 +95,49 @@ export const exportsService = {
+       return { filename: `tappy-productos-${stamp}.csv`, csv, rows: products.length };
+     }
+ 
++    if (dataset === "stock") {
++      // Una fila por producto y sucursal activa (existencia real de cada sucursal).
++      const [products, branches] = await Promise.all([
++        prisma.product.findMany({
++          where: { companyId, tracksInventory: true },
++          include: { category: { select: { name: true } }, branchStocks: { select: { branchId: true, stock: true } } },
++          orderBy: { name: "asc" },
++          take: MAX_ROWS,
++        }),
++        prisma.branch.findMany({ where: { companyId, isActive: true }, select: { id: true, name: true }, orderBy: { createdAt: "asc" } }),
++      ]);
++      const rows = products.flatMap((p) =>
++        branches.map((b) => [
++          p.name,
++          p.sku ?? "",
++          p.category.name,
++          b.name,
++          p.branchStocks.find((s) => s.branchId === b.id)?.stock ?? 0,
++          p.minStock,
++          p.isActive ? "Sí" : "No",
++        ])
++      );
++      const csv = toCsv(["Producto", "SKU", "Categoría", "Sucursal", "Existencia", "Existencia mínima", "Activo"], rows);
++      return { filename: `tappy-existencias-por-sucursal-${stamp}.csv`, csv, rows: rows.length };
++    }
++
+     if (dataset === "movements") {
+       const movements = await prisma.inventoryMovement.findMany({
+         where: {
+           product: { companyId },
+           createdAt: { ...(range.from ? { gte: range.from } : {}), ...(range.to ? { lte: range.to } : {}) },
+         },
+-        include: { product: { select: { name: true } }, user: { select: { name: true } } },
++        include: {
++          product: { select: { name: true } },
++          user: { select: { name: true } },
++          branch: { select: { name: true } },
++        },
+         orderBy: { createdAt: "desc" },
+         take: MAX_ROWS,
+       });
+       const csv = toCsv(
+-        ["Fecha", "Producto", "Tipo", "Cantidad", "Motivo", "Usuario"],
+-        movements.map((m) => [m.createdAt, m.product.name, MOVEMENT_LABELS[m.type] ?? m.type, m.quantity, m.reason ?? "", m.user.name])
++        ["Fecha", "Sucursal", "Producto", "Tipo", "Cantidad", "Motivo", "Usuario"],
++        movements.map((m) => [m.createdAt, m.branch.name, m.product.name, MOVEMENT_LABELS[m.type] ?? m.type, m.quantity, m.reason ?? "", m.user.name])
+       );
+       return { filename: `tappy-movimientos-inventario-${stamp}.csv`, csv, rows: movements.length };
+     }
+diff --git a/src/modules/inventory/service.ts b/src/modules/inventory/service.ts
+index 04e682f..4d92458 100644
+--- a/src/modules/inventory/service.ts
++++ b/src/modules/inventory/service.ts
+@@ -1,4 +1,5 @@
+ import { prisma } from "@/lib/prisma";
++import { Prisma } from "@prisma/client";
+ import { z } from "zod";
+ 
+ export const movementSchema = z.object({
+@@ -8,19 +9,103 @@ export const movementSchema = z.object({
+   reason: z.string().optional(),
+ });
+ 
+-export const inventoryService = {
+-  async listTrackedProducts(companyId: string) {
+-    return prisma.product.findMany({
+-      where: { companyId, tracksInventory: true },
+-      include: { category: true },
+-      orderBy: { name: "asc" },
++export const transferSchema = z.object({
++  productId: z.string().min(1, "Selecciona un producto"),
++  fromBranchId: z.string().min(1),
++  toBranchId: z.string().min(1, "Selecciona la sucursal destino"),
++  quantity: z.coerce.number().int().min(1, "La cantidad debe ser al menos 1"),
++  note: z.string().max(200).optional(),
++});
++
++type Tx = Prisma.TransactionClient;
++
++/**
++ * INVENTARIO POR SUCURSAL
++ * - La existencia real vive en BranchStock (producto + sucursal). Sin fila = 0.
++ * - Product.stock se mantiene como el TOTAL de todas las sucursales, ajustado
++ *   en la MISMA transacción con el mismo delta, para que lo que lee el total
++ *   (productos, WhatsApp, reportes) nunca quede desfasado.
++ */
++
++/** Existencia de un producto en una sucursal (0 si nunca se ha movido ahí). */
++export async function getBranchStock(productId: string, branchId: string, db: Tx | typeof prisma = prisma): Promise<number> {
++  const row = await db.branchStock.findUnique({ where: { productId_branchId: { productId, branchId } }, select: { stock: true } });
++  return row?.stock ?? 0;
++}
++
++/**
++ * Aplica un cambio de existencia en una sucursal y en el total, de forma atómica.
++ *  - delta > 0: suma.
++ *  - delta < 0: resta; con clamp = true no baja de 0 (ventas: nunca bloquean el cobro),
++ *    con clamp = false lanza error si no alcanza.
++ * Devuelve el cambio realmente aplicado (puede ser menor en valor absoluto si hubo clamp).
++ */
++async function applyStockDelta(tx: Tx, productId: string, branchId: string, delta: number, clamp: boolean): Promise<number> {
++  if (delta === 0) return 0;
++
++  if (delta > 0) {
++    await tx.branchStock.upsert({
++      where: { productId_branchId: { productId, branchId } },
++      create: { productId, branchId, stock: delta },
++      update: { stock: { increment: delta } },
+     });
++    await tx.product.update({ where: { id: productId }, data: { stock: { increment: delta } } });
++    return delta;
++  }
++
++  const need = -delta;
++  // Resta condicionada: solo si hay suficiente. Evita quedar en negativo aunque
++  // dos ventas entren al mismo tiempo.
++  const done = await tx.branchStock.updateMany({
++    where: { productId, branchId, stock: { gte: need } },
++    data: { stock: { decrement: need } },
++  });
++  if (done.count === 1) {
++    await tx.product.update({ where: { id: productId }, data: { stock: { decrement: need } } });
++    return delta;
++  }
++
++  const current = await getBranchStock(productId, branchId, tx);
++  if (!clamp) throw new Error("La existencia no puede quedar en negativo");
++  if (current <= 0) return 0;
++
++  // Hay algo, pero menos de lo pedido: se lleva a 0 y se descuenta del total solo lo que había.
++  await tx.branchStock.updateMany({ where: { productId, branchId }, data: { stock: 0 } });
++  await tx.product.update({ where: { id: productId }, data: { stock: { decrement: current } } });
++  return -current;
++}
++
++export const inventoryService = {
++  /** Productos que controlan inventario, con la existencia de ESTA sucursal y del resto. */
++  async listTrackedProducts(companyId: string, branchId: string) {
++    const [products, branches] = await Promise.all([
++      prisma.product.findMany({
++        where: { companyId, tracksInventory: true },
++        include: { category: true, branchStocks: { select: { branchId: true, stock: true } } },
++        orderBy: { name: "asc" },
++      }),
++      prisma.branch.findMany({ where: { companyId, isActive: true }, select: { id: true, name: true }, orderBy: { createdAt: "asc" } }),
++    ]);
++
++    return products.map(({ branchStocks, ...p }) => ({
++      ...p,
++      // `stock` = existencia en la sucursal activa (lo que ve y opera esta sucursal)
++      stock: branchStocks.find((s) => s.branchId === branchId)?.stock ?? 0,
++      totalStock: p.stock,
++      otherBranches: branches
++        .filter((b) => b.id !== branchId)
++        .map((b) => ({ branchId: b.id, branchName: b.name, stock: branchStocks.find((s) => s.branchId === b.id)?.stock ?? 0 })),
++    }));
+   },
+ 
+   async listMovements(companyId: string, limit = 50) {
+     return prisma.inventoryMovement.findMany({
+       where: { product: { companyId } },
+-      include: { product: { select: { name: true } }, user: { select: { name: true } } },
++      include: {
++        product: { select: { name: true } },
++        user: { select: { name: true } },
++        branch: { select: { name: true } },
++      },
+       orderBy: { createdAt: "desc" },
+       take: limit,
+     });
+@@ -36,72 +121,142 @@ export const inventoryService = {
+     const delta =
+       input.type === "IN" ? Math.abs(input.quantity) : input.type === "ADJUSTMENT" ? input.quantity : -Math.abs(input.quantity);
+ 
+-    const newStock = product.stock + delta;
+-    if (newStock < 0) throw new Error("La existencia no puede quedar en negativo");
++    return prisma.$transaction(async (tx) => {
++      await applyStockDelta(tx, product.id, branchId, delta, false);
++      return tx.inventoryMovement.create({
++        data: { productId: product.id, branchId, userId, type: input.type, quantity: input.quantity, reason: input.reason },
++      });
++    });
++  },
+ 
+-    const [movement] = await prisma.$transaction([
+-      prisma.inventoryMovement.create({
+-        data: {
+-          productId: product.id,
+-          branchId,
+-          userId,
+-          type: input.type,
+-          quantity: input.quantity,
+-          reason: input.reason,
+-        },
+-      }),
+-      prisma.product.update({ where: { id: product.id }, data: { stock: newStock } }),
+-    ]);
++  /**
++   * Fija la existencia de ESTA sucursal en un valor exacto (se usa cuando alguien
++   * edita el "stock" desde el formulario de producto). Genera un ajuste en el historial.
++   */
++  async setBranchStock(companyId: string, branchId: string, userId: string, productId: string, newStock: number) {
++    const product = await prisma.product.findFirst({ where: { id: productId, companyId } });
++    if (!product || !product.tracksInventory) return;
+ 
+-    return movement;
++    await prisma.$transaction(async (tx) => {
++      const current = await getBranchStock(productId, branchId, tx);
++      const delta = newStock - current;
++      if (delta === 0) return;
++      await applyStockDelta(tx, productId, branchId, delta, false);
++      await tx.inventoryMovement.create({
++        data: { productId, branchId, userId, type: "ADJUSTMENT", quantity: delta, reason: "Ajuste desde edición de producto" },
++      });
++    });
+   },
+ 
+   /**
+    * Descuenta stock automáticamente cuando se concreta una venta.
+    * Se usa desde el servicio de ventas — nunca se expone como endpoint propio.
++   * Descuenta de la sucursal donde se vendió. Nunca bloquea la venta.
+    */
+   async deductForSale(branchId: string, userId: string, items: { productId: string; quantity: number }[]) {
+     for (const item of items) {
+-      const product = await prisma.product.findUnique({ where: { id: item.productId } });
++      const product = await prisma.product.findUnique({ where: { id: item.productId }, select: { id: true, tracksInventory: true } });
+       if (!product?.tracksInventory) continue;
+ 
+-      const newStock = Math.max(product.stock - item.quantity, 0);
+-      await prisma.$transaction([
+-        prisma.inventoryMovement.create({
+-          data: {
+-            productId: product.id,
+-            branchId,
+-            userId,
+-            type: "OUT",
+-            quantity: item.quantity,
+-            reason: "Venta",
+-          },
+-        }),
+-        prisma.product.update({ where: { id: product.id }, data: { stock: newStock } }),
+-      ]);
++      await prisma.$transaction(async (tx) => {
++        await applyStockDelta(tx, product.id, branchId, -item.quantity, true);
++        await tx.inventoryMovement.create({
++          data: { productId: product.id, branchId, userId, type: "OUT", quantity: item.quantity, reason: "Venta" },
++        });
++      });
+     }
+   },
+ 
+-  /** Repone el stock que se descontó por una venta que se está cancelando. */
++  /** Repone el stock que se descontó por una venta que se está cancelando (a la sucursal de esa venta). */
+   async restockForCancelledSale(branchId: string, userId: string, items: { productId: string; quantity: number }[]) {
+     for (const item of items) {
+-      const product = await prisma.product.findUnique({ where: { id: item.productId } });
++      const product = await prisma.product.findUnique({ where: { id: item.productId }, select: { id: true, tracksInventory: true } });
+       if (!product?.tracksInventory) continue;
+ 
+-      const newStock = product.stock + item.quantity;
+-      await prisma.$transaction([
+-        prisma.inventoryMovement.create({
+-          data: {
+-            productId: product.id,
+-            branchId,
+-            userId,
+-            type: "IN",
+-            quantity: item.quantity,
+-            reason: "Cancelación de venta",
+-          },
+-        }),
+-        prisma.product.update({ where: { id: product.id }, data: { stock: newStock } }),
+-      ]);
++      await prisma.$transaction(async (tx) => {
++        await applyStockDelta(tx, product.id, branchId, item.quantity, true);
++        await tx.inventoryMovement.create({
++          data: { productId: product.id, branchId, userId, type: "IN", quantity: item.quantity, reason: "Cancelación de venta" },
++        });
++      });
+     }
+   },
++
++  /** Alta de un producto con existencia inicial: la existencia queda en la sucursal donde se da de alta. */
++  async seedInitialStock(productId: string, branchId: string, userId: string, quantity: number) {
++    if (quantity <= 0) return;
++    await prisma.$transaction(async (tx) => {
++      // Product.stock ya se creó con `quantity`; solo falta la fila de la sucursal.
++      await tx.branchStock.upsert({
++        where: { productId_branchId: { productId, branchId } },
++        create: { productId, branchId, stock: quantity },
++        update: { stock: quantity },
++      });
++      await tx.inventoryMovement.create({
++        data: { productId, branchId, userId, type: "IN", quantity, reason: "Existencia inicial" },
++      });
++    });
++  },
++
++  /** Traspaso inmediato entre dos sucursales de la MISMA empresa. */
++  async transfer(companyId: string, userId: string, input: z.infer<typeof transferSchema>) {
++    if (input.fromBranchId === input.toBranchId) throw new Error("La sucursal origen y destino deben ser distintas");
++
++    const [product, branches] = await Promise.all([
++      prisma.product.findFirst({ where: { id: input.productId, companyId }, select: { id: true, name: true, tracksInventory: true } }),
++      prisma.branch.findMany({
++        where: { companyId, isActive: true, id: { in: [input.fromBranchId, input.toBranchId] } },
++        select: { id: true, name: true },
++      }),
++    ]);
++    if (!product) throw new Error("Producto no encontrado");
++    if (!product.tracksInventory) throw new Error("Este producto no controla inventario");
++    const from = branches.find((b) => b.id === input.fromBranchId);
++    const to = branches.find((b) => b.id === input.toBranchId);
++    if (!from || !to) throw new Error("Sucursal no válida");
++
++    const noteSuffix = input.note ? ` — ${input.note}` : "";
++
++    return prisma.$transaction(async (tx) => {
++      // La salida falla si la sucursal origen no tiene suficiente (no se permite negativo).
++      try {
++        await applyStockDelta(tx, product.id, from.id, -input.quantity, false);
++      } catch {
++        const available = await getBranchStock(product.id, from.id, tx);
++        throw new Error(`${from.name} solo tiene ${available} de ${product.name}`);
++      }
++      await applyStockDelta(tx, product.id, to.id, input.quantity, false);
++
++      await tx.inventoryMovement.createMany({
++        data: [
++          { productId: product.id, branchId: from.id, userId, type: "OUT", quantity: input.quantity, reason: `Transferencia a ${to.name}${noteSuffix}` },
++          { productId: product.id, branchId: to.id, userId, type: "IN", quantity: input.quantity, reason: `Transferencia desde ${from.name}${noteSuffix}` },
++        ],
++      });
++
++      const transfer = await tx.stockTransfer.create({
++        data: {
++          companyId,
++          productId: product.id,
++          fromBranchId: from.id,
++          toBranchId: to.id,
++          userId,
++          quantity: input.quantity,
++          note: input.note || null,
++        },
++      });
++
++      await tx.auditLog.create({
++        data: {
++          companyId,
++          userId,
++          action: "STOCK_TRANSFER",
++          entity: "StockTransfer",
++          entityId: transfer.id,
++          newData: { product: product.name, from: from.name, to: to.name, quantity: input.quantity },
++        },
++      });
++      return transfer;
++    });
++  },
+ };
+diff --git a/src/modules/products/service.ts b/src/modules/products/service.ts
+index 6449f43..49a1cfd 100644
+--- a/src/modules/products/service.ts
++++ b/src/modules/products/service.ts
+@@ -1,5 +1,6 @@
+ import { prisma } from "@/lib/prisma";
+ import { z } from "zod";
++import { inventoryService, getBranchStock } from "@/modules/inventory/service";
+ 
+ export const productSchema = z.object({
+   name: z.string().min(1, "El nombre es obligatorio"),
+@@ -22,8 +23,12 @@ export const productsService = {
+     });
+   },
+ 
+-  async create(companyId: string, input: z.infer<typeof productSchema>) {
+-    return prisma.product.create({
++  /**
++   * `branchId` + `userId`: sucursal donde se da de alta; si trae existencia inicial,
++   * se queda en ESA sucursal (las demás empiezan en 0).
++   */
++  async create(companyId: string, input: z.infer<typeof productSchema>, ctx?: { branchId: string | null; userId: string }) {
++    const product = await prisma.product.create({
+       data: {
+         companyId,
+         categoryId: input.categoryId,
+@@ -37,12 +42,36 @@ export const productsService = {
+         minStock: input.minStock ?? 0,
+       },
+     });
++
++    if (ctx?.branchId && product.tracksInventory && product.stock > 0) {
++      await inventoryService.seedInitialStock(product.id, ctx.branchId, ctx.userId, product.stock);
++    }
++    return product;
+   },
+ 
+-  async update(companyId: string, id: string, data: Partial<z.infer<typeof productSchema>>) {
+-    const result = await prisma.product.updateMany({ where: { id, companyId }, data });
++  async update(
++    companyId: string,
++    id: string,
++    data: Partial<z.infer<typeof productSchema>>,
++    ctx?: { branchId: string | null; userId: string }
++  ) {
++    // La existencia ya no se escribe directo en Product.stock (es el TOTAL de todas las
++    // sucursales): "stock" del formulario es la existencia de la sucursal donde se edita.
++    const { stock, ...rest } = data;
++
++    const result = await prisma.product.updateMany({ where: { id, companyId }, data: rest });
+     if (result.count === 0) throw new Error("Producto no encontrado");
+-    return prisma.product.findUnique({ where: { id } });
++
++    if (stock !== undefined && ctx?.branchId) {
++      await inventoryService.setBranchStock(companyId, ctx.branchId, ctx.userId, id, stock);
++    }
++
++    const product = await prisma.product.findUnique({ where: { id } });
++    // La tabla de productos muestra la existencia de la sucursal activa, no el total.
++    if (product?.tracksInventory && ctx?.branchId) {
++      return { ...product, stock: await getBranchStock(id, ctx.branchId) };
++    }
++    return product;
+   },
+ 
+   async setActive(companyId: string, id: string, isActive: boolean) {
+diff --git a/src/modules/whatsapp/cartManager.ts b/src/modules/whatsapp/cartManager.ts
+index 5c1cf60..22790a9 100644
+--- a/src/modules/whatsapp/cartManager.ts
++++ b/src/modules/whatsapp/cartManager.ts
+@@ -4,6 +4,7 @@
+  */
+ 
+ import { prisma } from "@/lib/prisma";
++import { getBranchStock } from "@/modules/inventory/service";
+ 
+ interface CartItem {
+   productId: string;
+@@ -14,7 +15,7 @@ interface CartItem {
+ }
+ 
+ export const cartManager = {
+-  async addItem(cartId: string, item: CartItem) {
++  async addItem(branchId: string, cartId: string, item: CartItem) {
+     try {
+       const product = await prisma.product.findUnique({
+         where: { id: item.productId },
+@@ -25,7 +26,7 @@ export const cartManager = {
+       }
+ 
+       // Solo se valida stock si el producto realmente controla inventario.
+-      if (product.tracksInventory && product.stock < item.quantity) {
++      if (product.tracksInventory && (await getBranchStock(product.id, branchId)) < item.quantity) {
+         throw new Error(`Stock insuficiente`);
+       }
+ 
+diff --git a/src/modules/whatsapp/catalogService.ts b/src/modules/whatsapp/catalogService.ts
+index 7c079b8..3137eb1 100644
+--- a/src/modules/whatsapp/catalogService.ts
++++ b/src/modules/whatsapp/catalogService.ts
+@@ -24,7 +24,8 @@ export const catalogService = {
+           products: {
+             where: {
+               isActive: true,
+-              OR: [{ tracksInventory: false }, { stock: { gt: 0 } }],
++              // Solo se ofrece lo que esta sucursal tiene en existencia (o no controla inventario).
++              OR: [{ tracksInventory: false }, { branchStocks: { some: { branchId, stock: { gt: 0 } } } }],
+             },
+             select: {
+               id: true,
+@@ -64,14 +65,19 @@ export const catalogService = {
+     }
+   },
+ 
+-  async isAvailable(productId: string, quantity: number = 1): Promise<boolean> {
++  async isAvailable(productId: string, branchId: string, quantity: number = 1): Promise<boolean> {
+     try {
+       const product = await prisma.product.findUnique({
+         where: { id: productId },
+-        select: { stock: true, tracksInventory: true, isActive: true },
++        select: { tracksInventory: true, isActive: true },
+       });
+       if (!product || !product.isActive) return false;
+-      return !product.tracksInventory || product.stock >= quantity;
++      if (!product.tracksInventory) return true;
++      const row = await prisma.branchStock.findUnique({
++        where: { productId_branchId: { productId, branchId } },
++        select: { stock: true },
++      });
++      return (row?.stock ?? 0) >= quantity;
+     } catch {
+       return false;
+     }
+diff --git a/src/modules/whatsapp/messageProcessor.ts b/src/modules/whatsapp/messageProcessor.ts
+index aed9ba1..f0d85d0 100644
+--- a/src/modules/whatsapp/messageProcessor.ts
++++ b/src/modules/whatsapp/messageProcessor.ts
+@@ -3,6 +3,7 @@
+  * Orquestra el flujo completo de WhatsApp Orders
+  */
+ 
++import { getBranchStock } from "@/modules/inventory/service";
+ import { prisma } from "@/lib/prisma";
+ import { aiInterpreter } from "./aiInterpreter";
+ import { catalogService } from "./catalogService";
+@@ -311,12 +312,13 @@ export const messageProcessor = {
+         if (!dbProduct) continue;
+ 
+         // Solo los productos que controlan inventario se bloquean por stock.
+-        if (dbProduct.tracksInventory && dbProduct.stock < qty) {
++        // (La existencia es por sucursal: se compara contra la de la sucursal que atiende este chat.)
++        if (dbProduct.tracksInventory && (await getBranchStock(dbProduct.id, branchId)) < qty) {
+           unavailable.push(capitalize(dbProduct.name));
+           continue;
+         }
+ 
+-        await cartManager.addItem(cart.id, {
++        await cartManager.addItem(branchId, cart.id, {
+           productId: dbProduct.id,
+           quantity: qty,
+           unitPrice: Number(dbProduct.price),
+-- 
+2.43.0
+

@@ -1,0 +1,770 @@
+From 8610a3c191d8c477b58a46c5e239e3f73d14ea7c Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Sun, 4 Oct 2026 05:45:18 +0000
+Subject: [PATCH] Funciones prometidas 1: alertas y stock minimo, exportacion
+ CSV, enlace Mi plan y pagos para el restaurante
+
+---
+ .../20261003180000_stock_minimo/migration.sql |   2 +
+ prisma/schema.prisma                          |   3 +
+ src/app/(company)/alerts/page.tsx             |  92 +++++++++++++
+ .../(company)/inventory/inventory-client.tsx  |  19 ++-
+ src/app/(company)/layout.tsx                  |  16 +++
+ src/app/(company)/products/products-table.tsx |  35 ++++-
+ .../sales-history/sales-history-client.tsx    |   4 +
+ src/app/api/alerts/route.ts                   |   9 ++
+ src/app/api/export/route.ts                   |  70 ++++++++++
+ src/components/export-button.tsx              |  25 ++++
+ src/lib/csv.ts                                |  25 ++++
+ src/lib/plan-features.ts                      |   6 +-
+ src/modules/alerts/service.ts                 |  69 ++++++++++
+ src/modules/exports/service.ts                | 128 ++++++++++++++++++
+ src/modules/products/service.ts               |   2 +
+ 15 files changed, 499 insertions(+), 6 deletions(-)
+ create mode 100644 prisma/migrations/20261003180000_stock_minimo/migration.sql
+ create mode 100644 src/app/(company)/alerts/page.tsx
+ create mode 100644 src/app/api/alerts/route.ts
+ create mode 100644 src/app/api/export/route.ts
+ create mode 100644 src/components/export-button.tsx
+ create mode 100644 src/lib/csv.ts
+ create mode 100644 src/modules/alerts/service.ts
+ create mode 100644 src/modules/exports/service.ts
+
+diff --git a/prisma/migrations/20261003180000_stock_minimo/migration.sql b/prisma/migrations/20261003180000_stock_minimo/migration.sql
+new file mode 100644
+index 0000000..2c1cd81
+--- /dev/null
++++ b/prisma/migrations/20261003180000_stock_minimo/migration.sql
+@@ -0,0 +1,2 @@
++-- AlterTable
++ALTER TABLE "products" ADD COLUMN     "minStock" INTEGER NOT NULL DEFAULT 0;
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 1213b5e..bea4670 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -367,6 +367,9 @@ model Product {
+   isActive    Boolean  @default(true)
+   tracksInventory Boolean @default(false)
+   stock       Int      @default(0)
++  // Existencia mínima: si stock <= minStock (y minStock > 0) el producto
++  // aparece en Alertas como "stock bajo". 0 = sin mínimo configurado.
++  minStock    Int      @default(0)
+   taxRate     Decimal  @default(0) @db.Decimal(5, 2) // porcentaje, ej. 16.00
+   createdAt   DateTime @default(now())
+   updatedAt   DateTime @updatedAt
+diff --git a/src/app/(company)/alerts/page.tsx b/src/app/(company)/alerts/page.tsx
+new file mode 100644
+index 0000000..cd953f3
+--- /dev/null
++++ b/src/app/(company)/alerts/page.tsx
+@@ -0,0 +1,92 @@
++import { redirect } from "next/navigation";
++import Link from "next/link";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
++import { alertsService, CASH_OPEN_ALERT_HOURS } from "@/modules/alerts/service";
++import { Card } from "@/components/ui";
++
++export default async function AlertsPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.INVENTORY_MANAGE)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++
++  const { stockAlerts, cashAlerts, total } = await alertsService.getAlerts(session.user.companyId);
++
++  return (
++    <div>
++      <h1 className="font-display text-3xl font-semibold mb-1">Alertas</h1>
++      <p className="text-muted text-sm mb-8">Lo que necesita tu atención hoy en inventario y caja.</p>
++
++      {total === 0 && (
++        <Card className="p-6 text-sm">
++          <p className="font-medium mb-1">Todo en orden ✓</p>
++          <p className="text-muted">
++            No hay productos agotados ni por debajo de su mínimo, y ninguna caja lleva demasiado tiempo abierta. Para recibir
++            avisos de stock bajo, define la existencia mínima de tus productos en{" "}
++            <Link href="/products" className="underline">
++              Productos
++            </Link>
++            .
++          </p>
++        </Card>
++      )}
++
++      {stockAlerts.length > 0 && (
++        <>
++          <p className="text-xs font-medium uppercase tracking-wide text-muted mb-3">Inventario ({stockAlerts.length})</p>
++          <Card className="overflow-hidden mb-8">
++            <table className="w-full text-sm">
++              <thead>
++                <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
++                  <th className="px-5 py-3 font-medium">Producto</th>
++                  <th className="px-5 py-3 font-medium">Categoría</th>
++                  <th className="px-5 py-3 font-medium">Existencia</th>
++                  <th className="px-5 py-3 font-medium">Mínimo</th>
++                  <th className="px-5 py-3 font-medium">Estado</th>
++                </tr>
++              </thead>
++              <tbody>
++                {stockAlerts.map((a) => (
++                  <tr key={a.id} className="border-b border-line last:border-0">
++                    <td className="px-5 py-3 font-medium">{a.name}</td>
++                    <td className="px-5 py-3 text-muted">{a.category}</td>
++                    <td className="px-5 py-3 font-mono">{a.stock}</td>
++                    <td className="px-5 py-3 font-mono text-muted">{a.minStock > 0 ? a.minStock : "—"}</td>
++                    <td className="px-5 py-3">
++                      <span className={a.level === "OUT" ? "text-ember-dark font-medium" : "text-marigold-dark font-medium"}>
++                        {a.level === "OUT" ? "Agotado" : "Stock bajo"}
++                      </span>
++                    </td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          </Card>
++        </>
++      )}
++
++      {cashAlerts.length > 0 && (
++        <>
++          <p className="text-xs font-medium uppercase tracking-wide text-muted mb-3">Caja ({cashAlerts.length})</p>
++          <Card className="overflow-hidden">
++            <ul className="text-sm">
++              {cashAlerts.map((c) => (
++                <li key={c.id} className="px-5 py-3 border-b border-line last:border-0">
++                  <span className="font-medium">{c.branchName}</span>: una caja lleva abierta <strong>{c.hoursOpen} horas</strong> (más
++                  de {CASH_OPEN_ALERT_HOURS}). ¿Se te olvidó hacer el corte?{" "}
++                  <Link href="/cash" className="underline">
++                    Ir a Caja
++                  </Link>
++                </li>
++              ))}
++            </ul>
++          </Card>
++        </>
++      )}
++    </div>
++  );
++}
+diff --git a/src/app/(company)/inventory/inventory-client.tsx b/src/app/(company)/inventory/inventory-client.tsx
+index 3806c03..b4ffde7 100644
+--- a/src/app/(company)/inventory/inventory-client.tsx
++++ b/src/app/(company)/inventory/inventory-client.tsx
+@@ -3,8 +3,9 @@
+ import { useEffect, useState } from "react";
+ import { Button, Card } from "@/components/ui";
+ import { Modal, Field, inputClass } from "@/components/ui/modal";
++import { ExportButton } from "@/components/export-button";
+ 
+-type Product = { id: string; name: string; stock: number; category: { name: string } };
++type Product = { id: string; name: string; stock: number; minStock: number; category: { name: string } };
+ type Movement = { id: string; type: string; quantity: number; reason: string | null; createdAt: string; product: { name: string }; user: { name: string } };
+ 
+ const TYPE_LABELS: Record<string, string> = { IN: "Entrada", OUT: "Salida", ADJUSTMENT: "Ajuste", WASTE: "Merma" };
+@@ -33,7 +34,9 @@ export function InventoryClient() {
+ 
+   return (
+     <div>
+-      <div className="flex justify-end mb-4">
++      <div className="flex justify-end gap-2 mb-4">
++        <ExportButton dataset="products" label="Exportar existencias (CSV)" />
++        <ExportButton dataset="movements" label="Exportar movimientos (CSV)" />
+         <Button onClick={() => setModalOpen(true)}>+ Registrar movimiento</Button>
+       </div>
+ 
+@@ -50,6 +53,8 @@ export function InventoryClient() {
+                 <th className="px-5 py-3 font-medium">Producto</th>
+                 <th className="px-5 py-3 font-medium">Categoría</th>
+                 <th className="px-5 py-3 font-medium">Existencia</th>
++                <th className="px-5 py-3 font-medium">Mínimo</th>
++                <th className="px-5 py-3 font-medium">Estado</th>
+               </tr>
+             </thead>
+             <tbody>
+@@ -58,6 +63,16 @@ export function InventoryClient() {
+                   <td className="px-5 py-3 font-medium">{p.name}</td>
+                   <td className="px-5 py-3 text-muted">{p.category.name}</td>
+                   <td className={`px-5 py-3 font-mono ${p.stock <= 0 ? "text-ember-dark" : ""}`}>{p.stock}</td>
++                  <td className="px-5 py-3 font-mono text-muted">{p.minStock > 0 ? p.minStock : "—"}</td>
++                  <td className="px-5 py-3 text-xs font-medium">
++                    {p.stock <= 0 ? (
++                      <span className="text-ember-dark">Agotado</span>
++                    ) : p.minStock > 0 && p.stock <= p.minStock ? (
++                      <span className="text-marigold-dark">Stock bajo</span>
++                    ) : (
++                      <span className="text-sage">OK</span>
++                    )}
++                  </td>
+                 </tr>
+               ))}
+             </tbody>
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index 3ee4d13..69f313d 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -7,6 +7,7 @@ import { FEATURE_KEYS } from "@/lib/plan-features";
+ import { hasPermission, PERMISSIONS, type PermissionKey } from "@/lib/permissions";
+ import { requireBillingAccess } from "@/lib/billing-gate";
+ import Link from "next/link";
++import { alertsService } from "@/modules/alerts/service";
+ 
+ const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey }[] = [
+   { href: "/pos", label: "Punto de Venta", permission: PERMISSIONS.SALES_CREATE },
+@@ -22,6 +23,9 @@ const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey
+   { href: "/branches", label: "Sucursales", permission: PERMISSIONS.BRANCHES_MANAGE },
+   { href: "/users", label: "Usuarios", permission: PERMISSIONS.USERS_MANAGE },
+   { href: "/settings", label: "Configuración", permission: PERMISSIONS.SETTINGS_MANAGE },
++  // El restaurante puede ver su plan y pagar su mensualidad en cualquier momento,
++  // no solo cuando el demo ya venció.
++  { href: "/facturacion", label: "Mi plan y pagos", permission: PERMISSIONS.SETTINGS_MANAGE },
+ ];
+ 
+ export default async function CompanyLayout({ children }: { children: React.ReactNode }) {
+@@ -60,6 +64,18 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+     ];
+   }
+ 
++  // Alertas (stock bajo / agotado / caja abierta de más): el nav muestra cuántas hay.
++  if (hasPermission(session.user.permissions, PERMISSIONS.INVENTORY_MANAGE)) {
++    const alertCount = await alertsService.count(session.user.companyId);
++    const inventoryIndex = navItems.findIndex((item) => item.href === "/inventory");
++    const alertItem = {
++      href: "/alerts",
++      label: alertCount > 0 ? `Alertas (${alertCount})` : "Alertas",
++      permission: PERMISSIONS.INVENTORY_MANAGE,
++    };
++    navItems = [...navItems.slice(0, inventoryIndex + 1), alertItem, ...navItems.slice(inventoryIndex + 1)];
++  }
++
+   const visibleNavItems = navItems.filter(
+     (item) => !item.permission || hasPermission(session.user.permissions, item.permission)
+   );
+diff --git a/src/app/(company)/products/products-table.tsx b/src/app/(company)/products/products-table.tsx
+index 1921054..fce6f89 100644
+--- a/src/app/(company)/products/products-table.tsx
++++ b/src/app/(company)/products/products-table.tsx
+@@ -1,5 +1,6 @@
+ "use client";
+ 
++import { ExportButton } from "@/components/export-button";
+ import { useState } from "react";
+ import { Button, Card, StatusBadge } from "@/components/ui";
+ import { Modal, Field, inputClass } from "@/components/ui/modal";
+@@ -17,6 +18,7 @@ type Product = {
+   categoryId: string;
+   tracksInventory: boolean;
+   stock: number;
++  minStock?: number;
+ };
+ 
+ function marginPercent(price: string, cost: string | null): string {
+@@ -48,6 +50,7 @@ export function ProductsTable({
+     sku: "",
+     tracksInventory: false,
+     stock: "",
++    minStock: "",
+   });
+ 
+   async function handleCreate(e: React.FormEvent) {
+@@ -86,6 +89,7 @@ export function ProductsTable({
+         sku: "",
+         tracksInventory: false,
+         stock: "",
++        minStock: "",
+       });
+     } catch {
+       setError("No se pudo conectar con el servidor. Revisa tu conexión e intenta de nuevo.");
+@@ -107,7 +111,8 @@ export function ProductsTable({
+ 
+   return (
+     <>
+-      <div className="flex justify-end mb-4">
++      <div className="flex justify-end gap-2 mb-4">
++        <ExportButton dataset="products" label="Exportar productos (CSV)" />
+         <Button onClick={() => setModalOpen(true)}>+ Nuevo producto</Button>
+       </div>
+ 
+@@ -241,6 +246,20 @@ export function ProductsTable({
+             </Field>
+           )}
+ 
++          {form.tracksInventory && (
++            <Field label="Existencia mínima (te avisamos en Alertas cuando baje de aquí)">
++              <input
++                type="number"
++                step="1"
++                min="0"
++                className={inputClass}
++                value={form.minStock}
++                onChange={(e) => setForm({ ...form, minStock: e.target.value })}
++                placeholder="10"
++              />
++            </Field>
++          )}
++
+           {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
+ 
+           <div className="flex justify-end gap-2">
+@@ -288,6 +307,7 @@ function EditProductModal({
+     sku: product.sku ?? "",
+     tracksInventory: product.tracksInventory ?? false,
+     stock: String(product.stock ?? 0),
++    minStock: String(product.minStock ?? 0),
+   });
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
+@@ -393,6 +413,19 @@ function EditProductModal({
+           </Field>
+         )}
+ 
++        {form.tracksInventory && (
++          <Field label="Existencia mínima (te avisamos en Alertas cuando baje de aquí)">
++            <input
++              type="number"
++              step="1"
++              min="0"
++              className={inputClass}
++              value={form.minStock}
++              onChange={(e) => setForm({ ...form, minStock: e.target.value })}
++            />
++          </Field>
++        )}
++
+         {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
+ 
+         <div className="flex justify-end gap-2">
+diff --git a/src/app/(company)/sales-history/sales-history-client.tsx b/src/app/(company)/sales-history/sales-history-client.tsx
+index 5ba31f5..433cf7e 100644
+--- a/src/app/(company)/sales-history/sales-history-client.tsx
++++ b/src/app/(company)/sales-history/sales-history-client.tsx
+@@ -3,6 +3,7 @@
+ import { useEffect, useState, Fragment } from "react";
+ import { formatMxn } from "@/lib/format";
+ import { Card } from "@/components/ui";
++import { ExportButton } from "@/components/export-button";
+ 
+ type OrderItem = { id: string; quantity: number; lineTotal: string; product: { name: string } };
+ type Payment = { id: string; method: string; status: string; amount: string };
+@@ -105,6 +106,9 @@ export function SalesHistoryClient() {
+         <button onClick={() => setPreset(1)} className="text-sm underline text-muted">Hoy</button>
+         <button onClick={() => setPreset(7)} className="text-sm underline text-muted">7 días</button>
+         <button onClick={() => setPreset(30)} className="text-sm underline text-muted">30 días</button>
++        <div className="ml-auto">
++          <ExportButton dataset="sales" from={from} to={to} label="Exportar ventas (CSV)" />
++        </div>
+       </div>
+ 
+       {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
+diff --git a/src/app/api/alerts/route.ts b/src/app/api/alerts/route.ts
+new file mode 100644
+index 0000000..1158a44
+--- /dev/null
++++ b/src/app/api/alerts/route.ts
+@@ -0,0 +1,9 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { alertsService } from "@/modules/alerts/service";
++
++export async function GET() {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++  return NextResponse.json(await alertsService.getAlerts(companyId));
++}
+diff --git a/src/app/api/export/route.ts b/src/app/api/export/route.ts
+new file mode 100644
+index 0000000..0b4a837
+--- /dev/null
++++ b/src/app/api/export/route.ts
+@@ -0,0 +1,70 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS, type PermissionKey } from "@/lib/permissions";
++import { prisma } from "@/lib/prisma";
++import { exportsService, EXPORT_DATASETS, type ExportDataset } from "@/modules/exports/service";
++
++/** Qué permiso exige cada exportación (el mismo que ya protege esa información en pantalla). */
++const REQUIRED_PERMISSION: Record<ExportDataset, PermissionKey> = {
++  sales: PERMISSIONS.REPORTS_VIEW,
++  customers: PERMISSIONS.REPORTS_VIEW,
++  products: PERMISSIONS.PRODUCTS_MANAGE,
++  movements: PERMISSIONS.INVENTORY_MANAGE,
++};
++
++/**
++ * GET /api/export?dataset=sales|products|movements|customers[&from=YYYY-MM-DD&to=YYYY-MM-DD]
++ * Descarga un CSV. from/to aplican a ventas y movimientos de inventario.
++ */
++export async function GET(req: Request) {
++  let ctx;
++  try {
++    ctx = await getTenantContext();
++  } catch {
++    return NextResponse.json({ error: "No autenticado" }, { status: 401 });
++  }
++  if (ctx.isSuperAdmin || !ctx.companyId) {
++    return NextResponse.json({ error: "No autorizado" }, { status: 403 });
++  }
++  const companyId = requireCompanyId(ctx);
++
++  const url = new URL(req.url);
++  const dataset = url.searchParams.get("dataset") as ExportDataset | null;
++  if (!dataset || !EXPORT_DATASETS.includes(dataset)) {
++    return NextResponse.json({ error: "Tipo de exportación no válido" }, { status: 400 });
++  }
++  if (!hasPermission(ctx.permissions, REQUIRED_PERMISSION[dataset])) {
++    return NextResponse.json({ error: "No tienes permiso para exportar esta información" }, { status: 403 });
++  }
++
++  const isoDate = /^\d{4}-\d{2}-\d{2}$/;
++  const from = url.searchParams.get("from");
++  const to = url.searchParams.get("to");
++  if ((from && !isoDate.test(from)) || (to && !isoDate.test(to))) {
++    return NextResponse.json({ error: "Fechas no válidas (usa AAAA-MM-DD)" }, { status: 400 });
++  }
++
++  const { filename, csv, rows } = await exportsService.build(companyId, dataset, {
++    from: from ? new Date(`${from}T00:00:00`) : undefined,
++    to: to ? new Date(`${to}T23:59:59`) : undefined,
++  });
++
++  await prisma.auditLog.create({
++    data: {
++      companyId,
++      userId: ctx.userId,
++      action: "DATA_EXPORT",
++      entity: "Export",
++      entityId: dataset,
++      newData: { dataset, from, to, rows },
++    },
++  });
++
++  return new NextResponse(csv, {
++    headers: {
++      "Content-Type": "text/csv; charset=utf-8",
++      "Content-Disposition": `attachment; filename="${filename}"`,
++      "Cache-Control": "no-store",
++    },
++  });
++}
+diff --git a/src/components/export-button.tsx b/src/components/export-button.tsx
+new file mode 100644
+index 0000000..3c6a12f
+--- /dev/null
++++ b/src/components/export-button.tsx
+@@ -0,0 +1,25 @@
++/** Botón "Exportar a Excel (CSV)": simple enlace de descarga a /api/export. */
++export function ExportButton({
++  dataset,
++  from,
++  to,
++  label = "Exportar CSV",
++}: {
++  dataset: "sales" | "products" | "movements" | "customers";
++  from?: string;
++  to?: string;
++  label?: string;
++}) {
++  const params = new URLSearchParams({ dataset });
++  if (from) params.set("from", from);
++  if (to) params.set("to", to);
++
++  return (
++    <a
++      href={`/api/export?${params.toString()}`}
++      className="inline-flex items-center rounded-md border border-line bg-white px-3 py-2 text-sm font-medium hover:bg-paper"
++    >
++      ⬇ {label}
++    </a>
++  );
++}
+diff --git a/src/lib/csv.ts b/src/lib/csv.ts
+new file mode 100644
+index 0000000..ba1f5aa
+--- /dev/null
++++ b/src/lib/csv.ts
+@@ -0,0 +1,25 @@
++/**
++ * Utilidades CSV para exportar información.
++ *  - BOM UTF-8 al inicio: sin él Excel en español muestra mal los acentos.
++ *  - Comillas dobles escapadas y saltos de línea dentro de celdas.
++ *  - Protección contra "CSV injection": si un texto capturado por un usuario
++ *    empieza con = + - @ (ej. un nombre de producto "=HYPERLINK(...)"), Excel
++ *    lo ejecutaría como fórmula. Se le antepone un apóstrofo para que sea texto.
++ */
++export type CsvCell = string | number | boolean | Date | null | undefined;
++
++function escapeCell(value: CsvCell, isText: boolean): string {
++  if (value === null || value === undefined) return "";
++  let text = value instanceof Date ? value.toISOString().replace("T", " ").slice(0, 19) : String(value);
++  if (isText && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
++  if (/[",\n\r]/.test(text)) text = `"${text.replace(/"/g, '""')}"`;
++  return text;
++}
++
++export function toCsv(headers: string[], rows: CsvCell[][]): string {
++  const lines = [
++    headers.map((h) => escapeCell(h, false)).join(","),
++    ...rows.map((row) => row.map((cell) => escapeCell(cell, typeof cell === "string")).join(",")),
++  ];
++  return "\uFEFF" + lines.join("\r\n") + "\r\n";
++}
+diff --git a/src/lib/plan-features.ts b/src/lib/plan-features.ts
+index 7f7aa1a..0c6501b 100644
+--- a/src/lib/plan-features.ts
++++ b/src/lib/plan-features.ts
+@@ -50,7 +50,7 @@ export const FEATURE_CATALOG: FeatureDef[] = [
+   { key: "historial_movimientos", label: "Historial de movimientos", status: "live", enforced: false },
+ 
+   // ── Construidas a medias ────────────────────────────────────────────
+-  { key: "inventario_avanzado", label: "Inventario avanzado", status: "partial", enforced: false },
++  { key: "inventario_avanzado", label: "Inventario avanzado (mínimos, alertas, movimientos)", status: "live", enforced: false },
+   { key: "promociones_descuentos", label: "Promociones y descuentos", status: "partial", enforced: false },
+   { key: "multi_sucursal", label: "Multi-sucursal", status: "partial", enforced: false },
+   { key: "dashboard_avanzado", label: "Dashboard avanzado (15+ gráficos)", status: "partial", enforced: false },
+@@ -58,8 +58,8 @@ export const FEATURE_CATALOG: FeatureDef[] = [
+ 
+   // ── Sin construir (hoy solo son promesa comercial) ──────────────────
+   { key: "compras_proveedores", label: "Compras y proveedores", status: "planned", enforced: false },
+-  { key: "alertas", label: "Alertas", status: "planned", enforced: false },
+-  { key: "exportacion_informacion", label: "Exportación de información", status: "planned", enforced: false },
++  { key: "alertas", label: "Alertas", status: "live", enforced: false },
++  { key: "exportacion_informacion", label: "Exportación de información", status: "live", enforced: false },
+   { key: "automatizaciones_basicas", label: "Automatizaciones básicas", status: "planned", enforced: false },
+   { key: "automatizaciones_avanzadas", label: "Automatizaciones avanzadas", status: "planned", enforced: false },
+   { key: "api_basica", label: "API básica", status: "planned", enforced: false },
+diff --git a/src/modules/alerts/service.ts b/src/modules/alerts/service.ts
+new file mode 100644
+index 0000000..b7cb3ca
+--- /dev/null
++++ b/src/modules/alerts/service.ts
+@@ -0,0 +1,69 @@
++import { prisma } from "@/lib/prisma";
++
++/** Horas que una caja puede seguir abierta antes de avisar (turno olvidado sin cerrar). */
++export const CASH_OPEN_ALERT_HOURS = 14;
++
++export type StockAlert = {
++  id: string;
++  name: string;
++  category: string;
++  stock: number;
++  minStock: number;
++  level: "OUT" | "LOW";
++};
++
++export type CashAlert = {
++  id: string;
++  branchName: string;
++  openedAt: string;
++  hoursOpen: number;
++};
++
++/**
++ * Alertas operativas de una empresa, calculadas al momento (sin cron):
++ *  - Sin existencia: producto que controla inventario y ya está en 0.
++ *  - Stock bajo: existencia <= mínimo configurado (solo si el mínimo > 0).
++ *  - Caja abierta demasiado tiempo: turno que se quedó sin cerrar.
++ */
++export const alertsService = {
++  async getAlerts(companyId: string) {
++    const [products, openRegisters] = await Promise.all([
++      prisma.product.findMany({
++        where: { companyId, isActive: true, tracksInventory: true },
++        select: { id: true, name: true, stock: true, minStock: true, category: { select: { name: true } } },
++        orderBy: { name: "asc" },
++      }),
++      prisma.cashRegister.findMany({
++        where: { status: "OPEN", branch: { companyId } },
++        select: { id: true, openedAt: true, branch: { select: { name: true } } },
++      }),
++    ]);
++
++    const stockAlerts: StockAlert[] = [];
++    for (const p of products) {
++      if (p.stock <= 0) {
++        stockAlerts.push({ id: p.id, name: p.name, category: p.category.name, stock: p.stock, minStock: p.minStock, level: "OUT" });
++      } else if (p.minStock > 0 && p.stock <= p.minStock) {
++        stockAlerts.push({ id: p.id, name: p.name, category: p.category.name, stock: p.stock, minStock: p.minStock, level: "LOW" });
++      }
++    }
++    // Primero los agotados, luego los bajos
++    stockAlerts.sort((a, b) => (a.level === b.level ? a.name.localeCompare(b.name) : a.level === "OUT" ? -1 : 1));
++
++    const now = Date.now();
++    const cashAlerts: CashAlert[] = openRegisters
++      .map((r) => ({
++        id: r.id,
++        branchName: r.branch.name,
++        openedAt: r.openedAt.toISOString(),
++        hoursOpen: Math.floor((now - r.openedAt.getTime()) / 3_600_000),
++      }))
++      .filter((r) => r.hoursOpen >= CASH_OPEN_ALERT_HOURS);
++
++    return { stockAlerts, cashAlerts, total: stockAlerts.length + cashAlerts.length };
++  },
++
++  async count(companyId: string): Promise<number> {
++    return (await this.getAlerts(companyId)).total;
++  },
++};
+diff --git a/src/modules/exports/service.ts b/src/modules/exports/service.ts
+new file mode 100644
+index 0000000..9a6286a
+--- /dev/null
++++ b/src/modules/exports/service.ts
+@@ -0,0 +1,128 @@
++import { prisma } from "@/lib/prisma";
++import { toCsv } from "@/lib/csv";
++
++export const EXPORT_DATASETS = ["sales", "products", "movements", "customers"] as const;
++export type ExportDataset = (typeof EXPORT_DATASETS)[number];
++
++const MAX_ROWS = 20000;
++
++const STATUS_LABELS: Record<string, string> = {
++  PENDING: "Pendiente",
++  IN_PREPARATION: "En preparación",
++  READY: "Lista",
++  DELIVERED: "Entregada",
++  CANCELED: "Cancelada",
++};
++const TYPE_LABELS: Record<string, string> = { COMER_AQUI: "Comer aquí", PARA_LLEVAR: "Para llevar", DOMICILIO: "A domicilio" };
++const METHOD_LABELS: Record<string, string> = {
++  CASH: "Efectivo",
++  CARD: "Tarjeta",
++  TRANSFER: "Transferencia",
++  OTHER: "Otro",
++  MERCADOPAGO: "Mercado Pago (link/QR)",
++  MERCADOPAGO_TERMINAL: "Mercado Pago (terminal)",
++};
++const MOVEMENT_LABELS: Record<string, string> = { IN: "Entrada", OUT: "Salida", ADJUSTMENT: "Ajuste", WASTE: "Merma" };
++
++export const exportsService = {
++  /** Devuelve { filename, csv } listo para responder. Todo filtrado por companyId. */
++  async build(companyId: string, dataset: ExportDataset, range: { from?: Date; to?: Date }) {
++    const stamp = new Date().toISOString().slice(0, 10);
++
++    if (dataset === "sales") {
++      const orders = await prisma.order.findMany({
++        where: {
++          companyId,
++          isOpenTab: false,
++          createdAt: { ...(range.from ? { gte: range.from } : {}), ...(range.to ? { lte: range.to } : {}) },
++        },
++        include: {
++          items: { include: { product: { select: { name: true } } } },
++          payments: { select: { method: true, status: true, amount: true } },
++          user: { select: { name: true } },
++          table: { select: { name: true } },
++          branch: { select: { name: true } },
++        },
++        orderBy: { createdAt: "desc" },
++        take: MAX_ROWS,
++      });
++
++      const csv = toCsv(
++        ["Folio", "Fecha", "Sucursal", "Atendió", "Mesa", "Tipo", "Estatus", "Productos", "Subtotal", "Descuento", "Impuesto", "Total", "Pago"],
++        orders.map((o) => [
++          o.orderNumber,
++          o.createdAt,
++          o.branch?.name ?? "",
++          o.user?.name ?? "",
++          o.table?.name ?? "",
++          TYPE_LABELS[o.orderType] ?? o.orderType,
++          STATUS_LABELS[o.status] ?? o.status,
++          o.items.map((i) => `${i.quantity} x ${i.product.name}`).join("; "),
++          Number(o.subtotal),
++          Number(o.discount),
++          Number(o.tax),
++          Number(o.total),
++          o.payments
++            .filter((p) => p.status === "APPROVED")
++            .map((p) => `${METHOD_LABELS[p.method] ?? p.method} ${Number(p.amount).toFixed(2)}`)
++            .join("; "),
++        ])
++      );
++      return { filename: `tappy-ventas-${stamp}.csv`, csv, rows: orders.length };
++    }
++
++    if (dataset === "products") {
++      const products = await prisma.product.findMany({
++        where: { companyId },
++        include: { category: { select: { name: true } } },
++        orderBy: { name: "asc" },
++        take: MAX_ROWS,
++      });
++      const csv = toCsv(
++        ["Producto", "SKU", "Categoría", "Precio", "Costo", "Controla inventario", "Existencia", "Existencia mínima", "Activo"],
++        products.map((p) => [
++          p.name,
++          p.sku ?? "",
++          p.category.name,
++          Number(p.price),
++          p.cost === null ? "" : Number(p.cost),
++          p.tracksInventory ? "Sí" : "No",
++          p.tracksInventory ? p.stock : "",
++          p.tracksInventory ? p.minStock : "",
++          p.isActive ? "Sí" : "No",
++        ])
++      );
++      return { filename: `tappy-productos-${stamp}.csv`, csv, rows: products.length };
++    }
++
++    if (dataset === "movements") {
++      const movements = await prisma.inventoryMovement.findMany({
++        where: {
++          product: { companyId },
++          createdAt: { ...(range.from ? { gte: range.from } : {}), ...(range.to ? { lte: range.to } : {}) },
++        },
++        include: { product: { select: { name: true } }, user: { select: { name: true } } },
++        orderBy: { createdAt: "desc" },
++        take: MAX_ROWS,
++      });
++      const csv = toCsv(
++        ["Fecha", "Producto", "Tipo", "Cantidad", "Motivo", "Usuario"],
++        movements.map((m) => [m.createdAt, m.product.name, MOVEMENT_LABELS[m.type] ?? m.type, m.quantity, m.reason ?? "", m.user.name])
++      );
++      return { filename: `tappy-movimientos-inventario-${stamp}.csv`, csv, rows: movements.length };
++    }
++
++    // customers
++    const customers = await prisma.customer.findMany({
++      where: { companyId },
++      include: { _count: { select: { orders: true } } },
++      orderBy: { name: "asc" },
++      take: MAX_ROWS,
++    });
++    const csv = toCsv(
++      ["Cliente", "Teléfono", "Correo", "Pedidos", "Alta"],
++      customers.map((c) => [c.name, c.phone ?? "", c.email ?? "", c._count.orders, c.createdAt])
++    );
++    return { filename: `tappy-clientes-${stamp}.csv`, csv, rows: customers.length };
++  },
++};
+diff --git a/src/modules/products/service.ts b/src/modules/products/service.ts
+index f69c66a..6449f43 100644
+--- a/src/modules/products/service.ts
++++ b/src/modules/products/service.ts
+@@ -10,6 +10,7 @@ export const productSchema = z.object({
+   description: z.string().optional(),
+   tracksInventory: z.boolean().optional(),
+   stock: z.coerce.number().int().min(0).optional(),
++  minStock: z.coerce.number().int().min(0).optional(),
+ });
+ 
+ export const productsService = {
+@@ -33,6 +34,7 @@ export const productsService = {
+         description: input.description,
+         tracksInventory: input.tracksInventory ?? false,
+         stock: input.stock ?? 0,
++        minStock: input.minStock ?? 0,
+       },
+     });
+   },
+-- 
+2.43.0
+
