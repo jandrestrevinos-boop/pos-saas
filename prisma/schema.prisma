@@ -217,6 +217,7 @@ model Subscription {
   // Cobro mensual. renewalDate = "pagado hasta" (fin del periodo pagado).
   trialEndsAt     DateTime? // fin del demo (solo aplica mientras status = TRIALING)
   mpPreapprovalId String?   @unique // suscripción recurrente en la cuenta de Mercado Pago de Jose
+  paypalSubscriptionId String? @unique // suscripción recurrente en PayPal (cuenta de Tappy)
   payerEmail      String?
 
   license  License?
@@ -247,6 +248,7 @@ model License {
 enum SubscriptionPaymentMethod {
   MERCADOPAGO
   MANUAL
+  PAYPAL
 }
 
 enum SubscriptionPaymentStatus {
@@ -269,6 +271,7 @@ model SubscriptionPayment {
   status      SubscriptionPaymentStatus @default(PENDING)
   method      SubscriptionPaymentMethod @default(MERCADOPAGO)
   mpPaymentId String?                   @unique
+  paypalPaymentId String? @unique
 
   periodStart DateTime?
   periodEnd   DateTime?

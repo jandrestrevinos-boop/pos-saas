@@ -27,7 +27,7 @@ type Overview = {
     id: string;
     amountMxn: number;
     status: string;
-    method: "MERCADOPAGO" | "MANUAL";
+    method: "MERCADOPAGO" | "MANUAL" | "PAYPAL";
     paidAt: string | null;
     periodEnd: string | null;
     note: string | null;
@@ -46,6 +46,7 @@ export function FacturacionClient({ overview, canPay }: { overview: Overview; ca
 
   const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loadingPaypal, setLoadingPaypal] = useState(false);
   const [error, setError] = useState("");
   const [polls, setPolls] = useState(0);
 
@@ -77,6 +78,19 @@ export function FacturacionClient({ overview, canPay }: { overview: Overview; ca
     if (!res.ok) {
       setLoading(false);
       setError(data.error ?? "No se pudo generar el link de pago");
+      return;
+    }
+    window.location.href = data.checkoutUrl;
+  }
+
+  async function payWithPaypal() {
+    setError("");
+    setLoadingPaypal(true);
+    const res = await fetch("/api/billing/paypal/checkout", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) {
+      setLoadingPaypal(false);
+      setError(data.error ?? "No se pudo generar el pago con PayPal");
       return;
     }
     window.location.href = data.checkoutUrl;
@@ -127,7 +141,7 @@ export function FacturacionClient({ overview, canPay }: { overview: Overview; ca
 
         {returning && access.state !== "ACTIVE" && polls < 12 && (
           <p className="text-sm rounded-md bg-marigold/10 border border-marigold/30 px-3 py-2 mb-4">
-            Estamos confirmando tu pago con Mercado Pago… esta pantalla se actualiza sola.
+            Estamos confirmando tu pago… esta pantalla se actualiza sola.
           </p>
         )}
         {returning && access.state === "ACTIVE" && (
@@ -160,13 +174,25 @@ export function FacturacionClient({ overview, canPay }: { overview: Overview; ca
               />
             </div>
             {error && <p className="text-sm text-ember-dark">{error}</p>}
-            <Button type="submit" disabled={loading}>
+            <Button type="submit" disabled={loading || loadingPaypal}>
               {loading ? "Redirigiendo…" : access.state === "DEMO" ? "Suscribirme con Mercado Pago" : "Pagar con Mercado Pago"}
             </Button>
             <p className="text-xs text-muted">
               Autorizas un cargo mensual automático que puedes cancelar en tu cuenta de Mercado Pago.
             </p>
           </form>
+        )}
+
+        {showPay && access.state !== "ACTIVE" && (
+          <div className="space-y-2 mt-4 pt-4 border-t border-line">
+            <p className="text-sm text-muted">¿Prefieres PayPal? No necesitas escribir tu correo aquí.</p>
+            <Button type="button" variant="ghost" onClick={payWithPaypal} disabled={loading || loadingPaypal}>
+              {loadingPaypal ? "Redirigiendo…" : access.state === "DEMO" ? "Suscribirme con PayPal" : "Pagar con PayPal"}
+            </Button>
+            <p className="text-xs text-muted">
+              Autorizas un cargo mensual automático que puedes cancelar en tu cuenta de PayPal.
+            </p>
+          </div>
         )}
 
         {overview.hasRecurringCharge && access.state === "ACTIVE" && (
@@ -183,7 +209,7 @@ export function FacturacionClient({ overview, canPay }: { overview: Overview; ca
                 <tr key={p.id} className="border-b border-line last:border-0">
                   <td className="px-5 py-3">{fmtDate(p.paidAt)}</td>
                   <td className="px-5 py-3 font-mono">{formatMxn(p.amountMxn)}</td>
-                  <td className="px-5 py-3 text-muted">{p.method === "MANUAL" ? "Pago manual" : "Mercado Pago"}</td>
+                  <td className="px-5 py-3 text-muted">{p.method === "MANUAL" ? "Pago manual" : p.method === "PAYPAL" ? "PayPal" : "Mercado Pago"}</td>
                   <td className="px-5 py-3 text-muted">hasta {fmtDate(p.periodEnd)}</td>
                 </tr>
               ))}

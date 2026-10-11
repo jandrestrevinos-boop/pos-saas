@@ -1,6 +1,7 @@
 "use client";
 
 import { ExportButton } from "@/components/export-button";
+import { ImportProductsButton } from "@/components/import-products-button";
 import { useState } from "react";
 import { Button, Card, StatusBadge } from "@/components/ui";
 import { Modal, Field, inputClass } from "@/components/ui/modal";
@@ -116,6 +117,7 @@ export function ProductsTable({
     <>
       <div className="flex justify-end gap-2 mb-4">
         <ExportButton dataset="products" label="Exportar productos (CSV)" />
+        <ImportProductsButton />
         <Button onClick={() => setModalOpen(true)}>+ Nuevo producto</Button>
       </div>
 

@@ -151,7 +151,7 @@ export const billingService = {
       companyStatus: company.status,
       planName: sub?.plan.name ?? null,
       priceMxn: sub ? effectivePriceMxn(sub) : null,
-      hasRecurringCharge: !!sub?.mpPreapprovalId,
+      hasRecurringCharge: !!sub?.mpPreapprovalId || !!sub?.paypalSubscriptionId,
       access: {
         state: access.state,
         allowed: access.allowed,
@@ -331,8 +331,9 @@ export const billingService = {
   async recordApprovedPayment(params: {
     sub: SubWithPlan;
     amountMxn: number;
-    method: "MERCADOPAGO" | "MANUAL";
+    method: "MERCADOPAGO" | "MANUAL" | "PAYPAL";
     mpPaymentId?: string;
+    paypalPaymentId?: string;
     months: number;
     note?: string;
     performedById?: string;
@@ -341,6 +342,10 @@ export const billingService = {
 
     if (params.mpPaymentId) {
       const existing = await prisma.subscriptionPayment.findUnique({ where: { mpPaymentId: params.mpPaymentId } });
+      if (existing) return { ok: true as const, duplicate: true as const };
+    }
+    if (params.paypalPaymentId) {
+      const existing = await prisma.subscriptionPayment.findUnique({ where: { paypalPaymentId: params.paypalPaymentId } });
       if (existing) return { ok: true as const, duplicate: true as const };
     }
 
@@ -359,6 +364,7 @@ export const billingService = {
             status: "APPROVED",
             method: params.method,
             mpPaymentId: params.mpPaymentId ?? null,
+            paypalPaymentId: params.paypalPaymentId ?? null,
             periodStart,
             periodEnd,
             paidAt: now,
