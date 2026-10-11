@@ -21,6 +21,8 @@ model Company {
   legalName String?
   taxId     String? // RFC (para cuando se integre facturación)
   status    CompanyStatus @default(ACTIVE)
+  // Las empresas existentes quedan como RESTAURANTE (default), sin tocar sus datos.
+  businessType BusinessType @default(RESTAURANTE)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   whatsAppConfigs   WhatsAppConfig[]
@@ -77,6 +79,16 @@ enum CompanyStatus {
   ACTIVE
   SUSPENDED
   CANCELLED
+}
+
+/// Tipo de negocio (vertical de Tappy). Lo elige Jose en Super Admin al dar de alta
+/// la empresa. El catálogo con lo que implica cada tipo vive en src/lib/verticals.ts.
+enum BusinessType {
+  RESTAURANTE
+  CAFETERIA
+  ESCUELA
+  DISTRIBUIDOR
+  LABORATORIO
 }
 
 /// Configuraci\u00f3n de la plataforma (fila \u00fanica / singleton). Empieza solo

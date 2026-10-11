@@ -6,6 +6,7 @@ import { Modal, Field, inputClass } from "@/components/ui/modal";
 import { formatMxn } from "@/lib/format";
 import { FEATURE_CATALOG } from "@/lib/plan-features";
 import { computeBillingAccess } from "@/lib/billing";
+import { BUSINESS_TYPES, VERTICALS, getVertical, verticalOptionLabel } from "@/lib/verticals";
 // FEATURE_CATALOG ahora es [{ key, label, status }] — customFeatures y
 // plan.features guardan `key`, la UI muestra `label`.
 
@@ -14,6 +15,7 @@ type Role = { id: string; name: string };
 type Company = {
   id: string;
   name: string;
+  businessType?: string;
   status: "ACTIVE" | "SUSPENDED" | "CANCELLED";
   branches: { id: string }[];
   users: { id: string }[];
@@ -85,7 +87,7 @@ export function CompaniesTable({
   const [billingCompany, setBillingCompany] = useState<Company | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [form, setForm] = useState({ name: "", branchName: "Principal", planId: plans[0]?.id ?? "" });
+  const [form, setForm] = useState({ name: "", branchName: "Principal", planId: plans[0]?.id ?? "", businessType: "RESTAURANTE" });
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -117,7 +119,7 @@ export function CompaniesTable({
         ...prev,
       ]);
       setModalOpen(false);
-      setForm({ name: "", branchName: "Principal", planId: plans[0]?.id ?? "" });
+      setForm({ name: "", branchName: "Principal", planId: plans[0]?.id ?? "", businessType: "RESTAURANTE" });
     } catch {
       setError("No se pudo conectar con el servidor. Revisa tu conexión e intenta de nuevo.");
     } finally {
@@ -183,6 +185,7 @@ export function CompaniesTable({
             <thead>
               <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
                 <th className="px-5 py-3 font-medium">Empresa</th>
+                <th className="px-5 py-3 font-medium">Tipo</th>
                 <th className="px-5 py-3 font-medium">Plan</th>
                 <th className="px-5 py-3 font-medium">Sucursales</th>
                 <th className="px-5 py-3 font-medium">Usuarios</th>
@@ -195,6 +198,7 @@ export function CompaniesTable({
               {companies.map((c) => (
                 <tr key={c.id} className="border-b border-line last:border-0">
                   <td className="px-5 py-3 font-medium">{c.name}</td>
+                  <td className="px-5 py-3 text-muted">{getVertical(c.businessType).label}</td>
                   <td className="px-5 py-3 text-muted">
                     <button onClick={() => setPlanCompany(c)} className="underline decoration-dotted hover:text-ink">
                       {c.subscription?.plan.name ?? "—"}
@@ -248,7 +252,21 @@ export function CompaniesTable({
 
       <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Crear empresa">
         <form onSubmit={handleCreate}>
-          <Field label="Nombre del restaurante">
+          <Field label="Tipo de negocio">
+            <select
+              className={inputClass}
+              value={form.businessType}
+              onChange={(e) => setForm({ ...form, businessType: e.target.value })}
+            >
+              {BUSINESS_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {verticalOptionLabel(VERTICALS[t])}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-muted mt-1">El tipo no se puede cambiar después de crear la empresa.</p>
+          </Field>
+          <Field label="Nombre del negocio">
             <input
               required
               className={inputClass}

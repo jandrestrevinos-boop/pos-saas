@@ -14,6 +14,7 @@ import { prisma } from "@/lib/prisma";
 import { brandingService } from "@/modules/branding/service";
 import { BrandingStyle } from "@/components/branding-style";
 import { BrandingProvider } from "@/components/branding-context";
+import { getVertical } from "@/lib/verticals";
 
 const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey }[] = [
   { href: "/pos", label: "Punto de Venta", permission: PERMISSIONS.SALES_CREATE },
@@ -134,8 +135,17 @@ export default async function CompanyLayout({ children }: { children: React.Reac
   const canSwitchBranch = hasManyBranches && hasPermission(session.user.permissions, PERMISSIONS.BRANCHES_MANAGE);
   const activeBranchName = activeBranches.find((b) => b.id === activeBranchId)?.name ?? null;
 
+  // Tipo de negocio: ajusta el nombre del menú y oculta links que no aplican a ese tipo.
+  const companyRow = await prisma.company.findUnique({
+    where: { id: session.user.companyId },
+    select: { businessType: true },
+  });
+  const vertical = getVertical(companyRow?.businessType);
+
   const visibleNavItems = navItems.filter(
-    (item) => !item.permission || hasPermission(session.user.permissions, item.permission)
+    (item) =>
+      !vertical.hiddenNavHrefs.includes(item.href) &&
+      (!item.permission || hasPermission(session.user.permissions, item.permission))
   );
 
   return (
@@ -144,7 +154,7 @@ export default async function CompanyLayout({ children }: { children: React.Reac
     <div className="min-h-screen flex">
       <SidebarNav
         items={visibleNavItems}
-        brand={branding.brandName ?? "Mi Restaurante"}
+        brand={branding.brandName ?? vertical.workspaceName}
         logoUrl={branding.logoUrl}
         userName={session.user.name ?? ""}
         branchSwitcher={canSwitchBranch ? { branches: activeBranches, activeId: activeBranchId } : undefined}

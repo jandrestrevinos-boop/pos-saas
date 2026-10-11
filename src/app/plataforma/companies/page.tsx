@@ -16,7 +16,7 @@ export default async function CompaniesPage() {
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="font-display text-3xl font-semibold mb-1">Empresas</h1>
-          <p className="text-muted text-sm">Restaurantes dados de alta en la plataforma.</p>
+          <p className="text-muted text-sm">Negocios dados de alta en la plataforma.</p>
         </div>
       </div>
 

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { hardwareFinancingService } from "@/modules/hardwareFinancing/service";
 import { platformSettingsService } from "@/modules/platformSettings/service";
 import { addDays } from "@/lib/billing";
+import { BUSINESS_TYPES, getVertical } from "@/lib/verticals";
 
 export const createCompanySchema = z.object({
   name: z.string().min(2, "El nombre es obligatorio"),
@@ -10,6 +11,8 @@ export const createCompanySchema = z.object({
   taxId: z.string().optional(),
   planId: z.string().min(1, "Selecciona un plan"),
   branchName: z.string().min(1, "El nombre de la primera sucursal es obligatorio"),
+  // Tipo de negocio (vertical). Si no viene, es RESTAURANTE como hasta hoy.
+  businessType: z.enum(BUSINESS_TYPES).default("RESTAURANTE"),
 });
 
 export type CreateCompanyInput = z.infer<typeof createCompanySchema>;
@@ -33,12 +36,23 @@ export const companiesService = {
     const settings = await platformSettingsService.get();
     const trialEndsAt = addDays(new Date(), settings.defaultTrialDays);
 
+    const vertical = getVertical(input.businessType);
+
     return prisma.company.create({
       data: {
         name: input.name,
         legalName: input.legalName,
         taxId: input.taxId,
         status: "ACTIVE",
+        businessType: input.businessType,
+        // Categorías iniciales según el tipo de negocio (vacío para restaurante).
+        ...(vertical.defaultCategories.length > 0
+          ? {
+              categories: {
+                create: vertical.defaultCategories.map((name, i) => ({ name, sortOrder: i })),
+              },
+            }
+          : {}),
         branches: { create: { name: input.branchName } },
         subscription: {
           create: {
