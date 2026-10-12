@@ -292,9 +292,9 @@ export async function commitSalesImport(
             companyId,
             branchId: t.branchId,
             userId: ctx.userId,
-            status: "DELIVERED",
+            status: "DELIVERED" as const,
             isOpenTab: false,
-            orderType: "COMER_AQUI",
+            orderType: "COMER_AQUI" as const,
             notes: `Venta importada (folio ${t.folio})${t.cashier ? ` - Cajero: ${t.cashier}` : ""}`,
             subtotal: t.total,
             discount: 0,
@@ -307,12 +307,12 @@ export async function commitSalesImport(
                 quantity: l.qty as number,
                 unitPriceAtSale: l.price as number,
                 lineTotal: (l.qty as number) * (l.price as number),
-                status: "DELIVERED",
+                status: "DELIVERED" as const,
                 roundNumber: 1,
                 createdAt: t.date,
               })),
             },
-            payments: { create: { method: t.method, status: "APPROVED", amount: t.total, createdAt: t.date } },
+            payments: { create: { method: t.method, status: "APPROVED" as const, amount: t.total, createdAt: t.date } },
           },
         })
       )
@@ -329,7 +329,20 @@ export async function commitSalesImport(
   };
 
   await prisma.auditLog.create({
-    data: { companyId, userId: ctx.userId, action: "IMPORT", entity: "Order", newData: result },
+    data: {
+      companyId,
+      userId: ctx.userId,
+      action: "IMPORT",
+      entity: "Order",
+      newData: {
+        tickets: result.tickets,
+        lines: result.lines,
+        total: result.total,
+        productsCreated: result.productsCreated,
+        alreadyImported: result.alreadyImported,
+        skippedWithErrors: result.skippedWithErrors,
+      },
+    },
   });
   return result;
 }
