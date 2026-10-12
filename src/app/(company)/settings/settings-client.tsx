@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { BrandingSection } from "@/components/branding-section";
 
 export function SettingsClient({
   pagosIntegradosEnabled,
@@ -49,6 +50,8 @@ export function SettingsClient({
     <div className="max-w-2xl">
       <h1 className="font-display text-2xl font-semibold mb-1">Configuración</h1>
       <p className="text-muted text-sm mb-8">Integraciones y ajustes de tu cuenta.</p>
+
+      <BrandingSection />
 
       <div className="bg-white border border-line rounded-lg p-5">
         <div className="flex items-center justify-between mb-1">

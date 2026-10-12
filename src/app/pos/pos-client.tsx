@@ -7,6 +7,7 @@ import { formatMxn } from "@/lib/format";
 import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
 import { evaluatePromotions, type PromotionRule } from "@/lib/promotions";
 import { PosLoyaltyPanel, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
+import { useBranding } from "@/components/branding-context";
 
 type LoyaltyResult = {
   customerName: string;
@@ -18,7 +19,7 @@ type LoyaltyResult = {
 };
 
 type Category = { id: string; name: string };
-type Product = { id: string; name: string; price: string; categoryId: string };
+type Product = { id: string; name: string; price: string; categoryId: string; imageUrl?: string | null };
 type CartLine = { product: Product; quantity: number };
 type TableOption = { id: string; name: string; status: string };
 
@@ -62,6 +63,7 @@ function PosClientInner({
   terminalLinked: boolean;
   userName: string;
 }) {
+  const { showProductImages } = useBranding();
   const [activeCategory, setActiveCategory] = useState<string>(categories[0]?.id ?? "");
   const [cart, setCart] = useState<CartLine[]>([]);
   const [discount, setDiscount] = useState(0);
@@ -265,10 +267,21 @@ function PosClientInner({
                 <button
                   key={p.id}
                   onClick={() => addToCart(p)}
-                  className="bg-paper-raised border border-line rounded-lg p-4 text-left active:scale-[0.98] transition-transform hover:border-ember"
+                  className="bg-paper-raised border border-line rounded-lg overflow-hidden text-left active:scale-[0.98] transition-transform hover:border-ember"
                 >
-                  <p className="font-medium mb-1">{p.name}</p>
-                  <p className="font-mono text-sm text-muted">{formatMxn(p.price)}</p>
+                  {showProductImages &&
+                    (p.imageUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={p.imageUrl} alt={p.name} loading="lazy" className="w-full aspect-[4/3] object-cover bg-paper" />
+                    ) : (
+                      <div className="w-full aspect-[4/3] bg-paper flex items-center justify-center font-display text-3xl text-muted">
+                        {p.name.charAt(0).toUpperCase()}
+                      </div>
+                    ))}
+                  <div className="p-4">
+                    <p className="font-medium mb-1">{p.name}</p>
+                    <p className="font-mono text-sm text-muted">{formatMxn(p.price)}</p>
+                  </div>
                 </button>
               ))}
               {visibleProducts.length === 0 && (

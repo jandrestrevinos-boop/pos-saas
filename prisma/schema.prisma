@@ -1096,3 +1096,23 @@ model OrderPromotion {
   @@index([orderId])
   @@map("order_promotions")
 }
+
+// Personalización de marca por empresa (logo, colores, tipografía, fotos de producto).
+// Sin @relation a propósito: se agrega sin tocar el modelo Company (solo suma una tabla nueva).
+model CompanyBranding {
+  id                String   @id @default(uuid())
+  companyId         String   @unique
+  brandName         String?
+  logoUrl           String?
+  primaryColor      String?
+  accentColor       String?
+  sidebarColor      String?
+  fontBody          String?
+  fontDisplay       String?
+  fontScale         String?
+  showProductImages Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@map("company_branding")
+}

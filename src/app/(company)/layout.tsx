@@ -11,6 +11,9 @@ import Link from "next/link";
 import { alertsService, alertBranchScope } from "@/modules/alerts/service";
 import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
 import { prisma } from "@/lib/prisma";
+import { brandingService } from "@/modules/branding/service";
+import { BrandingStyle } from "@/components/branding-style";
+import { BrandingProvider } from "@/components/branding-context";
 
 const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey }[] = [
   { href: "/pos", label: "Punto de Venta", permission: PERMISSIONS.SALES_CREATE },
@@ -19,6 +22,7 @@ const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey 
   { href: "/cash", label: "Caja", permission: PERMISSIONS.CASH_OPEN },
   { href: "/reports", label: "Reportes", permission: PERMISSIONS.REPORTS_VIEW },
   { href: "/sales-history", label: "Historial de ventas", permission: PERMISSIONS.REPORTS_VIEW },
+  { href: "/sales-import", label: "Importar ventas", permission: PERMISSIONS.REPORTS_VIEW },
   { href: "/audit-log", label: "Auditoría", permission: PERMISSIONS.SETTINGS_MANAGE },
   { href: "/cash-audit", label: "Auditoría de cajas", permission: PERMISSIONS.SETTINGS_MANAGE },
   { href: "/inventory", label: "Inventario", permission: PERMISSIONS.INVENTORY_MANAGE },
@@ -38,6 +42,9 @@ export default async function CompanyLayout({ children }: { children: React.Reac
   if (!session?.user || !session.user.companyId) {
     redirect("/login");
   }
+
+  // Marca de la empresa (logo, colores, tipografía). Si falla, se ve la marca original.
+  const branding = await brandingService.get(session.user.companyId);
 
   // Candado de cobro: demo / periodo pagado vencido (+ gracia) => /facturacion.
   const billing = await requireBillingAccess(session.user.companyId);
@@ -132,10 +139,13 @@ export default async function CompanyLayout({ children }: { children: React.Reac
   );
 
   return (
+    <BrandingProvider showProductImages={branding.showProductImages}>
+    <BrandingStyle branding={branding} />
     <div className="min-h-screen flex">
       <SidebarNav
         items={visibleNavItems}
-        brand="Mi Restaurante"
+        brand={branding.brandName ?? "Mi Restaurante"}
+        logoUrl={branding.logoUrl}
         userName={session.user.name ?? ""}
         branchSwitcher={canSwitchBranch ? { branches: activeBranches, activeId: activeBranchId } : undefined}
         branchName={hasManyBranches && !canSwitchBranch ? activeBranchName : null}
@@ -161,5 +171,6 @@ export default async function CompanyLayout({ children }: { children: React.Reac
         {children}
       </main>
     </div>
+    </BrandingProvider>
   );
 }

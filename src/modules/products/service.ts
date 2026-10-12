@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
 import { inventoryService, getBranchStock } from "@/modules/inventory/service";
+import { deleteBlobQuiet, isCompanyBlobUrl } from "@/lib/blob";
 
 export const productSchema = z.object({
   name: z.string().min(1, "El nombre es obligatorio"),
@@ -12,6 +13,8 @@ export const productSchema = z.object({
   tracksInventory: z.boolean().optional(),
   stock: z.coerce.number().int().min(0).optional(),
   minStock: z.coerce.number().int().min(0).optional(),
+  // Foto del producto (URL de nuestro almacenamiento). "" o null = sin foto.
+  imageUrl: z.string().max(600).nullable().optional(),
 });
 
 export const productsService = {
@@ -28,6 +31,9 @@ export const productsService = {
    * se queda en ESA sucursal (las demás empiezan en 0).
    */
   async create(companyId: string, input: z.infer<typeof productSchema>, ctx?: { branchId: string | null; userId: string }) {
+    const imageUrl = input.imageUrl ? input.imageUrl : null;
+    if (imageUrl && !isCompanyBlobUrl(imageUrl, companyId)) throw new Error("Imagen inválida");
+
     const product = await prisma.product.create({
       data: {
         companyId,
@@ -37,6 +43,7 @@ export const productsService = {
         cost: input.cost,
         sku: input.sku,
         description: input.description,
+        imageUrl,
         tracksInventory: input.tracksInventory ?? false,
         stock: input.stock ?? 0,
         minStock: input.minStock ?? 0,
@@ -57,10 +64,27 @@ export const productsService = {
   ) {
     // La existencia ya no se escribe directo en Product.stock (es el TOTAL de todas las
     // sucursales): "stock" del formulario es la existencia de la sucursal donde se edita.
-    const { stock, ...rest } = data;
+    const { stock, imageUrl, ...rest } = data;
 
-    const result = await prisma.product.updateMany({ where: { id, companyId }, data: rest });
+    // Foto: solo se toca si el formulario la manda. Se valida que sea de nuestro almacenamiento
+    // y de esta empresa, y la foto anterior se borra para no dejar archivos huérfanos.
+    const imageData: { imageUrl?: string | null } = {};
+    let oldImage: string | null = null;
+    if (imageUrl !== undefined) {
+      const next = imageUrl ? imageUrl : null;
+      const current = await prisma.product.findFirst({ where: { id, companyId }, select: { imageUrl: true } });
+      oldImage = current?.imageUrl ?? null;
+      if (next !== oldImage) {
+        if (next && !isCompanyBlobUrl(next, companyId)) throw new Error("Imagen inválida");
+        imageData.imageUrl = next;
+      }
+    }
+
+    const result = await prisma.product.updateMany({ where: { id, companyId }, data: { ...rest, ...imageData } });
     if (result.count === 0) throw new Error("Producto no encontrado");
+    if (oldImage && imageData.imageUrl !== undefined && imageData.imageUrl !== oldImage) {
+      await deleteBlobQuiet(oldImage);
+    }
 
     if (stock !== undefined && ctx?.branchId) {
       await inventoryService.setBranchStock(companyId, ctx.branchId, ctx.userId, id, stock);

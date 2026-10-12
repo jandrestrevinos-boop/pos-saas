@@ -2,6 +2,8 @@
 
 import { ExportButton } from "@/components/export-button";
 import { ImportProductsButton } from "@/components/import-products-button";
+import { ImageUploader } from "@/components/image-uploader";
+import { useBranding } from "@/components/branding-context";
 import { useState } from "react";
 import { Button, Card, StatusBadge } from "@/components/ui";
 import { Modal, Field, inputClass } from "@/components/ui/modal";
@@ -20,6 +22,7 @@ type Product = {
   tracksInventory: boolean;
   stock: number;
   minStock?: number;
+  imageUrl?: string | null;
 };
 
 function marginPercent(price: string, cost: string | null): string {
@@ -41,6 +44,7 @@ export function ProductsTable({
   /** true si la empresa tiene varias sucursales: la existencia mostrada es la de la sucursal activa. */
   multiBranch?: boolean;
 }) {
+  const { showProductImages: showImages } = useBranding();
   const [products, setProducts] = useState(initialProducts);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Product | null>(null);
@@ -55,6 +59,7 @@ export function ProductsTable({
     tracksInventory: false,
     stock: "",
     minStock: "",
+    imageUrl: "",
   });
 
   async function handleCreate(e: React.FormEvent) {
@@ -94,6 +99,7 @@ export function ProductsTable({
         tracksInventory: false,
         stock: "",
         minStock: "",
+        imageUrl: "",
       });
     } catch {
       setError("No se pudo conectar con el servidor. Revisa tu conexión e intenta de nuevo.");
@@ -130,6 +136,7 @@ export function ProductsTable({
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
+                {showImages && <th className="px-5 py-3 font-medium w-16"></th>}
                 <th className="px-5 py-3 font-medium">Producto</th>
                 <th className="px-5 py-3 font-medium">Categoría</th>
                 <th className="px-5 py-3 font-medium">Precio</th>
@@ -143,6 +150,16 @@ export function ProductsTable({
             <tbody>
               {products.map((p) => (
                 <tr key={p.id} className="border-b border-line last:border-0">
+                  {showImages && (
+                    <td className="px-5 py-3">
+                      {p.imageUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={p.imageUrl} alt="" loading="lazy" className="h-10 w-10 rounded-md object-cover" />
+                      ) : (
+                        <div className="h-10 w-10 rounded-md bg-paper border border-line" />
+                      )}
+                    </td>
+                  )}
                   <td className="px-5 py-3 font-medium">{p.name}</td>
                   <td className="px-5 py-3 text-muted">{p.category.name}</td>
                   <td className="px-5 py-3 font-mono">{formatMxn(p.price)}</td>
@@ -226,6 +243,16 @@ export function ProductsTable({
             />
           </Field>
 
+          {showImages && (
+            <Field label="Foto del producto (opcional)">
+              <ImageUploader
+                kind="product"
+                value={form.imageUrl || null}
+                onChange={(url) => setForm({ ...form, imageUrl: url ?? "" })}
+              />
+            </Field>
+          )}
+
           <Field label="Control de inventario">
             <label className="flex items-center gap-2 text-sm font-normal">
               <input
@@ -307,6 +334,7 @@ function EditProductModal({
   onClose: () => void;
   onSaved: (p: Product) => void;
 }) {
+  const { showProductImages: showImages } = useBranding();
   const [form, setForm] = useState({
     name: product.name,
     categoryId: product.categoryId,
@@ -316,6 +344,7 @@ function EditProductModal({
     tracksInventory: product.tracksInventory ?? false,
     stock: String(product.stock ?? 0),
     minStock: String(product.minStock ?? 0),
+    imageUrl: product.imageUrl ?? "",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -396,6 +425,16 @@ function EditProductModal({
         <Field label="SKU (opcional)">
           <input className={inputClass} value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} />
         </Field>
+
+        {showImages && (
+          <Field label="Foto del producto">
+            <ImageUploader
+              kind="product"
+              value={form.imageUrl || null}
+              onChange={(url) => setForm({ ...form, imageUrl: url ?? "" })}
+            />
+          </Field>
+        )}
 
         <Field label="Control de inventario">
           <label className="flex items-center gap-2 text-sm font-normal">

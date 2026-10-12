@@ -3,15 +3,24 @@
 @tailwind utilities;
 
 :root {
-  --ink-950: #0a0f2e;
+  /* Marca por empresa: estas variables se sobrescriben desde (company)/layout según su personalización. */
+  --ember-rgb: 0 56 255;
+  --ember-dark-rgb: 0 38 184;
+  --marigold-rgb: 0 180 216;
+  --ink-950-rgb: 10 15 46;
+  --ink-line-rgb: 35 43 85;
+  --font-body: "Inter", -apple-system, sans-serif;
+  --font-display: "Fraunces", serif;
+
+  --ink-950: rgb(var(--ink-950-rgb));
   --ink-800: #141b3d;
-  --ink-line: #232b55;
+  --ink-line: rgb(var(--ink-line-rgb));
   --paper: #f7f9fc;
   --paper-raised: #ffffff;
   --line: #e2e8f0;
-  --ember: #0038ff;
-  --ember-dark: #0026b8;
-  --marigold: #00b4d8;
+  --ember: rgb(var(--ember-rgb));
+  --ember-dark: rgb(var(--ember-dark-rgb));
+  --marigold: rgb(var(--marigold-rgb));
   --sage: #3f7d20;
   --sage-light: #eaf3de;
   --text: #0f172a;
@@ -26,12 +35,12 @@ body {
   margin: 0;
   background: var(--paper);
   color: var(--text);
-  font-family: "Inter", -apple-system, sans-serif;
+  font-family: var(--font-body);
   -webkit-font-smoothing: antialiased;
 }
 
 .font-display {
-  font-family: "Fraunces", serif;
+  font-family: var(--font-display);
   font-optical-sizing: auto;
 }
 

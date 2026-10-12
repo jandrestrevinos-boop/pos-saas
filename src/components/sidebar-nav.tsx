@@ -8,12 +8,15 @@ import { clsx } from "clsx";
 export function SidebarNav({
   items,
   brand,
+  logoUrl,
   userName,
   branchSwitcher,
   branchName,
 }: {
   items: { href: string; label: string }[];
   brand: string;
+  /** Logo de la empresa (opcional). */
+  logoUrl?: string | null;
   userName: string;
   /** Solo para quien administra sucursales y la empresa tiene más de una activa. */
   branchSwitcher?: { branches: { id: string; name: string }[]; activeId: string | null };
@@ -39,6 +42,12 @@ export function SidebarNav({
     <aside className="w-60 shrink-0 bg-ink-950 text-white flex flex-col justify-between min-h-screen">
       <div>
         <div className="px-6 py-6 border-b border-ink-line">
+          {logoUrl && (
+            <div className="mb-3 inline-flex rounded-md bg-white p-2">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={logoUrl} alt={brand} className="max-h-10 max-w-[10rem] object-contain" />
+            </div>
+          )}
           <p className="font-display text-lg font-semibold">{brand}</p>
           {branchSwitcher ? (
             <div className="mt-3">
