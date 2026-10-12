@@ -159,3 +159,12 @@ export function parseYesNo(raw: string | undefined): boolean | undefined {
   if (["no", "n", "false", "0", "inactivo"].includes(v)) return false;
   return undefined;
 }
+
+/** Primer valor no vacío entre varios encabezados posibles (ya normalizados). */
+export function pickAlias(row: RawRow, aliases: string[]): string | undefined {
+  for (const a of aliases) {
+    const v = row[a];
+    if (v !== undefined && v.trim() !== "") return v.trim();
+  }
+  return undefined;
+}
