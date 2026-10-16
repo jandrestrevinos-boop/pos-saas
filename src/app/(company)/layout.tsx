@@ -151,7 +151,7 @@ export default async function CompanyLayout({ children }: { children: React.Reac
   return (
     <BrandingProvider showProductImages={branding.showProductImages}>
     <BrandingStyle branding={branding} />
-    <div className="min-h-screen flex">
+    <div className="min-h-screen flex flex-col lg:flex-row">
       <SidebarNav
         items={visibleNavItems}
         brand={branding.brandName ?? vertical.workspaceName}
@@ -160,7 +160,7 @@ export default async function CompanyLayout({ children }: { children: React.Reac
         branchSwitcher={canSwitchBranch ? { branches: activeBranches, activeId: activeBranchId } : undefined}
         branchName={hasManyBranches && !canSwitchBranch ? activeBranchName : null}
       />
-      <main className="flex-1 p-8 bg-paper">
+      <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 pb-[max(1rem,env(safe-area-inset-bottom))] lg:pb-8 bg-paper">
         {showBillingBanner && (
           <div className="mb-6 rounded-md border border-marigold/40 bg-marigold/10 px-4 py-3 text-sm">
             {billing.state === "GRACE" ? (

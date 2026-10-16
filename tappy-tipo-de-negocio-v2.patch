@@ -1,0 +1,330 @@
+From 135635986a98cd53c748804281ddacbcb3fa27e1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 11 Oct 2026 06:23:20 +0000
+Subject: [PATCH] Tipo de negocio (vertical) por empresa: selector en Super
+ Admin y catalogo de verticales
+
+---
+ .../20261013120000_tipo_negocio/migration.sql |  5 ++
+ prisma/schema.prisma                          | 12 +++
+ src/app/(company)/layout.tsx                  | 14 ++-
+ .../plataforma/companies/companies-table.tsx  | 24 ++++-
+ src/app/plataforma/companies/page.tsx         |  2 +-
+ src/lib/verticals.ts                          | 87 +++++++++++++++++++
+ src/modules/companies/service.ts              | 14 +++
+ 7 files changed, 152 insertions(+), 6 deletions(-)
+ create mode 100644 prisma/migrations/20261013120000_tipo_negocio/migration.sql
+ create mode 100644 src/lib/verticals.ts
+
+diff --git a/prisma/migrations/20261013120000_tipo_negocio/migration.sql b/prisma/migrations/20261013120000_tipo_negocio/migration.sql
+new file mode 100644
+index 0000000..58888f9
+--- /dev/null
++++ b/prisma/migrations/20261013120000_tipo_negocio/migration.sql
+@@ -0,0 +1,5 @@
++-- CreateEnum
++CREATE TYPE "BusinessType" AS ENUM ('RESTAURANTE', 'CAFETERIA', 'ESCUELA', 'DISTRIBUIDOR', 'LABORATORIO');
++
++-- AlterTable: aditivo. Las empresas que ya existen quedan como RESTAURANTE.
++ALTER TABLE "companies" ADD COLUMN     "businessType" "BusinessType" NOT NULL DEFAULT 'RESTAURANTE';
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index ec1a23e..5f6105a 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -21,6 +21,8 @@ model Company {
+   legalName String?
+   taxId     String? // RFC (para cuando se integre facturación)
+   status    CompanyStatus @default(ACTIVE)
++  // Las empresas existentes quedan como RESTAURANTE (default), sin tocar sus datos.
++  businessType BusinessType @default(RESTAURANTE)
+   createdAt DateTime @default(now())
+   updatedAt DateTime @updatedAt
+   whatsAppConfigs   WhatsAppConfig[]
+@@ -79,6 +81,16 @@ enum CompanyStatus {
+   CANCELLED
+ }
+ 
++/// Tipo de negocio (vertical de Tappy). Lo elige Jose en Super Admin al dar de alta
++/// la empresa. El catálogo con lo que implica cada tipo vive en src/lib/verticals.ts.
++enum BusinessType {
++  RESTAURANTE
++  CAFETERIA
++  ESCUELA
++  DISTRIBUIDOR
++  LABORATORIO
++}
++
+ /// Configuraci\u00f3n de la plataforma (fila \u00fanica / singleton). Empieza solo
+ /// con la pol\u00edtica de cancelaci\u00f3n (secci\u00f3n 10 de la spec de
+ /// financiamiento), pensada para crecer con m\u00e1s reglas comerciales.
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index 36dcaf8..5b8b4aa 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -14,6 +14,7 @@ import { prisma } from "@/lib/prisma";
+ import { brandingService } from "@/modules/branding/service";
+ import { BrandingStyle } from "@/components/branding-style";
+ import { BrandingProvider } from "@/components/branding-context";
++import { getVertical } from "@/lib/verticals";
+ 
+ const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey }[] = [
+   { href: "/pos", label: "Punto de Venta", permission: PERMISSIONS.SALES_CREATE },
+@@ -134,8 +135,17 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+   const canSwitchBranch = hasManyBranches && hasPermission(session.user.permissions, PERMISSIONS.BRANCHES_MANAGE);
+   const activeBranchName = activeBranches.find((b) => b.id === activeBranchId)?.name ?? null;
+ 
++  // Tipo de negocio: ajusta el nombre del menú y oculta links que no aplican a ese tipo.
++  const companyRow = await prisma.company.findUnique({
++    where: { id: session.user.companyId },
++    select: { businessType: true },
++  });
++  const vertical = getVertical(companyRow?.businessType);
++
+   const visibleNavItems = navItems.filter(
+-    (item) => !item.permission || hasPermission(session.user.permissions, item.permission)
++    (item) =>
++      !vertical.hiddenNavHrefs.includes(item.href) &&
++      (!item.permission || hasPermission(session.user.permissions, item.permission))
+   );
+ 
+   return (
+@@ -144,7 +154,7 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+     <div className="min-h-screen flex">
+       <SidebarNav
+         items={visibleNavItems}
+-        brand={branding.brandName ?? "Mi Restaurante"}
++        brand={branding.brandName ?? vertical.workspaceName}
+         logoUrl={branding.logoUrl}
+         userName={session.user.name ?? ""}
+         branchSwitcher={canSwitchBranch ? { branches: activeBranches, activeId: activeBranchId } : undefined}
+diff --git a/src/app/plataforma/companies/companies-table.tsx b/src/app/plataforma/companies/companies-table.tsx
+index 2ba7c41..db89807 100644
+--- a/src/app/plataforma/companies/companies-table.tsx
++++ b/src/app/plataforma/companies/companies-table.tsx
+@@ -6,6 +6,7 @@ import { Modal, Field, inputClass } from "@/components/ui/modal";
+ import { formatMxn } from "@/lib/format";
+ import { FEATURE_CATALOG } from "@/lib/plan-features";
+ import { computeBillingAccess } from "@/lib/billing";
++import { BUSINESS_TYPES, VERTICALS, getVertical, verticalOptionLabel } from "@/lib/verticals";
+ // FEATURE_CATALOG ahora es [{ key, label, status }] — customFeatures y
+ // plan.features guardan `key`, la UI muestra `label`.
+ 
+@@ -14,6 +15,7 @@ type Role = { id: string; name: string };
+ type Company = {
+   id: string;
+   name: string;
++  businessType?: string;
+   status: "ACTIVE" | "SUSPENDED" | "CANCELLED";
+   branches: { id: string }[];
+   users: { id: string }[];
+@@ -85,7 +87,7 @@ export function CompaniesTable({
+   const [billingCompany, setBillingCompany] = useState<Company | null>(null);
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
+-  const [form, setForm] = useState({ name: "", branchName: "Principal", planId: plans[0]?.id ?? "" });
++  const [form, setForm] = useState({ name: "", branchName: "Principal", planId: plans[0]?.id ?? "", businessType: "RESTAURANTE" });
+ 
+   async function handleCreate(e: React.FormEvent) {
+     e.preventDefault();
+@@ -117,7 +119,7 @@ export function CompaniesTable({
+         ...prev,
+       ]);
+       setModalOpen(false);
+-      setForm({ name: "", branchName: "Principal", planId: plans[0]?.id ?? "" });
++      setForm({ name: "", branchName: "Principal", planId: plans[0]?.id ?? "", businessType: "RESTAURANTE" });
+     } catch {
+       setError("No se pudo conectar con el servidor. Revisa tu conexión e intenta de nuevo.");
+     } finally {
+@@ -183,6 +185,7 @@ export function CompaniesTable({
+             <thead>
+               <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
+                 <th className="px-5 py-3 font-medium">Empresa</th>
++                <th className="px-5 py-3 font-medium">Tipo</th>
+                 <th className="px-5 py-3 font-medium">Plan</th>
+                 <th className="px-5 py-3 font-medium">Sucursales</th>
+                 <th className="px-5 py-3 font-medium">Usuarios</th>
+@@ -195,6 +198,7 @@ export function CompaniesTable({
+               {companies.map((c) => (
+                 <tr key={c.id} className="border-b border-line last:border-0">
+                   <td className="px-5 py-3 font-medium">{c.name}</td>
++                  <td className="px-5 py-3 text-muted">{getVertical(c.businessType).label}</td>
+                   <td className="px-5 py-3 text-muted">
+                     <button onClick={() => setPlanCompany(c)} className="underline decoration-dotted hover:text-ink">
+                       {c.subscription?.plan.name ?? "—"}
+@@ -248,7 +252,21 @@ export function CompaniesTable({
+ 
+       <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Crear empresa">
+         <form onSubmit={handleCreate}>
+-          <Field label="Nombre del restaurante">
++          <Field label="Tipo de negocio">
++            <select
++              className={inputClass}
++              value={form.businessType}
++              onChange={(e) => setForm({ ...form, businessType: e.target.value })}
++            >
++              {BUSINESS_TYPES.map((t) => (
++                <option key={t} value={t}>
++                  {verticalOptionLabel(VERTICALS[t])}
++                </option>
++              ))}
++            </select>
++            <p className="text-xs text-muted mt-1">El tipo no se puede cambiar después de crear la empresa.</p>
++          </Field>
++          <Field label="Nombre del negocio">
+             <input
+               required
+               className={inputClass}
+diff --git a/src/app/plataforma/companies/page.tsx b/src/app/plataforma/companies/page.tsx
+index 224979d..61bbcd4 100644
+--- a/src/app/plataforma/companies/page.tsx
++++ b/src/app/plataforma/companies/page.tsx
+@@ -16,7 +16,7 @@ export default async function CompaniesPage() {
+       <div className="flex items-center justify-between mb-8">
+         <div>
+           <h1 className="font-display text-3xl font-semibold mb-1">Empresas</h1>
+-          <p className="text-muted text-sm">Restaurantes dados de alta en la plataforma.</p>
++          <p className="text-muted text-sm">Negocios dados de alta en la plataforma.</p>
+         </div>
+       </div>
+ 
+diff --git a/src/lib/verticals.ts b/src/lib/verticals.ts
+new file mode 100644
+index 0000000..262d434
+--- /dev/null
++++ b/src/lib/verticals.ts
+@@ -0,0 +1,87 @@
++/**
++ * Catálogo de verticales (tipos de negocio) de Tappy.
++ *
++ * Un solo código y un solo dominio: el tipo de negocio es configuración, no un
++ * proyecto aparte. Para agregar una vertical nueva: (1) agregar el valor al enum
++ * BusinessType en prisma/schema.prisma + una migración, (2) agregar su entrada aquí.
++ *
++ * NOTA: los roles (Administrador, Gerente, Cajero, etc.) son globales en Tappy, no por
++ * empresa, así que aquí no se siembran roles. Lo que sí define cada vertical es su
++ * nombre comercial, qué links del menú no aplican y las categorías iniciales.
++ */
++
++export const BUSINESS_TYPES = ["RESTAURANTE", "CAFETERIA", "ESCUELA", "DISTRIBUIDOR", "LABORATORIO"] as const;
++export type BusinessTypeKey = (typeof BUSINESS_TYPES)[number];
++
++export interface VerticalDef {
++  key: BusinessTypeKey;
++  /** Nombre corto del tipo, para tablas y selectores. */
++  label: string;
++  /** Marca comercial de la vertical. */
++  productName: string;
++  /** Nombre que ve el cliente arriba en su menú lateral. */
++  workspaceName: string;
++  /** "live" = ya opera con sus módulos propios; "planned" = hoy usa el POS base, módulos en desarrollo. */
++  status: "live" | "planned";
++  /** Links del menú lateral que NO aplican a este tipo de negocio. */
++  hiddenNavHrefs: string[];
++  /** Categorías iniciales al crear la empresa (vacío = no se siembra nada). */
++  defaultCategories: string[];
++}
++
++export const VERTICALS: Record<BusinessTypeKey, VerticalDef> = {
++  RESTAURANTE: {
++    key: "RESTAURANTE",
++    label: "Restaurante",
++    productName: "Tappy Restaurantes",
++    workspaceName: "Mi Restaurante",
++    status: "live",
++    hiddenNavHrefs: [],
++    defaultCategories: [],
++  },
++  CAFETERIA: {
++    key: "CAFETERIA",
++    label: "Cafetería",
++    productName: "Tappy Cafeterías",
++    workspaceName: "Mi Cafetería",
++    status: "live",
++    hiddenNavHrefs: [],
++    defaultCategories: ["Bebidas calientes", "Bebidas frías", "Alimentos", "Postres"],
++  },
++  ESCUELA: {
++    key: "ESCUELA",
++    label: "Escuela",
++    productName: "Tappy Escuelas",
++    workspaceName: "Mi Escuela",
++    status: "planned",
++    hiddenNavHrefs: [],
++    defaultCategories: ["Desayunos", "Comidas", "Snacks", "Bebidas"],
++  },
++  DISTRIBUIDOR: {
++    key: "DISTRIBUIDOR",
++    label: "Distribuidor",
++    productName: "Tappy Distribuidores",
++    workspaceName: "Mi Distribuidora",
++    status: "planned",
++    hiddenNavHrefs: ["/kitchen", "/tables"],
++    defaultCategories: [],
++  },
++  LABORATORIO: {
++    key: "LABORATORIO",
++    label: "Laboratorio / clínica",
++    productName: "Tappy Laboratorios",
++    workspaceName: "Mi Laboratorio",
++    status: "planned",
++    hiddenNavHrefs: ["/kitchen", "/tables"],
++    defaultCategories: [],
++  },
++};
++
++export function getVertical(type: string | null | undefined): VerticalDef {
++  return VERTICALS[(type as BusinessTypeKey) ?? "RESTAURANTE"] ?? VERTICALS.RESTAURANTE;
++}
++
++/** Texto para el selector de Super Admin, ej. "Escuela (en desarrollo)". */
++export function verticalOptionLabel(v: VerticalDef): string {
++  return v.status === "planned" ? `${v.label} (en desarrollo)` : v.label;
++}
+diff --git a/src/modules/companies/service.ts b/src/modules/companies/service.ts
+index 0006ca2..3cb149b 100644
+--- a/src/modules/companies/service.ts
++++ b/src/modules/companies/service.ts
+@@ -3,6 +3,7 @@ import { z } from "zod";
+ import { hardwareFinancingService } from "@/modules/hardwareFinancing/service";
+ import { platformSettingsService } from "@/modules/platformSettings/service";
+ import { addDays } from "@/lib/billing";
++import { BUSINESS_TYPES, getVertical } from "@/lib/verticals";
+ 
+ export const createCompanySchema = z.object({
+   name: z.string().min(2, "El nombre es obligatorio"),
+@@ -10,6 +11,8 @@ export const createCompanySchema = z.object({
+   taxId: z.string().optional(),
+   planId: z.string().min(1, "Selecciona un plan"),
+   branchName: z.string().min(1, "El nombre de la primera sucursal es obligatorio"),
++  // Tipo de negocio (vertical). Si no viene, es RESTAURANTE como hasta hoy.
++  businessType: z.enum(BUSINESS_TYPES).default("RESTAURANTE"),
+ });
+ 
+ export type CreateCompanyInput = z.infer<typeof createCompanySchema>;
+@@ -33,12 +36,23 @@ export const companiesService = {
+     const settings = await platformSettingsService.get();
+     const trialEndsAt = addDays(new Date(), settings.defaultTrialDays);
+ 
++    const vertical = getVertical(input.businessType);
++
+     return prisma.company.create({
+       data: {
+         name: input.name,
+         legalName: input.legalName,
+         taxId: input.taxId,
+         status: "ACTIVE",
++        businessType: input.businessType,
++        // Categorías iniciales según el tipo de negocio (vacío para restaurante).
++        ...(vertical.defaultCategories.length > 0
++          ? {
++              categories: {
++                create: vertical.defaultCategories.map((name, i) => ({ name, sortOrder: i })),
++              },
++            }
++          : {}),
+         branches: { create: { name: input.branchName } },
+         subscription: {
+           create: {
+-- 
+2.43.0
+

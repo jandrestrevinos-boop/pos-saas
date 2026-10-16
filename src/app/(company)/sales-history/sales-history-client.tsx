@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState, Fragment } from "react";
+import { useEffect, useState } from "react";
 import { formatMxn } from "@/lib/format";
-import { Card } from "@/components/ui";
+import { ResponsiveTable, type ResponsiveColumn } from "@/components/ui/responsive-table";
 import { ExportButton } from "@/components/export-button";
 
 type OrderItem = { id: string; quantity: number; lineTotal: string; product: { name: string } };
@@ -35,6 +35,54 @@ const ORDER_TYPE_LABELS: Record<string, string> = {
   PARA_LLEVAR: "Para llevar",
   DOMICILIO: "A domicilio",
 };
+
+const COLUMNS: ResponsiveColumn<OrderRow>[] = [
+  {
+    key: "folio",
+    header: "Folio",
+    mobile: "title",
+    mobileClassName: "text-base font-semibold",
+    cellClassName: "font-mono",
+    render: (o) => `#${o.orderNumber}`,
+  },
+  {
+    key: "fecha",
+    header: "Fecha",
+    cellClassName: "text-muted",
+    render: (o) => new Date(o.createdAt).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" }),
+  },
+  {
+    key: "tipo",
+    header: "Tipo",
+    render: (o) => (o.table ? `Mesa ${o.table.name}` : ORDER_TYPE_LABELS[o.orderType] ?? o.orderType),
+  },
+  {
+    key: "metodo",
+    header: "Método",
+    render: (o) => o.payments.map((p) => PAYMENT_LABELS[p.method] ?? p.method).join(", ") || "—",
+  },
+  { key: "cajero", header: "Cajero", render: (o) => o.user?.name ?? "—" },
+  {
+    key: "total",
+    header: "Total",
+    align: "right",
+    mobile: "aside",
+    mobileClassName: "text-lg font-semibold",
+    cellClassName: "font-mono",
+    render: (o) => formatMxn(o.total),
+  },
+  {
+    key: "estado",
+    header: "Estado",
+    mobile: "aside",
+    render: (o) =>
+      o.status === "CANCELED" ? (
+        <span className="text-xs bg-ember/10 text-ember-dark px-2 py-0.5 rounded-full">Cancelada</span>
+      ) : (
+        <span className="text-xs bg-sage-light text-sage px-2 py-0.5 rounded-full">Completada</span>
+      ),
+  },
+];
 
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
@@ -95,18 +143,20 @@ export function SalesHistoryClient() {
   return (
     <div>
       <div className="flex flex-wrap items-end gap-3 mb-6">
-        <div>
+        <div className="flex-1 min-w-[8.5rem] sm:flex-none">
           <label className="block text-xs text-muted mb-1">Desde</label>
-          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="rounded-md border border-line px-3 py-2 text-sm" />
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="w-full rounded-md border border-line px-3 py-2.5 sm:py-2 text-sm" />
         </div>
-        <div>
+        <div className="flex-1 min-w-[8.5rem] sm:flex-none">
           <label className="block text-xs text-muted mb-1">Hasta</label>
-          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="rounded-md border border-line px-3 py-2 text-sm" />
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="w-full rounded-md border border-line px-3 py-2.5 sm:py-2 text-sm" />
         </div>
-        <button onClick={() => setPreset(1)} className="text-sm underline text-muted">Hoy</button>
-        <button onClick={() => setPreset(7)} className="text-sm underline text-muted">7 días</button>
-        <button onClick={() => setPreset(30)} className="text-sm underline text-muted">30 días</button>
-        <div className="ml-auto">
+        <div className="flex items-center">
+          <button onClick={() => setPreset(1)} className="text-sm underline text-muted px-2 py-2.5 sm:py-2">Hoy</button>
+          <button onClick={() => setPreset(7)} className="text-sm underline text-muted px-2 py-2.5 sm:py-2">7 días</button>
+          <button onClick={() => setPreset(30)} className="text-sm underline text-muted px-2 py-2.5 sm:py-2">30 días</button>
+        </div>
+        <div className="w-full sm:w-auto sm:ml-auto">
           <ExportButton dataset="sales" from={from} to={to} label="Exportar ventas (CSV)" />
         </div>
       </div>
@@ -118,81 +168,40 @@ export function SalesHistoryClient() {
       ) : orders.length === 0 ? (
         <p className="text-muted text-sm">No hay ventas en este rango.</p>
       ) : (
-        <Card className="ticket-edge overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-paper text-xs uppercase text-muted">
-              <tr>
-                <th className="text-left px-4 py-3">Folio</th>
-                <th className="text-left px-4 py-3">Fecha</th>
-                <th className="text-left px-4 py-3">Tipo</th>
-                <th className="text-left px-4 py-3">Método</th>
-                <th className="text-left px-4 py-3">Cajero</th>
-                <th className="text-right px-4 py-3">Total</th>
-                <th className="text-left px-4 py-3">Estado</th>
-                <th className="text-right px-4 py-3">​</th>
-              </tr>
-            </thead>
-            <tbody>
-              {orders.map((order) => (
-                <Fragment key={order.id}>
-                  <tr
-                    className="border-t border-line cursor-pointer hover:bg-paper"
-                    onClick={() => setExpanded(expanded === order.id ? null : order.id)}
-                  >
-                    <td className="px-4 py-3 font-mono">#{order.orderNumber}</td>
-                    <td className="px-4 py-3 text-muted">
-                      {new Date(order.createdAt).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" })}
-                    </td>
-                    <td className="px-4 py-3">
-                      {order.table ? `Mesa ${order.table.name}` : ORDER_TYPE_LABELS[order.orderType] ?? order.orderType}
-                    </td>
-                    <td className="px-4 py-3">
-                      {order.payments.map((p) => PAYMENT_LABELS[p.method] ?? p.method).join(", ")}
-                    </td>
-                    <td className="px-4 py-3">{order.user?.name ?? "—"}</td>
-                    <td className="px-4 py-3 text-right font-mono">{formatMxn(order.total)}</td>
-                    <td className="px-4 py-3">
-                      {order.status === "CANCELED" ? (
-                        <span className="text-xs bg-ember/10 text-ember-dark px-2 py-0.5 rounded-full">Cancelada</span>
-                      ) : (
-                        <span className="text-xs bg-sage-light text-sage px-2 py-0.5 rounded-full">Completada</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      {order.status !== "CANCELED" && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            cancelOrder(order.id);
-                          }}
-                          disabled={cancellingId === order.id}
-                          className="text-xs underline text-ember-dark disabled:opacity-50"
-                        >
-                          {cancellingId === order.id ? "Cancelando..." : "Cancelar"}
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                  {expanded === order.id && (
-                    <tr className="border-t border-line bg-paper">
-                      <td colSpan={8} className="px-4 py-3">
-                        <ul className="text-sm space-y-1">
-                          {order.items.map((item) => (
-                            <li key={item.id} className="flex justify-between">
-                              <span>{item.quantity}x {item.product.name}</span>
-                              <span className="font-mono">{formatMxn(item.lineTotal)}</span>
-                            </li>
-                          ))}
-                        </ul>
-                        {order.branch?.name && <p className="text-xs text-muted mt-2">Sucursal: {order.branch.name}</p>}
-                      </td>
-                    </tr>
-                  )}
-                </Fragment>
-              ))}
-            </tbody>
-          </table>
-        </Card>
+        <ResponsiveTable
+          columns={COLUMNS}
+          rows={orders}
+          getRowId={(o) => o.id}
+          expandedId={expanded}
+          onRowClick={(o) => setExpanded(expanded === o.id ? null : o.id)}
+          renderExpanded={(order) => (
+            <>
+              <ul className="text-sm space-y-1">
+                {order.items.map((item) => (
+                  <li key={item.id} className="flex justify-between gap-3">
+                    <span>{item.quantity}x {item.product.name}</span>
+                    <span className="font-mono shrink-0">{formatMxn(item.lineTotal)}</span>
+                  </li>
+                ))}
+              </ul>
+              {order.branch?.name && <p className="text-xs text-muted mt-2">Sucursal: {order.branch.name}</p>}
+            </>
+          )}
+          renderActions={(order) =>
+            order.status !== "CANCELED" ? (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  cancelOrder(order.id);
+                }}
+                disabled={cancellingId === order.id}
+                className="text-sm xl:text-xs underline text-ember-dark disabled:opacity-50 px-2 py-2 xl:p-0"
+              >
+                {cancellingId === order.id ? "Cancelando..." : "Cancelar"}
+              </button>
+            ) : null
+          }
+        />
       )}
     </div>
   );

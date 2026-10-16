@@ -1,0 +1,129 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Marca por empresa: estas variables se sobrescriben desde (company)/layout según su personalización. */
+  --ember-rgb: 0 56 255;
+  --ember-dark-rgb: 0 38 184;
+  --marigold-rgb: 0 180 216;
+  --ink-950-rgb: 10 15 46;
+  --ink-line-rgb: 35 43 85;
+  --font-body: "Inter", -apple-system, sans-serif;
+  --font-display: "Fraunces", serif;
+
+  --ink-950: rgb(var(--ink-950-rgb));
+  --ink-800: #141b3d;
+  --ink-line: rgb(var(--ink-line-rgb));
+  --paper: #f7f9fc;
+  --paper-raised: #ffffff;
+  --line: #e2e8f0;
+  --ember: rgb(var(--ember-rgb));
+  --ember-dark: rgb(var(--ember-dark-rgb));
+  --marigold: rgb(var(--marigold-rgb));
+  --sage: #3f7d20;
+  --sage-light: #eaf3de;
+  --text: #0f172a;
+  --text-muted: #64748b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--text);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-display {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+}
+
+.font-mono {
+  font-family: "IBM Plex Mono", monospace;
+}
+
+/* Elemento firma: borde de "ticket perforado" — usado con moderación
+   en tarjetas de estadísticas y de empresas/sucursales. */
+.ticket-edge {
+  position: relative;
+}
+.ticket-edge::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background-image: repeating-linear-gradient(
+    90deg,
+    var(--line) 0,
+    var(--line) 6px,
+    transparent 6px,
+    transparent 12px
+  );
+}
+
+::selection {
+  background: var(--marigold);
+  color: var(--ink-950);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ember);
+  outline-offset: 2px;
+}
+
+/* ---------- Responsivo (celular / tablet) ---------- */
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+/* iPhone/iPad hacen zoom automático al tocar un campo con letra menor a 16px:
+   en pantallas menores a 1024px todos los campos usan 16px. */
+@media (max-width: 1023px) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* Red de seguridad: pantallas con tabla que todavía no usan ResponsiveTable.
+   Antes se cortaban o estiraban la página; ahora la tabla se desplaza sola de lado. */
+@media (max-width: 1279px) {
+  .overflow-hidden > table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* Animaciones de menú y hojas: solo responden a un toque, y se apagan si el aparato lo pide. */
+@keyframes drawer-in {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+@keyframes sheet-in {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.animate-drawer-in { animation: drawer-in 200ms ease-out; }
+.animate-sheet-in { animation: sheet-in 220ms ease-out; }
+.animate-fade-in { animation: fade-in 200ms ease-out; }
+@media (min-width: 640px) {
+  .animate-sheet-in { animation: fade-in 150ms ease-out; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-drawer-in, .animate-sheet-in, .animate-fade-in { animation: none; }
+}

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Button, Card, StatusBadge } from "@/components/ui";
 import { Modal, Field, inputClass } from "@/components/ui/modal";
+import { ResponsiveTable, type ResponsiveColumn } from "@/components/ui/responsive-table";
 import { formatMxn } from "@/lib/format";
 import { FEATURE_CATALOG } from "@/lib/plan-features";
 import { computeBillingAccess } from "@/lib/billing";
@@ -175,80 +176,93 @@ export function CompaniesTable({
         <Button onClick={() => setModalOpen(true)}>+ Crear empresa</Button>
       </div>
 
-      <Card className="overflow-hidden">
-        {companies.length === 0 ? (
+      {companies.length === 0 ? (
+        <Card className="overflow-hidden">
           <div className="p-10 text-center text-muted text-sm">
             Todavía no hay empresas registradas. Crea la primera con el botón de arriba.
           </div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
-                <th className="px-5 py-3 font-medium">Empresa</th>
-                <th className="px-5 py-3 font-medium">Tipo</th>
-                <th className="px-5 py-3 font-medium">Plan</th>
-                <th className="px-5 py-3 font-medium">Sucursales</th>
-                <th className="px-5 py-3 font-medium">Usuarios</th>
-                <th className="px-5 py-3 font-medium">Estado</th>
-                <th className="px-5 py-3 font-medium">Cobro</th>
-                <th className="px-5 py-3 font-medium"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {companies.map((c) => (
-                <tr key={c.id} className="border-b border-line last:border-0">
-                  <td className="px-5 py-3 font-medium">{c.name}</td>
-                  <td className="px-5 py-3 text-muted">{getVertical(c.businessType).label}</td>
-                  <td className="px-5 py-3 text-muted">
-                    <button onClick={() => setPlanCompany(c)} className="underline decoration-dotted hover:text-ink">
-                      {c.subscription?.plan.name ?? "—"}
-                    </button>
-                  </td>
-                  <td className="px-5 py-3 font-mono">{c.branches.length}</td>
-                  <td className="px-5 py-3 font-mono">{c.users.length}</td>
-                  <td className="px-5 py-3">
-                    <StatusBadge
-                      status={c.status}
-                      label={c.status === "ACTIVE" ? "Activa" : c.status === "SUSPENDED" ? "Suspendida" : "Cancelada"}
-                    />
-                  </td>
-                  <td className="px-5 py-3 text-xs">
-                    {(() => {
-                      const b = billingSummary(c, graceDays);
-                      const color =
-                        b.tone === "ok" ? "text-sage" : b.tone === "warn" ? "text-marigold" : b.tone === "bad" ? "text-ember-dark" : "text-muted";
-                      return <span className={`${color} font-medium`}>{b.label}</span>;
-                    })()}
-                  </td>
-                  <td className="px-5 py-3 text-right space-x-1">
-                    <Button variant="ghost" onClick={() => setUsersCompany(c)}>
-                      Usuarios
-                    </Button>
-                    {c.status !== "CANCELLED" && (
-                      <Button variant="ghost" onClick={() => setBillingCompany(c)}>
-                        Cobro
-                      </Button>
-                    )}
-                    {c.status !== "CANCELLED" && (
-                      <Button variant="ghost" onClick={() => toggleStatus(c)}>
-                        {c.status === "ACTIVE" ? "Suspender" : "Activar"}
-                      </Button>
-                    )}
-                    {c.status !== "CANCELLED" && (
-                      <Button variant="ghost" onClick={() => cancelSubscription(c)} className="text-ember-dark hover:bg-ember/10">
-                        Cancelar suscripción
-                      </Button>
-                    )}
-                    <Button variant="ghost" onClick={() => deleteCompany(c)} className="text-ember-dark hover:bg-ember/10">
-                      Eliminar
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Card>
+        </Card>
+      ) : (
+        <ResponsiveTable
+          columns={[
+            {
+              key: "empresa",
+              header: "Empresa",
+              mobile: "title",
+              mobileClassName: "text-base font-semibold",
+              cellClassName: "font-medium",
+              render: (c: Company) => c.name,
+            },
+            {
+              key: "tipo",
+              header: "Tipo",
+              cellClassName: "text-muted",
+              render: (c: Company) => getVertical(c.businessType).label,
+            },
+            {
+              key: "plan",
+              header: "Plan",
+              cellClassName: "text-muted",
+              render: (c: Company) => (
+                <button onClick={() => setPlanCompany(c)} className="underline decoration-dotted hover:text-ink py-1">
+                  {c.subscription?.plan.name ?? "—"}
+                </button>
+              ),
+            },
+            { key: "sucursales", header: "Sucursales", cellClassName: "font-mono", render: (c: Company) => c.branches.length },
+            { key: "usuarios", header: "Usuarios", cellClassName: "font-mono", render: (c: Company) => c.users.length },
+            {
+              key: "estado",
+              header: "Estado",
+              mobile: "aside",
+              render: (c: Company) => (
+                <StatusBadge
+                  status={c.status}
+                  label={c.status === "ACTIVE" ? "Activa" : c.status === "SUSPENDED" ? "Suspendida" : "Cancelada"}
+                />
+              ),
+            },
+            {
+              key: "cobro",
+              header: "Cobro",
+              cellClassName: "text-xs",
+              render: (c: Company) => {
+                const b = billingSummary(c, graceDays);
+                const color =
+                  b.tone === "ok" ? "text-sage" : b.tone === "warn" ? "text-marigold" : b.tone === "bad" ? "text-ember-dark" : "text-muted";
+                return <span className={`${color} font-medium`}>{b.label}</span>;
+              },
+            },
+          ] satisfies ResponsiveColumn<Company>[]}
+          rows={companies}
+          getRowId={(c) => c.id}
+          renderActions={(c) => (
+            <div className="flex flex-wrap justify-end gap-1">
+              <Button variant="ghost" onClick={() => setUsersCompany(c)}>
+                Usuarios
+              </Button>
+              {c.status !== "CANCELLED" && (
+                <Button variant="ghost" onClick={() => setBillingCompany(c)}>
+                  Cobro
+                </Button>
+              )}
+              {c.status !== "CANCELLED" && (
+                <Button variant="ghost" onClick={() => toggleStatus(c)}>
+                  {c.status === "ACTIVE" ? "Suspender" : "Activar"}
+                </Button>
+              )}
+              {c.status !== "CANCELLED" && (
+                <Button variant="ghost" onClick={() => cancelSubscription(c)} className="text-ember-dark hover:bg-ember/10">
+                  Cancelar suscripción
+                </Button>
+              )}
+              <Button variant="ghost" onClick={() => deleteCompany(c)} className="text-ember-dark hover:bg-ember/10">
+                Eliminar
+              </Button>
+            </div>
+          )}
+        />
+      )}
 
       <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Crear empresa">
         <form onSubmit={handleCreate}>

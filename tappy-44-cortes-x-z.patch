@@ -1,0 +1,1816 @@
+From e369860a12f846ba79f3626142d36f6835a879ed Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Tue, 13 Oct 2026 03:18:35 +0000
+Subject: [PATCH] tappy-44: cortes X y Z de caja (dia por sucursal, folio
+ consecutivo, historial)
+
+---
+ .../20261013120000_cortes_x_z/migration.sql   |  10 +
+ prisma/schema.prisma                          |  13 +
+ src/app/(company)/cash/cash-client.tsx        | 128 +++++--
+ src/app/(company)/cash/page.tsx               |   8 +-
+ .../(company)/cortes-z/cortes-z-client.tsx    | 168 +++++++++
+ src/app/(company)/cortes-z/page.tsx           |  24 ++
+ src/app/(company)/layout.tsx                  |   1 +
+ src/app/api/cash/close/route.ts               |  32 +-
+ src/app/api/cash/report-x/route.ts            |  37 ++
+ src/app/api/cash/status/route.ts              |   7 +-
+ src/app/api/cash/z-history/[id]/route.ts      |  24 ++
+ src/app/api/cash/z-history/route.ts           |  80 +++++
+ .../api/companies/[id]/cash-settings/route.ts |  40 +++
+ src/app/globals.css                           |  24 ++
+ .../plataforma/companies/companies-table.tsx  |  70 ++++
+ src/components/cash/cut-report.tsx            | 193 ++++++++++
+ src/lib/permissions.ts                        |   5 +
+ src/modules/cash/report.ts                    | 333 ++++++++++++++++++
+ src/modules/cash/service.ts                   | 151 ++++++--
+ src/modules/sales/service.ts                  |   7 +
+ src/modules/tableTabs/service.ts              |   6 +
+ 21 files changed, 1296 insertions(+), 65 deletions(-)
+ create mode 100644 prisma/migrations/20261013120000_cortes_x_z/migration.sql
+ create mode 100644 src/app/(company)/cortes-z/cortes-z-client.tsx
+ create mode 100644 src/app/(company)/cortes-z/page.tsx
+ create mode 100644 src/app/api/cash/report-x/route.ts
+ create mode 100644 src/app/api/cash/z-history/[id]/route.ts
+ create mode 100644 src/app/api/cash/z-history/route.ts
+ create mode 100644 src/app/api/companies/[id]/cash-settings/route.ts
+ create mode 100644 src/components/cash/cut-report.tsx
+ create mode 100644 src/modules/cash/report.ts
+
+diff --git a/prisma/migrations/20261013120000_cortes_x_z/migration.sql b/prisma/migrations/20261013120000_cortes_x_z/migration.sql
+new file mode 100644
+index 0000000..2c946de
+--- /dev/null
++++ b/prisma/migrations/20261013120000_cortes_x_z/migration.sql
+@@ -0,0 +1,10 @@
++-- AlterTable
++ALTER TABLE "companies" ADD COLUMN "requireOpenCashDay" BOOLEAN NOT NULL DEFAULT false;
++
++-- AlterTable
++ALTER TABLE "cash_registers" ADD COLUMN "folio" INTEGER,
++ADD COLUMN "zReport" JSONB,
++ADD COLUMN "autoOpened" BOOLEAN NOT NULL DEFAULT false;
++
++-- CreateIndex
++CREATE UNIQUE INDEX "cash_registers_branchId_folio_key" ON "cash_registers"("branchId", "folio");
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index ec1a23e..8eecd68 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -41,6 +41,11 @@ model Company {
+   // solo una empresa con esto en true puede tener financiamientos de hardware.
+   hardwareFinancingEnabled Boolean @default(false)
+ 
++  // Cortes X/Z: si es true, NO se puede vender sin antes abrir el día de caja de la
++  // sucursal (con su fondo inicial). Si es false (default), el día se abre solo con
++  // la primera venta, con fondo $0. Lo activa Jose por empresa desde Super Admin.
++  requireOpenCashDay Boolean @default(false)
++
+   subscriptionPayments SubscriptionPayment[]
+ 
+   stockTransfers  StockTransfer[]
+@@ -588,8 +593,16 @@ model CashRegister {
+   difference   Decimal? @db.Decimal(10, 2)
+   status       CashRegisterStatus @default(OPEN)
+ 
++  // Corte Z: folio consecutivo por sucursal (se asigna al cerrar el día) y resumen
++  // congelado del cierre. Un Z ya hecho nunca se recalcula ni se edita.
++  folio      Int?
++  zReport    Json?
++  // true cuando el día se abrió solo con la primera venta (empresa sin "abrir caja obligatorio").
++  autoOpened Boolean @default(false)
++
+   movements CashMovement[]
+ 
++  @@unique([branchId, folio])
+   @@index([branchId])
+   @@map("cash_registers")
+ }
+diff --git a/src/app/(company)/cash/cash-client.tsx b/src/app/(company)/cash/cash-client.tsx
+index b978329..b0a5d57 100644
+--- a/src/app/(company)/cash/cash-client.tsx
++++ b/src/app/(company)/cash/cash-client.tsx
+@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
+ import { Button, Card } from "@/components/ui";
+ import { Modal, Field, inputClass } from "@/components/ui/modal";
+ import { formatMxn } from "@/lib/format";
++import { CutReportView, PrintButton } from "@/components/cash/cut-report";
++import type { CutReport } from "@/modules/cash/report";
+ 
+ type Movement = { id: string; type: string; amount: string; reason: string | null; createdAt: string; user: { name: string } };
+ type OpenStatus = {
+@@ -12,12 +14,12 @@ type OpenStatus = {
+   salesTotals: { cash: number; card: number; transfer: number; other: number };
+   expectedCash: number;
+ };
+-type ClosedStatus = { open: false };
++type ClosedStatus = { open: false; requireOpenCashDay?: boolean };
+ type Status = OpenStatus | ClosedStatus | null;
+ 
+ const MOVEMENT_LABELS: Record<string, string> = { CASH_IN: "Entrada", CASH_OUT: "Retiro", REFUND: "Devolución" };
+ 
+-export function CashClient({ userName }: { userName: string }) {
++export function CashClient({ userName, canReportX, canReportZ }: { userName: string; canReportX: boolean; canReportZ: boolean }) {
+   const [status, setStatus] = useState<Status>(null);
+   const [loading, setLoading] = useState(true);
+ 
+@@ -37,7 +39,17 @@ export function CashClient({ userName }: { userName: string }) {
+     <div>
+       <WhatsAppPendingOrders />
+ 
+-      {!status?.open ? <OpenRegisterForm onOpened={refresh} /> : <OpenRegisterView status={status} userName={userName} onChange={refresh} />}
++      {!status?.open ? (
++        <OpenRegisterForm onOpened={refresh} requireOpenCashDay={status?.requireOpenCashDay ?? false} />
++      ) : (
++        <OpenRegisterView
++          status={status}
++          userName={userName}
++          canReportX={canReportX}
++          canReportZ={canReportZ}
++          onChange={refresh}
++        />
++      )}
+     </div>
+   );
+ }
+@@ -230,7 +242,7 @@ function PayOrderModal({ order, onClose, onPaid }: { order: PendingOrder; onClos
+ 
+ // ---------- Apertura / turno de caja (sin cambios de lógica) ----------
+ 
+-function OpenRegisterForm({ onOpened }: { onOpened: () => void }) {
++function OpenRegisterForm({ onOpened, requireOpenCashDay }: { onOpened: () => void; requireOpenCashDay: boolean }) {
+   const [openingCash, setOpeningCash] = useState("");
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
+@@ -256,7 +268,11 @@ function OpenRegisterForm({ onOpened }: { onOpened: () => void }) {
+   return (
+     <Card className="max-w-sm p-6">
+       <p className="font-display text-xl font-semibold mb-1">La caja está cerrada</p>
+-      <p className="text-sm text-muted mb-5">Registra el monto inicial en efectivo para abrir el turno.</p>
++      <p className="text-sm text-muted mb-5">
++        {requireOpenCashDay
++          ? "Registra el fondo inicial en efectivo para abrir el día. No se puede vender hasta que la caja esté abierta."
++          : "Registra el fondo inicial en efectivo para abrir el día. Si vendes sin abrirla, el día se abre solo con la primera venta (fondo $0)."}
++      </p>
+       <form onSubmit={handleOpen}>
+         <Field label="Monto inicial (MXN)">
+           <input
+@@ -280,9 +296,22 @@ function OpenRegisterForm({ onOpened }: { onOpened: () => void }) {
+   );
+ }
+ 
+-function OpenRegisterView({ status, userName, onChange }: { status: OpenStatus; userName: string; onChange: () => void }) {
++function OpenRegisterView({
++  status,
++  userName,
++  canReportX,
++  canReportZ,
++  onChange,
++}: {
++  status: OpenStatus;
++  userName: string;
++  canReportX: boolean;
++  canReportZ: boolean;
++  onChange: () => void;
++}) {
+   const [movementOpen, setMovementOpen] = useState(false);
+   const [closeOpen, setCloseOpen] = useState(false);
++  const [xOpen, setXOpen] = useState(false);
+ 
+   const totalSales = status.salesTotals.cash + status.salesTotals.card + status.salesTotals.transfer + status.salesTotals.other;
+ 
+@@ -290,7 +319,7 @@ function OpenRegisterView({ status, userName, onChange }: { status: OpenStatus;
+     <div>
+       <div className="flex items-center justify-between mb-6">
+         <p className="text-sm text-muted">
+-          Turno abierto desde{" "}
++          Día abierto desde{" "}
+           <span className="font-medium text-ink">
+             {new Date(status.register.openedAt).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" })}
+           </span>{" "}
+@@ -300,7 +329,12 @@ function OpenRegisterView({ status, userName, onChange }: { status: OpenStatus;
+           <Button variant="secondary" onClick={() => setMovementOpen(true)}>
+             + Entrada / Retiro
+           </Button>
+-          <Button onClick={() => setCloseOpen(true)}>Cerrar caja</Button>
++          {(canReportX || canReportZ) && (
++            <Button variant="secondary" onClick={() => setXOpen(true)}>
++              Corte X
++            </Button>
++          )}
++          {canReportZ && <Button onClick={() => setCloseOpen(true)}>Corte Z · Cerrar día</Button>}
+         </div>
+       </div>
+ 
+@@ -369,6 +403,7 @@ function OpenRegisterView({ status, userName, onChange }: { status: OpenStatus;
+       </Card>
+ 
+       {movementOpen && <MovementModal onClose={() => setMovementOpen(false)} onDone={() => { setMovementOpen(false); onChange(); }} />}
++      {xOpen && <XReportModal onClose={() => setXOpen(false)} />}
+       {closeOpen && (
+         <CloseModal expectedCash={status.expectedCash} onClose={() => setCloseOpen(false)} onDone={() => { setCloseOpen(false); onChange(); }} />
+       )}
+@@ -440,11 +475,55 @@ function MovementModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
+   );
+ }
+ 
++// ---------- Corte X (parcial, no cierra nada) ----------
++
++function XReportModal({ onClose }: { onClose: () => void }) {
++  const [report, setReport] = useState<CutReport | null>(null);
++  const [error, setError] = useState("");
++  const [loading, setLoading] = useState(true);
++
++  async function load() {
++    setLoading(true);
++    setError("");
++    const res = await fetch("/api/cash/report-x");
++    const data = await res.json();
++    setLoading(false);
++    if (!res.ok) {
++      setError(data.error ?? "No se pudo generar el corte X");
++      return;
++    }
++    setReport(data.report);
++  }
++
++  useEffect(() => {
++    load();
++  }, []);
++
++  return (
++    <Modal open onClose={onClose} title="Corte X">
++      {loading && <p className="text-sm text-muted">Generando corte...</p>}
++      {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
++      {report && <CutReportView report={report} />}
++      <div className="no-print flex justify-end gap-2 mt-5">
++        <Button type="button" variant="secondary" onClick={load} disabled={loading}>
++          Actualizar
++        </Button>
++        {report && <PrintButton />}
++        <Button type="button" onClick={onClose}>
++          Cerrar
++        </Button>
++      </div>
++    </Modal>
++  );
++}
++
++// ---------- Corte Z (cierra el día de la sucursal) ----------
++
+ function CloseModal({ expectedCash, onClose, onDone }: { expectedCash: number; onClose: () => void; onDone: () => void }) {
+   const [countedCash, setCountedCash] = useState("");
+   const [error, setError] = useState("");
+   const [saving, setSaving] = useState(false);
+-  const [result, setResult] = useState<{ difference: number } | null>(null);
++  const [report, setReport] = useState<CutReport | null>(null);
+ 
+   const countedNum = parseFloat(countedCash) || 0;
+   const difference = countedNum - expectedCash;
+@@ -460,33 +539,30 @@ function CloseModal({ expectedCash, onClose, onDone }: { expectedCash: number; o
+     const data = await res.json();
+     setSaving(false);
+     if (!res.ok) {
+-      setError(data.error ?? "No se pudo cerrar la caja");
++      setError(data.error ?? "No se pudo hacer el corte Z");
+       return;
+     }
+-    setResult({ difference: Number(data.register.difference) });
++    setReport(data.report);
+   }
+ 
+-  if (result) {
+-    const isExact = Math.abs(result.difference) < 0.01;
++  if (report) {
+     return (
+-      <Modal open onClose={onDone} title="Caja cerrada">
+-        <div className="text-center py-2">
+-          <p className={`font-display text-3xl font-semibold mb-2 ${isExact ? "text-sage" : "text-ember-dark"}`}>
+-            {isExact ? "Cuadró exacto" : formatMxn(Math.abs(result.difference))}
+-          </p>
+-          <p className="text-sm text-muted mb-6">
+-            {isExact ? "El efectivo contado coincide con lo esperado." : result.difference > 0 ? "Sobrante en caja." : "Faltante en caja."}
+-          </p>
+-          <Button onClick={onDone} className="w-full">
+-            Listo
+-          </Button>
++      <Modal open onClose={onDone} title="Corte Z hecho">
++        <CutReportView report={report} />
++        <div className="no-print flex justify-end gap-2 mt-5">
++          <PrintButton />
++          <Button onClick={onDone}>Listo</Button>
+         </div>
+       </Modal>
+     );
+   }
+ 
+   return (
+-    <Modal open onClose={onClose} title="Cerrar caja">
++    <Modal open onClose={onClose} title="Corte Z · Cerrar día">
++      <p className="text-sm text-muted mb-4">
++        Al confirmar se cierra el día de esta sucursal y se guarda el corte con un folio consecutivo. Ya no se puede
++        modificar.
++      </p>
+       <p className="text-sm text-muted mb-1">Efectivo esperado en caja</p>
+       <p className="font-mono text-2xl mb-5">{formatMxn(expectedCash)}</p>
+ 
+@@ -521,7 +597,7 @@ function CloseModal({ expectedCash, onClose, onDone }: { expectedCash: number; o
+           Cancelar
+         </Button>
+         <Button onClick={handleClose} disabled={saving || !countedCash}>
+-          {saving ? "Cerrando..." : "Confirmar cierre"}
++          {saving ? "Cerrando..." : "Confirmar corte Z"}
+         </Button>
+       </div>
+     </Modal>
+diff --git a/src/app/(company)/cash/page.tsx b/src/app/(company)/cash/page.tsx
+index 4f68557..4074d6b 100644
+--- a/src/app/(company)/cash/page.tsx
++++ b/src/app/(company)/cash/page.tsx
+@@ -15,8 +15,12 @@ export default async function CashPage() {
+   return (
+     <div>
+       <h1 className="font-display text-3xl font-semibold mb-1">Caja</h1>
+-      <p className="text-muted text-sm mb-8">Apertura, movimientos y corte de tu sucursal.</p>
+-      <CashClient userName={session!.user.name ?? ""} />
++      <p className="text-muted text-sm mb-8">Apertura, movimientos y cortes X y Z de tu sucursal.</p>
++      <CashClient
++        userName={session!.user.name ?? ""}
++        canReportX={hasPermission(session.user.permissions, PERMISSIONS.CASH_REPORT_X)}
++        canReportZ={hasPermission(session.user.permissions, PERMISSIONS.CASH_REPORT_Z)}
++      />
+     </div>
+   );
+ }
+diff --git a/src/app/(company)/cortes-z/cortes-z-client.tsx b/src/app/(company)/cortes-z/cortes-z-client.tsx
+new file mode 100644
+index 0000000..96c8209
+--- /dev/null
++++ b/src/app/(company)/cortes-z/cortes-z-client.tsx
+@@ -0,0 +1,168 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import { Button, Card } from "@/components/ui";
++import { Modal, Field, inputClass } from "@/components/ui/modal";
++import { formatMxn } from "@/lib/format";
++import { CutReportView, PrintButton } from "@/components/cash/cut-report";
++import type { CutReport } from "@/modules/cash/report";
++
++type Cut = {
++  id: string;
++  folio: number | null;
++  branchName: string;
++  openedAt: string;
++  closedAt: string | null;
++  tickets: number;
++  total: number;
++  expectedCash: number | null;
++  countedCash: number | null;
++  difference: number | null;
++};
++type Branch = { id: string; name: string };
++
++function fmt(iso: string | null) {
++  return iso ? new Date(iso).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" }) : "—";
++}
++
++export function CortesZClient() {
++  const [cuts, setCuts] = useState<Cut[]>([]);
++  const [branches, setBranches] = useState<Branch[]>([]);
++  const [branchId, setBranchId] = useState("");
++  const [from, setFrom] = useState("");
++  const [to, setTo] = useState("");
++  const [loading, setLoading] = useState(true);
++  const [error, setError] = useState("");
++  const [viewing, setViewing] = useState<CutReport | null>(null);
++  const [opening, setOpening] = useState<string | null>(null);
++
++  async function load() {
++    setLoading(true);
++    setError("");
++    const params = new URLSearchParams();
++    if (branchId) params.set("branchId", branchId);
++    if (from) params.set("from", from);
++    if (to) params.set("to", to);
++    const res = await fetch(`/api/cash/z-history?${params.toString()}`);
++    const data = await res.json();
++    setLoading(false);
++    if (!res.ok) {
++      setError(data.error ?? "No se pudieron cargar los cortes");
++      return;
++    }
++    setCuts(data.cuts);
++    setBranches(data.branches);
++  }
++
++  useEffect(() => {
++    load();
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [branchId, from, to]);
++
++  async function view(id: string) {
++    setOpening(id);
++    const res = await fetch(`/api/cash/z-history/${id}`);
++    const data = await res.json();
++    setOpening(null);
++    if (!res.ok) {
++      setError(data.error ?? "No se pudo abrir el corte");
++      return;
++    }
++    setViewing(data.report);
++  }
++
++  return (
++    <div>
++      <div className="flex flex-wrap items-end gap-3 mb-6">
++        {branches.length > 1 && (
++          <div className="w-52">
++            <Field label="Sucursal">
++              <select className={inputClass} value={branchId} onChange={(e) => setBranchId(e.target.value)}>
++                <option value="">Todas</option>
++                {branches.map((b) => (
++                  <option key={b.id} value={b.id}>
++                    {b.name}
++                  </option>
++                ))}
++              </select>
++            </Field>
++          </div>
++        )}
++        <div className="w-44">
++          <Field label="Desde">
++            <input type="date" className={inputClass} value={from} onChange={(e) => setFrom(e.target.value)} />
++          </Field>
++        </div>
++        <div className="w-44">
++          <Field label="Hasta">
++            <input type="date" className={inputClass} value={to} onChange={(e) => setTo(e.target.value)} />
++          </Field>
++        </div>
++      </div>
++
++      {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
++
++      <Card className="overflow-x-auto">
++        {loading ? (
++          <p className="text-sm text-muted p-5">Cargando...</p>
++        ) : cuts.length === 0 ? (
++          <p className="text-sm text-muted p-5">
++            Todavía no hay cortes Z. Aparecen aquí cuando se cierra un día desde Caja (Corte Z · Cerrar día).
++          </p>
++        ) : (
++          <table className="w-full text-sm">
++            <thead>
++              <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-muted">
++                <th className="px-5 py-3 font-medium">Folio</th>
++                <th className="px-5 py-3 font-medium">Sucursal</th>
++                <th className="px-5 py-3 font-medium">Apertura</th>
++                <th className="px-5 py-3 font-medium">Cierre</th>
++                <th className="px-5 py-3 font-medium">Tickets</th>
++                <th className="px-5 py-3 font-medium">Total</th>
++                <th className="px-5 py-3 font-medium">Diferencia</th>
++                <th className="px-5 py-3 font-medium"></th>
++              </tr>
++            </thead>
++            <tbody>
++              {cuts.map((c) => {
++                const exact = c.difference !== null && Math.abs(c.difference) < 0.01;
++                return (
++                  <tr key={c.id} className="border-b border-line last:border-0">
++                    <td className="px-5 py-3 font-mono font-semibold">Z-{c.folio}</td>
++                    <td className="px-5 py-3">{c.branchName}</td>
++                    <td className="px-5 py-3 text-muted text-xs">{fmt(c.openedAt)}</td>
++                    <td className="px-5 py-3 text-muted text-xs">{fmt(c.closedAt)}</td>
++                    <td className="px-5 py-3 font-mono">{c.tickets}</td>
++                    <td className="px-5 py-3 font-mono">{formatMxn(c.total)}</td>
++                    <td
++                      className={`px-5 py-3 font-mono ${
++                        c.difference === null ? "" : exact ? "text-sage" : "text-ember-dark"
++                      }`}
++                    >
++                      {c.difference === null ? "—" : exact ? "Cuadró" : formatMxn(c.difference)}
++                    </td>
++                    <td className="px-5 py-3 text-right">
++                      <Button variant="ghost" onClick={() => view(c.id)} disabled={opening === c.id}>
++                        {opening === c.id ? "Abriendo..." : "Ver"}
++                      </Button>
++                    </td>
++                  </tr>
++                );
++              })}
++            </tbody>
++          </table>
++        )}
++      </Card>
++
++      {viewing && (
++        <Modal open onClose={() => setViewing(null)} title={`Corte Z${viewing.folio ? ` · Folio ${viewing.folio}` : ""}`}>
++          <CutReportView report={viewing} />
++          <div className="no-print flex justify-end gap-2 mt-5">
++            <PrintButton />
++            <Button onClick={() => setViewing(null)}>Cerrar</Button>
++          </div>
++        </Modal>
++      )}
++    </div>
++  );
++}
+diff --git a/src/app/(company)/cortes-z/page.tsx b/src/app/(company)/cortes-z/page.tsx
+new file mode 100644
+index 0000000..6fdcca9
+--- /dev/null
++++ b/src/app/(company)/cortes-z/page.tsx
+@@ -0,0 +1,24 @@
++import { redirect } from "next/navigation";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
++import { CortesZClient } from "./cortes-z-client";
++
++export default async function CortesZPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.CASH_REPORT_Z)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++
++  return (
++    <div>
++      <h1 className="font-display text-3xl font-semibold mb-1">Cortes Z</h1>
++      <p className="text-muted text-sm mb-8">
++        Cierres de día por sucursal, con su folio consecutivo. Cada corte se guarda tal como se hizo y no cambia.
++      </p>
++      <CortesZClient />
++    </div>
++  );
++}
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index 36dcaf8..2cce7ac 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -20,6 +20,7 @@ const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey
+   { href: "/kitchen", label: "Cocina", permission: PERMISSIONS.KITCHEN_VIEW },
+   { href: "/dashboard", label: "Dashboard", permission: PERMISSIONS.REPORTS_VIEW },
+   { href: "/cash", label: "Caja", permission: PERMISSIONS.CASH_OPEN },
++  { href: "/cortes-z", label: "Cortes Z", permission: PERMISSIONS.CASH_REPORT_Z },
+   { href: "/reports", label: "Reportes", permission: PERMISSIONS.REPORTS_VIEW },
+   { href: "/sales-history", label: "Historial de ventas", permission: PERMISSIONS.REPORTS_VIEW },
+   { href: "/sales-import", label: "Importar ventas", permission: PERMISSIONS.REPORTS_VIEW },
+diff --git a/src/app/api/cash/close/route.ts b/src/app/api/cash/close/route.ts
+index 00b2743..8870701 100644
+--- a/src/app/api/cash/close/route.ts
++++ b/src/app/api/cash/close/route.ts
+@@ -4,12 +4,16 @@ import { cashService, closeRegisterSchema } from "@/modules/cash/service";
+ import { hasPermission, PERMISSIONS } from "@/lib/permissions";
+ import { prisma } from "@/lib/prisma";
+ 
++/**
++ * POST /api/cash/close — Corte Z: cierra el día de caja de la sucursal.
++ * Solo quien tenga cash.report_z (Administrador y Gerente por defecto).
++ */
+ export async function POST(req: Request) {
+   const ctx = await getTenantContext();
+   const companyId = requireCompanyId(ctx);
+ 
+-  if (!hasPermission(ctx.permissions, PERMISSIONS.CASH_CLOSE)) {
+-    return NextResponse.json({ error: "No tienes permiso para cerrar caja" }, { status: 403 });
++  if (!hasPermission(ctx.permissions, PERMISSIONS.CASH_REPORT_Z)) {
++    return NextResponse.json({ error: "Solo un Gerente o Administrador puede hacer el corte Z" }, { status: 403 });
+   }
+ 
+   const branchId = await resolveBranchId(ctx, companyId);
+@@ -21,19 +25,31 @@ export async function POST(req: Request) {
+     return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
+   }
+ 
+-  const status = await cashService.getStatus(branchId);
+-  if (!status.open) return NextResponse.json({ error: "La caja no está abierta" }, { status: 400 });
++  const user = await prisma.user.findUnique({ where: { id: ctx.userId }, select: { name: true } });
+ 
+   try {
+-    const register = await cashService.close(status.register.id, branchId, parsed.data.countedCash);
++    const { updated, report } = await cashService.closeDay({
++      companyId,
++      branchId,
++      userId: ctx.userId,
++      userName: user?.name ?? "—",
++      countedCash: parsed.data.countedCash,
++    });
+ 
+     await prisma.auditLog.create({
+-      data: { companyId, userId: ctx.userId, action: "CASH_CLOSE", entity: "CashRegister", entityId: register.id, newData: { difference: register.difference } },
++      data: {
++        companyId,
++        userId: ctx.userId,
++        action: "CASH_CLOSE",
++        entity: "CashRegister",
++        entityId: updated.id,
++        newData: { difference: report.cash.difference, folio: report.folio },
++      },
+     });
+ 
+-    return NextResponse.json({ register });
++    return NextResponse.json({ register: updated, report });
+   } catch (err) {
+-    const message = err instanceof Error ? err.message : "No se pudo cerrar la caja";
++    const message = err instanceof Error ? err.message : "No se pudo hacer el corte Z";
+     return NextResponse.json({ error: message }, { status: 400 });
+   }
+ }
+diff --git a/src/app/api/cash/report-x/route.ts b/src/app/api/cash/report-x/route.ts
+new file mode 100644
+index 0000000..72d8bad
+--- /dev/null
++++ b/src/app/api/cash/report-x/route.ts
+@@ -0,0 +1,37 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId, resolveBranchId } from "@/lib/tenant-context";
++import { cashService } from "@/modules/cash/service";
++import { cashReportService } from "@/modules/cash/report";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { prisma } from "@/lib/prisma";
++
++/**
++ * GET /api/cash/report-x — Corte X: lectura parcial del día abierto de la sucursal.
++ * No guarda ni cierra nada; se puede sacar las veces que se quiera.
++ */
++export async function GET() {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (
++    !hasPermission(ctx.permissions, PERMISSIONS.CASH_REPORT_X) &&
++    !hasPermission(ctx.permissions, PERMISSIONS.CASH_REPORT_Z)
++  ) {
++    return NextResponse.json({ error: "No tienes permiso para sacar el corte X" }, { status: 403 });
++  }
++
++  const branchId = await resolveBranchId(ctx, companyId);
++  if (!branchId) return NextResponse.json({ error: "Sin sucursales configuradas" }, { status: 400 });
++
++  const register = await cashService.getOpenRegister(branchId);
++  if (!register) return NextResponse.json({ error: "No hay un día de caja abierto en esta sucursal" }, { status: 400 });
++
++  const user = await prisma.user.findUnique({ where: { id: ctx.userId }, select: { name: true } });
++  const report = await cashReportService.build(register.id, {
++    kind: "X",
++    upTo: new Date(),
++    generatedBy: user?.name ?? null,
++  });
++
++  return NextResponse.json({ report });
++}
+diff --git a/src/app/api/cash/status/route.ts b/src/app/api/cash/status/route.ts
+index 83ee6e8..1749d63 100644
+--- a/src/app/api/cash/status/route.ts
++++ b/src/app/api/cash/status/route.ts
+@@ -1,6 +1,7 @@
+ import { NextResponse } from "next/server";
+ import { getTenantContext, requireCompanyId, resolveBranchId } from "@/lib/tenant-context";
+ import { cashService } from "@/modules/cash/service";
++import { prisma } from "@/lib/prisma";
+ 
+ export async function GET() {
+   const ctx = await getTenantContext();
+@@ -9,5 +10,9 @@ export async function GET() {
+   if (!branchId) return NextResponse.json({ error: "Sin sucursales configuradas" }, { status: 400 });
+ 
+   const status = await cashService.getStatus(branchId);
+-  return NextResponse.json(status);
++  if (status.open) return NextResponse.json(status);
++
++  // Sin día abierto: la pantalla de Caja explica si abrirlo es obligatorio para vender.
++  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { requireOpenCashDay: true } });
++  return NextResponse.json({ ...status, requireOpenCashDay: company?.requireOpenCashDay ?? false });
+ }
+diff --git a/src/app/api/cash/z-history/[id]/route.ts b/src/app/api/cash/z-history/[id]/route.ts
+new file mode 100644
+index 0000000..6f64d0c
+--- /dev/null
++++ b/src/app/api/cash/z-history/[id]/route.ts
+@@ -0,0 +1,24 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { prisma } from "@/lib/prisma";
++
++/** GET /api/cash/z-history/[id] — el corte Z congelado tal como se guardó al cerrar el día. */
++export async function GET(_req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!hasPermission(ctx.permissions, PERMISSIONS.CASH_REPORT_Z)) {
++    return NextResponse.json({ error: "No tienes permiso para consultar los cortes Z" }, { status: 403 });
++  }
++
++  const register = await prisma.cashRegister.findFirst({
++    where: { id: params.id, status: "CLOSED", branch: { companyId } },
++    select: { zReport: true },
++  });
++  if (!register || !register.zReport) {
++    return NextResponse.json({ error: "Corte Z no encontrado" }, { status: 404 });
++  }
++
++  return NextResponse.json({ report: register.zReport });
++}
+diff --git a/src/app/api/cash/z-history/route.ts b/src/app/api/cash/z-history/route.ts
+new file mode 100644
+index 0000000..8e29a64
+--- /dev/null
++++ b/src/app/api/cash/z-history/route.ts
+@@ -0,0 +1,80 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { prisma } from "@/lib/prisma";
++
++type ZRow = {
++  id: string;
++  folio: number | null;
++  openedAt: Date;
++  closedAt: Date | null;
++  countedCash: unknown;
++  expectedCash: unknown;
++  difference: unknown;
++  zReport: { sales?: { tickets?: number; total?: number } } | null;
++  branch: { name: string };
++};
++
++/** GET /api/cash/z-history?branchId=&from=YYYY-MM-DD&to=YYYY-MM-DD — cortes Z ya hechos (solo cash.report_z). */
++export async function GET(req: Request) {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!hasPermission(ctx.permissions, PERMISSIONS.CASH_REPORT_Z)) {
++    return NextResponse.json({ error: "No tienes permiso para consultar los cortes Z" }, { status: 403 });
++  }
++
++  const url = new URL(req.url);
++  const branchId = url.searchParams.get("branchId") || undefined;
++  const from = url.searchParams.get("from");
++  const to = url.searchParams.get("to");
++
++  const closedAt: { gte?: Date; lte?: Date } = {};
++  if (from && /^\d{4}-\d{2}-\d{2}$/.test(from)) closedAt.gte = new Date(`${from}T00:00:00`);
++  if (to && /^\d{4}-\d{2}-\d{2}$/.test(to)) closedAt.lte = new Date(`${to}T23:59:59.999`);
++
++  const rows = (await prisma.cashRegister.findMany({
++    where: {
++      status: "CLOSED",
++      folio: { not: null },
++      branch: { companyId },
++      ...(branchId ? { branchId } : {}),
++      ...(closedAt.gte || closedAt.lte ? { closedAt } : {}),
++    },
++    select: {
++      id: true,
++      folio: true,
++      openedAt: true,
++      closedAt: true,
++      countedCash: true,
++      expectedCash: true,
++      difference: true,
++      zReport: true,
++      branch: { select: { name: true } },
++    },
++    orderBy: { closedAt: "desc" },
++    take: 200,
++  })) as unknown as ZRow[];
++
++  const branches = await prisma.branch.findMany({
++    where: { companyId },
++    select: { id: true, name: true },
++    orderBy: { name: "asc" },
++  });
++
++  return NextResponse.json({
++    branches,
++    cuts: rows.map((r) => ({
++      id: r.id,
++      folio: r.folio,
++      branchName: r.branch.name,
++      openedAt: r.openedAt.toISOString(),
++      closedAt: r.closedAt ? r.closedAt.toISOString() : null,
++      tickets: r.zReport?.sales?.tickets ?? 0,
++      total: r.zReport?.sales?.total ?? 0,
++      expectedCash: r.expectedCash === null ? null : Number(r.expectedCash),
++      countedCash: r.countedCash === null ? null : Number(r.countedCash),
++      difference: r.difference === null ? null : Number(r.difference),
++    })),
++  });
++}
+diff --git a/src/app/api/companies/[id]/cash-settings/route.ts b/src/app/api/companies/[id]/cash-settings/route.ts
+new file mode 100644
+index 0000000..a87ec45
+--- /dev/null
++++ b/src/app/api/companies/[id]/cash-settings/route.ts
+@@ -0,0 +1,40 @@
++import { NextResponse } from "next/server";
++import { getTenantContext } from "@/lib/tenant-context";
++import { prisma } from "@/lib/prisma";
++
++/**
++ * PATCH /api/companies/[id]/cash-settings  { requireOpenCashDay: boolean }
++ *
++ * Solo SUPER_ADMIN. Si está activo, la empresa no puede vender sin abrir antes el día de caja
++ * (con su fondo inicial). Apagado (default): el día se abre solo con la primera venta.
++ */
++export async function PATCH(req: Request, { params }: { params: { id: string } }) {
++  const ctx = await getTenantContext();
++  if (!ctx.isSuperAdmin) {
++    return NextResponse.json({ error: "No autorizado" }, { status: 403 });
++  }
++
++  const body = await req.json().catch(() => ({}));
++  if (typeof body.requireOpenCashDay !== "boolean") {
++    return NextResponse.json({ error: "Valor inválido" }, { status: 400 });
++  }
++
++  const company = await prisma.company.update({
++    where: { id: params.id },
++    data: { requireOpenCashDay: body.requireOpenCashDay },
++    select: { id: true, requireOpenCashDay: true },
++  });
++
++  await prisma.auditLog.create({
++    data: {
++      companyId: params.id,
++      userId: ctx.userId,
++      action: "UPDATE",
++      entity: "Company",
++      entityId: params.id,
++      newData: { requireOpenCashDay: company.requireOpenCashDay },
++    },
++  });
++
++  return NextResponse.json({ company });
++}
+diff --git a/src/app/globals.css b/src/app/globals.css
+index 5c73aca..7d536e8 100644
+--- a/src/app/globals.css
++++ b/src/app/globals.css
+@@ -78,3 +78,27 @@ body {
+   outline: 2px solid var(--ember);
+   outline-offset: 2px;
+ }
++
++/* Cortes X/Z de caja: al imprimir solo sale el ticket (#cut-report-print) en formato de 80 mm. */
++@media print {
++  body * {
++    visibility: hidden !important;
++  }
++  #cut-report-print,
++  #cut-report-print * {
++    visibility: visible !important;
++  }
++  #cut-report-print {
++    position: absolute;
++    left: 0;
++    top: 0;
++    width: 80mm;
++    padding: 4mm;
++    font-size: 11px;
++    color: #000;
++    background: #fff;
++  }
++  .no-print {
++    display: none !important;
++  }
++}
+diff --git a/src/app/plataforma/companies/companies-table.tsx b/src/app/plataforma/companies/companies-table.tsx
+index 2ba7c41..14a809d 100644
+--- a/src/app/plataforma/companies/companies-table.tsx
++++ b/src/app/plataforma/companies/companies-table.tsx
+@@ -15,6 +15,7 @@ type Company = {
+   id: string;
+   name: string;
+   status: "ACTIVE" | "SUSPENDED" | "CANCELLED";
++  requireOpenCashDay?: boolean;
+   branches: { id: string }[];
+   users: { id: string }[];
+   subscription: {
+@@ -83,6 +84,7 @@ export function CompaniesTable({
+   const [usersCompany, setUsersCompany] = useState<Company | null>(null);
+   const [planCompany, setPlanCompany] = useState<Company | null>(null);
+   const [billingCompany, setBillingCompany] = useState<Company | null>(null);
++  const [cashCompany, setCashCompany] = useState<Company | null>(null);
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
+   const [form, setForm] = useState({ name: "", branchName: "Principal", planId: plans[0]?.id ?? "" });
+@@ -225,6 +227,9 @@ export function CompaniesTable({
+                         Cobro
+                       </Button>
+                     )}
++                    <Button variant="ghost" onClick={() => setCashCompany(c)}>
++                      Caja
++                    </Button>
+                     {c.status !== "CANCELLED" && (
+                       <Button variant="ghost" onClick={() => toggleStatus(c)}>
+                         {c.status === "ACTIVE" ? "Suspender" : "Activar"}
+@@ -304,6 +309,16 @@ export function CompaniesTable({
+           }
+         />
+       )}
++      {cashCompany && (
++        <CashSettingsModal
++          company={cashCompany}
++          onClose={() => setCashCompany(null)}
++          onChanged={(value) => {
++            setCompanies((prev) => prev.map((c) => (c.id === cashCompany.id ? { ...c, requireOpenCashDay: value } : c)));
++            setCashCompany(null);
++          }}
++        />
++      )}
+       {billingCompany && (
+         <BillingModal
+           company={billingCompany}
+@@ -338,6 +353,61 @@ export function CompaniesTable({
+   );
+ }
+ 
++function CashSettingsModal({
++  company,
++  onClose,
++  onChanged,
++}: {
++  company: Company;
++  onClose: () => void;
++  onChanged: (value: boolean) => void;
++}) {
++  const [value, setValue] = useState(company.requireOpenCashDay ?? false);
++  const [saving, setSaving] = useState(false);
++  const [error, setError] = useState("");
++
++  async function save() {
++    setSaving(true);
++    setError("");
++    const res = await fetch(`/api/companies/${company.id}/cash-settings`, {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ requireOpenCashDay: value }),
++    });
++    const data = await res.json();
++    setSaving(false);
++    if (!res.ok) {
++      setError(data.error ?? "No se pudo guardar");
++      return;
++    }
++    onChanged(data.company.requireOpenCashDay);
++  }
++
++  return (
++    <Modal open onClose={onClose} title={`Caja de ${company.name}`}>
++      <label className="flex items-start gap-3 mb-2 cursor-pointer">
++        <input type="checkbox" className="mt-1" checked={value} onChange={(e) => setValue(e.target.checked)} />
++        <span>
++          <span className="block text-sm font-medium">Obligar a abrir caja para vender</span>
++          <span className="block text-xs text-muted mt-0.5">
++            Activado: no se puede vender (ni abrir cuentas de mesa) hasta abrir el día de caja con su fondo inicial.
++            Desactivado: el día se abre solo con la primera venta, con fondo $0, y los cortes X y Z funcionan igual.
++          </span>
++        </span>
++      </label>
++      {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 my-3">{error}</p>}
++      <div className="flex justify-end gap-2 mt-4">
++        <Button type="button" variant="secondary" onClick={onClose}>
++          Cancelar
++        </Button>
++        <Button onClick={save} disabled={saving}>
++          {saving ? "Guardando..." : "Guardar"}
++        </Button>
++      </div>
++    </Modal>
++  );
++}
++
+ function ChangePlanModal({
+   company,
+   plans,
+diff --git a/src/components/cash/cut-report.tsx b/src/components/cash/cut-report.tsx
+new file mode 100644
+index 0000000..9d05be9
+--- /dev/null
++++ b/src/components/cash/cut-report.tsx
+@@ -0,0 +1,193 @@
++"use client";
++
++import type { ReactNode } from "react";
++import type { CutReport } from "@/modules/cash/report";
++
++// Sin el sufijo " MXN" de formatMxn: en un ticket angosto estorba.
++function money(n: number) {
++  return new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN" }).format(n);
++}
++
++function dateTime(iso: string) {
++  return new Date(iso).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" });
++}
++
++function Row({ label, value, bold, tone }: { label: ReactNode; value: ReactNode; bold?: boolean; tone?: "bad" | "ok" }) {
++  const color = tone === "bad" ? "text-ember-dark" : tone === "ok" ? "text-sage" : "";
++  return (
++    <div className={`flex justify-between gap-3 py-0.5 ${bold ? "font-semibold" : ""} ${color}`}>
++      <span>{label}</span>
++      <span className="font-mono text-right whitespace-nowrap">{value}</span>
++    </div>
++  );
++}
++
++function Section({ title, children }: { title: string; children: ReactNode }) {
++  return (
++    <div className="mt-4 pt-3 border-t border-dashed border-line">
++      <p className="text-[11px] font-semibold uppercase tracking-wide text-muted mb-1.5">{title}</p>
++      {children}
++    </div>
++  );
++}
++
++/** Botón de imprimir: usa el CSS de impresión de globals.css (solo sale #cut-report-print, a 80 mm). */
++export function PrintButton({ label = "Imprimir" }: { label?: string }) {
++  return (
++    <button
++      type="button"
++      onClick={() => window.print()}
++      className="no-print inline-flex items-center justify-center rounded-md border border-line px-4 py-2 text-sm font-medium hover:bg-ink-100"
++    >
++      {label}
++    </button>
++  );
++}
++
++/** Ticket del corte X o Z. Es el mismo componente para pantalla, historial e impresión. */
++export function CutReportView({ report }: { report: CutReport }) {
++  const isZ = report.kind === "Z";
++  const diff = report.cash.difference;
++  const exact = diff !== null && Math.abs(diff) < 0.01;
++
++  return (
++    <div id="cut-report-print" className="text-sm leading-snug">
++      <div className="text-center">
++        <p className="font-display text-lg font-semibold">{report.companyName}</p>
++        <p className="text-muted">{report.branchName}</p>
++        <p className="mt-2 font-semibold tracking-wide">
++          {isZ ? `CORTE Z — CIERRE DEL DÍA${report.folio ? ` · FOLIO ${report.folio}` : ""}` : "CORTE X — PARCIAL"}
++        </p>
++        {!isZ && <p className="text-xs text-muted">No cierra el día ni reinicia totales</p>}
++      </div>
++
++      <div className="mt-3 text-xs text-muted space-y-0.5">
++        <Row label="Apertura" value={dateTime(report.openedAt)} />
++        {report.openedBy && <Row label="Abrió" value={report.openedBy} />}
++        <Row label={isZ ? "Cierre" : "Corte a las"} value={dateTime(report.generatedAt)} />
++        {report.generatedBy && <Row label={isZ ? "Cerró" : "Sacó el corte"} value={report.generatedBy} />}
++      </div>
++
++      <Section title="Ventas">
++        <Row label="Tickets" value={report.sales.tickets} />
++        <Row label="Ticket promedio" value={money(report.sales.averageTicket)} />
++        <Row label="Subtotal" value={money(report.sales.subtotal)} />
++        <Row label="Descuentos" value={`-${money(report.sales.discounts)}`} />
++        <Row label="Total vendido" value={money(report.sales.total)} bold />
++      </Section>
++
++      <Section title="Por método de pago">
++        {report.byMethod.length === 0 ? (
++          <p className="text-muted">Sin ventas todavía.</p>
++        ) : (
++          report.byMethod.map((m) => (
++            <Row key={m.method} label={`${m.label} (${m.count})`} value={money(m.amount)} />
++          ))
++        )}
++      </Section>
++
++      {report.byOrderType.length > 0 && (
++        <Section title="Por tipo de pedido">
++          {report.byOrderType.map((t) => (
++            <Row key={t.type} label={`${t.label} (${t.count})`} value={money(t.amount)} />
++          ))}
++        </Section>
++      )}
++
++      {report.byCashier.length > 0 && (
++        <Section title="Por cajero">
++          {report.byCashier.map((c) => (
++            <Row key={c.name} label={`${c.name} (${c.tickets})`} value={money(c.amount)} />
++          ))}
++        </Section>
++      )}
++
++      {report.promotions.length > 0 && (
++        <Section title="Promociones aplicadas">
++          {report.promotions.map((p) => (
++            <Row key={p.name} label={`${p.name} (${p.count})`} value={`-${money(p.amount)}`} />
++          ))}
++        </Section>
++      )}
++
++      {(report.cancellations.sameDay.count > 0 || report.cancellations.previousDays.count > 0) && (
++        <Section title="Cancelaciones">
++          {report.cancellations.sameDay.count > 0 && (
++            <>
++              <Row
++                label={`Ventas de hoy canceladas (${report.cancellations.sameDay.count})`}
++                value={money(report.cancellations.sameDay.amount)}
++              />
++              <p className="text-xs text-muted">
++                Ya no están en las ventas de arriba. Tickets:{" "}
++                {report.cancellations.sameDay.items.map((i) => `#${i.orderNumber}`).join(", ")}
++              </p>
++            </>
++          )}
++          {report.cancellations.previousDays.count > 0 && (
++            <div className="mt-2">
++              <Row
++                label={`Ajuste: ventas de días anteriores (${report.cancellations.previousDays.count})`}
++                value={money(report.cancellations.previousDays.amount)}
++              />
++              <p className="text-xs text-muted">
++                Tickets: {report.cancellations.previousDays.items.map((i) => `#${i.orderNumber}`).join(", ")}. El corte
++                Z de esos días no cambia.
++                {report.cancellations.previousDays.cashAmount > 0 &&
++                  ` Si se devolvió efectivo (${money(report.cancellations.previousDays.cashAmount)}), regístralo como Devolución en Caja.`}
++              </p>
++            </div>
++          )}
++        </Section>
++      )}
++
++      <Section title="Efectivo en caja">
++        <Row label="Fondo inicial" value={money(report.cash.opening)} />
++        <Row label="Ventas en efectivo" value={money(report.cash.sales)} />
++        <Row label="Entradas" value={money(report.cash.cashIn)} />
++        <Row label="Retiros y devoluciones" value={`-${money(report.cash.cashOut)}`} />
++        <Row label="Efectivo esperado" value={money(report.cash.expected)} bold />
++        {report.cash.counted !== null && <Row label="Efectivo contado" value={money(report.cash.counted)} bold />}
++        {diff !== null && (
++          <Row
++            label={exact ? "Cuadró exacto" : diff > 0 ? "Sobrante" : "Faltante"}
++            value={exact ? money(0) : money(Math.abs(diff))}
++            bold
++            tone={exact ? "ok" : "bad"}
++          />
++        )}
++      </Section>
++
++      {report.movements.length > 0 && (
++        <Section title="Movimientos de caja">
++          {report.movements.map((m, i) => (
++            <Row
++              key={i}
++              label={`${m.label}${m.reason ? ` · ${m.reason}` : ""}`}
++              value={`${m.type === "CASH_IN" ? "+" : "-"}${money(m.amount)}`}
++            />
++          ))}
++        </Section>
++      )}
++
++      {(report.pending.openTabs > 0 || report.pending.pendingPayments > 0 || report.pending.whatsappUnpaid > 0) && (
++        <Section title="Pendientes">
++          {report.pending.openTabs > 0 && <Row label="Cuentas de mesa abiertas" value={report.pending.openTabs} />}
++          {report.pending.pendingPayments > 0 && (
++            <Row label="Pagos de Mercado Pago sin confirmar" value={report.pending.pendingPayments} />
++          )}
++          {report.pending.whatsappUnpaid > 0 && (
++            <Row label="Pedidos de WhatsApp sin cobrar" value={report.pending.whatsappUnpaid} />
++          )}
++          {isZ ? null : (
++            <p className="text-xs text-muted mt-1">Las cuentas de mesa y los pagos sin confirmar impiden hacer el corte Z.</p>
++          )}
++        </Section>
++      )}
++
++      <p className="mt-4 pt-3 border-t border-dashed border-line text-center text-xs text-muted">
++        {isZ ? "Documento de cierre — no se puede modificar" : "Corte parcial — informativo"}
++      </p>
++    </div>
++  );
++}
+diff --git a/src/lib/permissions.ts b/src/lib/permissions.ts
+index d7eec10..4ab1cea 100644
+--- a/src/lib/permissions.ts
++++ b/src/lib/permissions.ts
+@@ -16,6 +16,8 @@ export const PERMISSIONS = {
+   CASH_OPEN: "cash.open",
+   CASH_CLOSE: "cash.close",
+   CASH_MOVEMENT: "cash.movement",
++  CASH_REPORT_X: "cash.report_x", // sacar el corte X (lectura parcial del día, no cierra nada)
++  CASH_REPORT_Z: "cash.report_z", // hacer el corte Z (cierra el día de la sucursal) y consultar los Z anteriores
+   INVENTORY_MANAGE: "inventory.manage",
+   REPORTS_VIEW: "reports.view",
+   SETTINGS_MANAGE: "settings.manage",
+@@ -50,6 +52,8 @@ const ADMIN_PERMISSIONS: PermissionKey[] = [
+   PERMISSIONS.CASH_OPEN,
+   PERMISSIONS.CASH_CLOSE,
+   PERMISSIONS.CASH_MOVEMENT,
++  PERMISSIONS.CASH_REPORT_X,
++  PERMISSIONS.CASH_REPORT_Z,
+   PERMISSIONS.INVENTORY_MANAGE,
+   PERMISSIONS.REPORTS_VIEW,
+   PERMISSIONS.SETTINGS_MANAGE,
+@@ -65,6 +69,7 @@ const VENTAS_PERMISSIONS: PermissionKey[] = [
+   PERMISSIONS.CASH_OPEN,
+   PERMISSIONS.CASH_CLOSE,
+   PERMISSIONS.CASH_MOVEMENT,
++  PERMISSIONS.CASH_REPORT_X,
+   PERMISSIONS.TABLES_MANAGE,
+   PERMISSIONS.LOYALTY_SCAN,
+ ];
+diff --git a/src/modules/cash/report.ts b/src/modules/cash/report.ts
+new file mode 100644
+index 0000000..29839f2
+--- /dev/null
++++ b/src/modules/cash/report.ts
+@@ -0,0 +1,333 @@
++import { prisma } from "@/lib/prisma";
++
++/**
++ * Cortes X y Z de caja (día por sucursal).
++ *
++ * "Día" = un CashRegister: desde que se abre (con su fondo) hasta el corte Z. Así la
++ * fecha operativa no depende de la medianoche: un restaurante que cierra de madrugada
++ * sigue en el mismo día hasta que alguien hace el Z.
++ *
++ * Las ventas del día son los PAGOS APROBADOS cuyo createdAt cae dentro de la ventana
++ * [openedAt, ahora/cierre] de ventas no canceladas de esa sucursal. Se cuenta por el
++ * momento del cobro (no de la creación del pedido) para que una cuenta de mesa o un
++ * pedido de WhatsApp cobrados hoy cuenten hoy, aunque hayan nacido antes.
++ */
++
++export const METHOD_LABELS: Record<string, string> = {
++  CASH: "Efectivo",
++  CARD: "Tarjeta",
++  TRANSFER: "Transferencia",
++  MERCADOPAGO: "Mercado Pago",
++  MERCADOPAGO_TERMINAL: "Terminal Mercado Pago",
++  OTHER: "Otro",
++};
++
++const ORDER_TYPE_LABELS: Record<string, string> = {
++  COMER_AQUI: "Comer aquí",
++  PARA_LLEVAR: "Para llevar",
++  DOMICILIO: "Domicilio",
++};
++
++const MOVEMENT_LABELS: Record<string, string> = {
++  CASH_IN: "Entrada",
++  CASH_OUT: "Retiro",
++  REFUND: "Devolución",
++  SALE: "Venta",
++};
++
++export type CancelledSale = { orderNumber: number; amount: number; cashAmount: number; cancelledAt: string };
++
++export type CutReport = {
++  kind: "X" | "Z";
++  companyName: string;
++  branchName: string;
++  registerId: string;
++  folio: number | null;
++  openedAt: string;
++  generatedAt: string;
++  openedBy: string | null;
++  generatedBy: string | null;
++  autoOpened: boolean;
++  sales: { tickets: number; subtotal: number; discounts: number; total: number; averageTicket: number };
++  byMethod: { method: string; label: string; count: number; amount: number }[];
++  byOrderType: { type: string; label: string; count: number; amount: number }[];
++  byCashier: { name: string; tickets: number; amount: number }[];
++  promotions: { name: string; count: number; amount: number }[];
++  // Cancelaciones registradas durante este día. "sameDay" = la venta también se cobró hoy
++  // (ya no está en las ventas de arriba). "previousDays" = ajuste: la venta pertenece a un día
++  // ya cerrado con Z (ese Z no se modifica); si se devolvió efectivo, registrar una Devolución.
++  cancellations: {
++    sameDay: { count: number; amount: number; items: CancelledSale[] };
++    previousDays: { count: number; amount: number; cashAmount: number; items: CancelledSale[] };
++  };
++  cash: {
++    opening: number;
++    sales: number;
++    cashIn: number;
++    cashOut: number;
++    expected: number;
++    counted: number | null;
++    difference: number | null;
++  };
++  movements: { type: string; label: string; amount: number; reason: string | null; user: string; createdAt: string }[];
++  // Lo que impide hacer el Z (openTabs, pendingPayments) o solo se informa (whatsappUnpaid).
++  pending: { openTabs: number; pendingPayments: number; whatsappUnpaid: number };
++};
++
++type BuildOptions = {
++  kind: "X" | "Z";
++  upTo: Date;
++  generatedBy?: string | null;
++  counted?: number | null;
++  folio?: number | null;
++};
++
++const round2 = (n: number) => Math.round(n * 100) / 100;
++
++type PaymentRow = {
++  method: string;
++  amount: unknown;
++  orderId: string;
++  order: {
++    subtotal: unknown;
++    discount: unknown;
++    orderType: string;
++    user: { name: string } | null;
++    promotions: { name: string; amount: unknown }[];
++  };
++};
++
++type MovementRow = {
++  type: string;
++  amount: unknown;
++  reason: string | null;
++  createdAt: Date;
++  user: { name: string };
++};
++
++type CancelledOrderRow = {
++  id: string;
++  orderNumber: number;
++  payments: { method: string; status: string; amount: unknown; createdAt: Date }[];
++};
++
++export const cashReportService = {
++  async build(registerId: string, opts: BuildOptions): Promise<CutReport> {
++    const register = await prisma.cashRegister.findUnique({
++      where: { id: registerId },
++      include: {
++        branch: { select: { id: true, name: true, companyId: true, company: { select: { name: true } } } },
++        movements: { include: { user: { select: { name: true } } }, orderBy: { createdAt: "asc" } },
++      },
++    });
++    if (!register) throw new Error("No se encontró el día de caja");
++
++    const branchId = register.branchId;
++    const companyId = register.branch.companyId;
++    const window = { gte: register.openedAt, lte: opts.upTo };
++
++    // ---- Ventas: pagos aprobados dentro de la ventana, de ventas no canceladas ----
++    const payments = (await prisma.payment.findMany({
++      where: {
++        status: "APPROVED",
++        createdAt: window,
++        order: { branchId, status: { not: "CANCELED" } },
++      },
++      include: {
++        order: {
++          select: {
++            subtotal: true,
++            discount: true,
++            orderType: true,
++            user: { select: { name: true } },
++            promotions: { select: { name: true, amount: true } },
++          },
++        },
++      },
++    })) as unknown as PaymentRow[];
++
++    const methodMap = new Map<string, { count: number; amount: number }>();
++    const typeMap = new Map<string, { count: number; amount: number }>();
++    const cashierMap = new Map<string, { tickets: Set<string>; amount: number }>();
++    const promoMap = new Map<string, { count: number; amount: number }>();
++    const seenOrders = new Set<string>();
++    let subtotal = 0;
++    let discounts = 0;
++    let total = 0;
++
++    for (const p of payments) {
++      const amount = Number(p.amount);
++      total += amount;
++
++      const m = methodMap.get(p.method) ?? { count: 0, amount: 0 };
++      m.count += 1;
++      m.amount += amount;
++      methodMap.set(p.method, m);
++
++      const t = typeMap.get(p.order.orderType) ?? { count: 0, amount: 0 };
++      t.amount += amount;
++      typeMap.set(p.order.orderType, t);
++
++      const cashierName = p.order.user?.name ?? "Sin dato";
++      const c = cashierMap.get(cashierName) ?? { tickets: new Set<string>(), amount: 0 };
++      c.tickets.add(p.orderId);
++      c.amount += amount;
++      cashierMap.set(cashierName, c);
++
++      // Datos por pedido (una sola vez aunque tuviera más de un pago).
++      if (!seenOrders.has(p.orderId)) {
++        seenOrders.add(p.orderId);
++        subtotal += Number(p.order.subtotal);
++        discounts += Number(p.order.discount);
++        t.count += 1;
++        for (const promo of p.order.promotions) {
++          const pr = promoMap.get(promo.name) ?? { count: 0, amount: 0 };
++          pr.count += 1;
++          pr.amount += Number(promo.amount);
++          promoMap.set(promo.name, pr);
++        }
++      }
++    }
++
++    const tickets = seenOrders.size;
++
++    // ---- Cancelaciones registradas durante este día ----
++    const cancelLogs = (await prisma.auditLog.findMany({
++      where: { companyId, action: "SALE_CANCEL", entity: "Order", createdAt: window },
++      select: { entityId: true, createdAt: true },
++    })) as unknown as { entityId: string | null; createdAt: Date }[];
++
++    const cancelIds = cancelLogs.map((l) => l.entityId).filter((id): id is string => !!id);
++    const cancelledOrders = (cancelIds.length
++      ? await prisma.order.findMany({
++          where: { id: { in: cancelIds }, branchId },
++          select: {
++            id: true,
++            orderNumber: true,
++            payments: { select: { method: true, status: true, amount: true, createdAt: true } },
++          },
++        })
++      : []) as unknown as CancelledOrderRow[];
++    const cancelledAt = new Map(cancelLogs.map((l) => [l.entityId, l.createdAt]));
++
++    const sameDay: CancelledSale[] = [];
++    const previousDays: CancelledSale[] = [];
++    for (const o of cancelledOrders) {
++      const approved = o.payments.filter((p) => p.status === "APPROVED");
++      if (approved.length === 0) continue; // cancelar algo que nunca se cobró no mueve dinero
++      const amount = approved.reduce((s, p) => s + Number(p.amount), 0);
++      const cashAmount = approved.filter((p) => p.method === "CASH").reduce((s, p) => s + Number(p.amount), 0);
++      const paidAt = Math.min(...approved.map((p) => p.createdAt.getTime()));
++      const row: CancelledSale = {
++        orderNumber: o.orderNumber,
++        amount: round2(amount),
++        cashAmount: round2(cashAmount),
++        cancelledAt: (cancelledAt.get(o.id) ?? opts.upTo).toISOString(),
++      };
++      if (paidAt >= register.openedAt.getTime()) sameDay.push(row);
++      else previousDays.push(row);
++    }
++
++    // ---- Efectivo ----
++    const movements = register.movements as unknown as MovementRow[];
++    const cashIn = movements.filter((m) => m.type === "CASH_IN").reduce((s, m) => s + Number(m.amount), 0);
++    const cashOut = movements
++      .filter((m) => m.type === "CASH_OUT" || m.type === "REFUND")
++      .reduce((s, m) => s + Number(m.amount), 0);
++    const cashSales = methodMap.get("CASH")?.amount ?? 0;
++    const opening = Number(register.openingCash);
++    const expected = opening + cashSales + cashIn - cashOut;
++    const counted = opts.counted ?? null;
++
++    // ---- Pendientes ----
++    const [openTabs, pendingPayments, whatsappUnpaid] = await Promise.all([
++      prisma.order.count({ where: { branchId, isOpenTab: true, status: { not: "CANCELED" } } }),
++      prisma.payment.count({
++        where: { status: "PENDING", createdAt: window, order: { branchId, status: { not: "CANCELED" } } },
++      }),
++      prisma.order.count({
++        where: {
++          branchId,
++          status: { not: "CANCELED" },
++          whatsAppCart: { isNot: null },
++          payments: { none: { status: "APPROVED" } },
++        },
++      }),
++    ]);
++
++    // ---- Quién abrió ----
++    const openLog = (await prisma.auditLog.findFirst({
++      where: { companyId, entity: "CashRegister", entityId: register.id, action: "CASH_OPEN" },
++      select: { userId: true },
++    })) as unknown as { userId: string | null } | null;
++    const opener =
++      openLog?.userId
++        ? ((await prisma.user.findUnique({ where: { id: openLog.userId }, select: { name: true } })) as unknown as {
++            name: string;
++          } | null)
++        : null;
++
++    return {
++      kind: opts.kind,
++      companyName: register.branch.company.name,
++      branchName: register.branch.name,
++      registerId: register.id,
++      folio: opts.folio ?? register.folio ?? null,
++      openedAt: register.openedAt.toISOString(),
++      generatedAt: opts.upTo.toISOString(),
++      openedBy: opener?.name ?? null,
++      generatedBy: opts.generatedBy ?? null,
++      autoOpened: register.autoOpened,
++      sales: {
++        tickets,
++        subtotal: round2(subtotal),
++        discounts: round2(discounts),
++        total: round2(total),
++        averageTicket: tickets > 0 ? round2(total / tickets) : 0,
++      },
++      byMethod: [...methodMap.entries()]
++        .map(([method, v]) => ({ method, label: METHOD_LABELS[method] ?? method, count: v.count, amount: round2(v.amount) }))
++        .sort((a, b) => b.amount - a.amount),
++      byOrderType: [...typeMap.entries()]
++        .map(([type, v]) => ({ type, label: ORDER_TYPE_LABELS[type] ?? type, count: v.count, amount: round2(v.amount) }))
++        .sort((a, b) => b.amount - a.amount),
++      byCashier: [...cashierMap.entries()]
++        .map(([name, v]) => ({ name, tickets: v.tickets.size, amount: round2(v.amount) }))
++        .sort((a, b) => b.amount - a.amount),
++      promotions: [...promoMap.entries()]
++        .map(([name, v]) => ({ name, count: v.count, amount: round2(v.amount) }))
++        .sort((a, b) => b.amount - a.amount),
++      cancellations: {
++        sameDay: {
++          count: sameDay.length,
++          amount: round2(sameDay.reduce((s, r) => s + r.amount, 0)),
++          items: sameDay,
++        },
++        previousDays: {
++          count: previousDays.length,
++          amount: round2(previousDays.reduce((s, r) => s + r.amount, 0)),
++          cashAmount: round2(previousDays.reduce((s, r) => s + r.cashAmount, 0)),
++          items: previousDays,
++        },
++      },
++      cash: {
++        opening: round2(opening),
++        sales: round2(cashSales),
++        cashIn: round2(cashIn),
++        cashOut: round2(cashOut),
++        expected: round2(expected),
++        counted: counted === null ? null : round2(counted),
++        difference: counted === null ? null : round2(counted - expected),
++      },
++      movements: movements.map((m) => ({
++        type: m.type,
++        label: MOVEMENT_LABELS[m.type] ?? m.type,
++        amount: round2(Number(m.amount)),
++        reason: m.reason,
++        user: m.user.name,
++        createdAt: m.createdAt.toISOString(),
++      })),
++      pending: { openTabs, pendingPayments, whatsappUnpaid },
++    };
++  },
++};
+diff --git a/src/modules/cash/service.ts b/src/modules/cash/service.ts
+index 0266c45..c78d667 100644
+--- a/src/modules/cash/service.ts
++++ b/src/modules/cash/service.ts
+@@ -1,5 +1,7 @@
+ import { prisma } from "@/lib/prisma";
++import { Prisma } from "@prisma/client";
+ import { z } from "zod";
++import { cashReportService } from "@/modules/cash/report";
+ 
+ export const openRegisterSchema = z.object({
+   openingCash: z.coerce.number().min(0),
+@@ -27,11 +29,57 @@ export const cashService = {
+ 
+   async open(branchId: string, openingCash: number) {
+     const existing = await prisma.cashRegister.findFirst({ where: { branchId, status: "OPEN" } });
+-    if (existing) throw new Error("Ya hay una caja abierta en esta sucursal");
++    if (existing) {
++      // Si el día se abrió solo con la primera venta (fondo $0), el cajero todavía puede
++      // registrar el fondo real; cualquier otro día abierto sigue siendo un error.
++      if (existing.autoOpened) {
++        return prisma.cashRegister.update({ where: { id: existing.id }, data: { openingCash, autoOpened: false } });
++      }
++      throw new Error("Ya hay una caja abierta en esta sucursal");
++    }
+ 
+     return prisma.cashRegister.create({ data: { branchId, openingCash, status: "OPEN" } });
+   },
+ 
++  /**
++   * Garantiza que la sucursal tenga un día de caja abierto antes de vender/cobrar.
++   * - Empresa con requireOpenCashDay: si no hay día abierto, NO deja vender (hay que abrir caja).
++   * - Empresa sin esa opción (default): abre el día solo, con fondo $0, para que los cortes X/Z
++   *   funcionen sin cambiar la forma de trabajar.
++   */
++  async ensureOpenDay(companyId: string, branchId: string, userId?: string) {
++    const open = await prisma.cashRegister.findFirst({ where: { branchId, status: "OPEN" }, select: { id: true } });
++    if (open) return open;
++
++    const company = await prisma.company.findUnique({ where: { id: companyId }, select: { requireOpenCashDay: true } });
++    if (company?.requireOpenCashDay) {
++      throw new Error("Primero abre la caja del día: ve a Caja y registra el fondo inicial.");
++    }
++
++    let createdNow = false;
++    const register = await prisma.$transaction(async (tx) => {
++      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${"cash-open:" + branchId}))`;
++      const again = await tx.cashRegister.findFirst({ where: { branchId, status: "OPEN" } });
++      if (again) return again;
++      createdNow = true;
++      return tx.cashRegister.create({ data: { branchId, openingCash: 0, status: "OPEN", autoOpened: true } });
++    });
++
++    if (createdNow) {
++      await prisma.auditLog.create({
++        data: {
++          companyId,
++          userId: userId ?? null,
++          action: "CASH_OPEN",
++          entity: "CashRegister",
++          entityId: register.id,
++          newData: { auto: true },
++        },
++      });
++    }
++    return { id: register.id };
++  },
++
+   async addMovement(registerId: string, userId: string, input: z.infer<typeof movementSchema>) {
+     const register = await prisma.cashRegister.findUnique({ where: { id: registerId } });
+     if (!register || register.status !== "OPEN") throw new Error("La caja no está abierta");
+@@ -41,23 +89,26 @@ export const cashService = {
+     });
+   },
+ 
+-  // Calcula lo vendido por método de pago desde que se abrió la caja,
+-  // usando las órdenes reales de la sucursal (nunca un número inventado).
++  // Calcula lo vendido por método de pago desde que se abrió la caja, con los PAGOS
++  // APROBADOS de ventas no canceladas de la sucursal (mismo criterio que los cortes X/Z,
++  // para que el efectivo esperado de "Caja" y el de los reportes siempre coincidan).
+   async computeSalesTotals(branchId: string, since: Date): Promise<PaymentTotals> {
+-    const orders = await prisma.order.findMany({
+-      where: { branchId, createdAt: { gte: since }, status: { not: "CANCELED" } },
+-      include: { payments: true },
++    const payments = await prisma.payment.findMany({
++      where: {
++        status: "APPROVED",
++        createdAt: { gte: since },
++        order: { branchId, status: { not: "CANCELED" } },
++      },
++      select: { method: true, amount: true },
+     });
+ 
+     const totals: PaymentTotals = { cash: 0, card: 0, transfer: 0, other: 0 };
+-    for (const order of orders) {
+-      for (const payment of order.payments) {
+-        const amount = Number(payment.amount);
+-        if (payment.method === "CASH") totals.cash += amount;
+-        else if (payment.method === "CARD") totals.card += amount;
+-        else if (payment.method === "TRANSFER") totals.transfer += amount;
+-        else totals.other += amount;
+-      }
++    for (const payment of payments) {
++      const amount = Number(payment.amount);
++      if (payment.method === "CASH") totals.cash += amount;
++      else if (payment.method === "CARD") totals.card += amount;
++      else if (payment.method === "TRANSFER") totals.transfer += amount;
++      else totals.other += amount;
+     }
+     return totals;
+   },
+@@ -79,21 +130,65 @@ export const cashService = {
+     return { open: true as const, register, salesTotals, expectedCash };
+   },
+ 
+-  async close(registerId: string, branchId: string, countedCash: number) {
+-    const status = await this.getStatus(branchId);
+-    if (!status.open) throw new Error("La caja no está abierta");
++  /**
++   * Corte Z: cierra el día de la sucursal. Calcula el reporte, bloquea si hay cuentas de mesa
++   * abiertas o pagos de Mercado Pago sin confirmar, asigna un folio consecutivo por sucursal y
++   * guarda el resumen congelado (zReport). Un Z ya hecho no se recalcula ni se edita.
++   */
++  async closeDay(input: { companyId: string; branchId: string; userId: string; userName: string; countedCash: number }) {
++    const register = await this.getOpenRegister(input.branchId);
++    if (!register) throw new Error("La caja no está abierta");
++
++    const now = new Date();
++    const preview = await cashReportService.build(register.id, {
++      kind: "Z",
++      upTo: now,
++      counted: input.countedCash,
++      generatedBy: input.userName,
++    });
+ 
+-    const difference = countedCash - status.expectedCash;
++    if (preview.pending.openTabs > 0) {
++      const n = preview.pending.openTabs;
++      throw new Error(
++        `No se puede hacer el corte: hay ${n} cuenta${n === 1 ? "" : "s"} de mesa abierta${n === 1 ? "" : "s"}. Cóbrala${n === 1 ? "" : "s"} o cancélala${n === 1 ? "" : "s"} primero.`
++      );
++    }
++    if (preview.pending.pendingPayments > 0) {
++      const n = preview.pending.pendingPayments;
++      throw new Error(
++        `No se puede hacer el corte: hay ${n} pago${n === 1 ? "" : "s"} de Mercado Pago sin confirmar. Verifícalo${n === 1 ? "" : "s"} o cancélalo${n === 1 ? "" : "s"} primero.`
++      );
++    }
+ 
+-    return prisma.cashRegister.update({
+-      where: { id: registerId },
+-      data: {
+-        status: "CLOSED",
+-        closedAt: new Date(),
+-        countedCash,
+-        expectedCash: status.expectedCash,
+-        difference,
++    const closed = await prisma.$transaction(
++      async (tx) => {
++        // Un solo Z a la vez por sucursal: así el folio consecutivo nunca se repite.
++        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${"cash-z:" + input.branchId}))`;
++
++        const fresh = await tx.cashRegister.findUnique({ where: { id: register.id }, select: { status: true } });
++        if (!fresh || fresh.status !== "OPEN") throw new Error("Este día ya fue cerrado");
++
++        const last = await tx.cashRegister.aggregate({ where: { branchId: input.branchId }, _max: { folio: true } });
++        const folio = (last._max.folio ?? 0) + 1;
++        const report = { ...preview, folio };
++
++        const updated = await tx.cashRegister.update({
++          where: { id: register.id },
++          data: {
++            status: "CLOSED",
++            closedAt: now,
++            countedCash: input.countedCash,
++            expectedCash: preview.cash.expected,
++            difference: preview.cash.difference,
++            folio,
++            zReport: report as unknown as Prisma.InputJsonValue,
++          },
++        });
++        return { updated, report };
+       },
+-    });
++      { timeout: 15000 }
++    );
++
++    return closed;
+   },
+-};
+\ No newline at end of file
++};
+diff --git a/src/modules/sales/service.ts b/src/modules/sales/service.ts
+index 5bc6b90..ce1c681 100644
+--- a/src/modules/sales/service.ts
++++ b/src/modules/sales/service.ts
+@@ -4,6 +4,7 @@ import { hasFeature } from "@/lib/feature-gating";
+ import { FEATURE_KEYS } from "@/lib/plan-features";
+ import { loyaltyService } from "@/modules/loyalty/service";
+ import { promotionsService } from "@/modules/promotions/service";
++import { cashService } from "@/modules/cash/service";
+ 
+ export const saleSchema = z
+   .object({
+@@ -53,6 +54,10 @@ export type PayExistingOrderInput = z.infer<typeof payExistingOrderSchema>;
+ 
+ export const salesService = {
+   async create(companyId: string, branchId: string, userId: string, input: SaleInput) {
++    // Corte X/Z: toda venta pertenece a un día de caja de la sucursal (se abre solo si la
++    // empresa no exige abrirlo a mano — ver Company.requireOpenCashDay).
++    await cashService.ensureOpenDay(companyId, branchId, userId);
++
+     // 1. Trae los productos reales de la base de datos — el precio y nombre
+     //    NUNCA se toman de lo que mandó el navegador, para evitar que alguien
+     //    manipule el total de una venta desde las herramientas del navegador.
+@@ -263,6 +268,8 @@ export const salesService = {
+     orderId: string,
+     input: PayExistingOrderInput
+   ) {
++    await cashService.ensureOpenDay(companyId, branchId, userId);
++
+     const order = await prisma.order.findFirst({
+       where: { id: orderId, companyId, branchId },
+       include: { items: true, payments: true },
+diff --git a/src/modules/tableTabs/service.ts b/src/modules/tableTabs/service.ts
+index 71a7b9f..80a9538 100644
+--- a/src/modules/tableTabs/service.ts
++++ b/src/modules/tableTabs/service.ts
+@@ -4,6 +4,7 @@ import { hasFeature } from "@/lib/feature-gating";
+ import { FEATURE_KEYS } from "@/lib/plan-features";
+ import { loyaltyService } from "@/modules/loyalty/service";
+ import { promotionsService } from "@/modules/promotions/service";
++import { cashService } from "@/modules/cash/service";
+ 
+ export const addRoundSchema = z.object({
+   items: z
+@@ -38,6 +39,8 @@ export const closeTabSchema = z.object({
+ export const tableTabsService = {
+   /** Abre la cuenta de una mesa, o regresa la que ya estaba abierta (idempotente — evita dos tabs abiertos a la vez en la misma mesa). */
+   async open(companyId: string, branchId: string, userId: string, tableId: string) {
++    await cashService.ensureOpenDay(companyId, branchId, userId);
++
+     const table = await prisma.table.findFirst({ where: { id: tableId, companyId, branchId } });
+     if (!table) throw new Error("Mesa no encontrada");
+ 
+@@ -190,6 +193,9 @@ export const tableTabsService = {
+   },
+ 
+   async close(companyId: string, orderId: string, userId: string, input: z.infer<typeof closeTabSchema>) {
++    const tabForDay = await prisma.order.findFirst({ where: { id: orderId, companyId }, select: { branchId: true } });
++    if (tabForDay) await cashService.ensureOpenDay(companyId, tabForDay.branchId, userId);
++
+     const order = await prisma.order.findFirst({
+       where: { id: orderId, companyId, isOpenTab: true },
+       include: { items: true },
+-- 
+2.43.0
+
