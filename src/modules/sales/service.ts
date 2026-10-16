@@ -4,6 +4,7 @@ import { hasFeature } from "@/lib/feature-gating";
 import { FEATURE_KEYS } from "@/lib/plan-features";
 import { loyaltyService } from "@/modules/loyalty/service";
 import { promotionsService } from "@/modules/promotions/service";
+import { cashService } from "@/modules/cash/service";
 
 export const saleSchema = z
   .object({
@@ -53,6 +54,10 @@ export type PayExistingOrderInput = z.infer<typeof payExistingOrderSchema>;
 
 export const salesService = {
   async create(companyId: string, branchId: string, userId: string, input: SaleInput) {
+    // Corte X/Z: toda venta pertenece a un día de caja de la sucursal (se abre solo si la
+    // empresa no exige abrirlo a mano — ver Company.requireOpenCashDay).
+    await cashService.ensureOpenDay(companyId, branchId, userId);
+
     // 1. Trae los productos reales de la base de datos — el precio y nombre
     //    NUNCA se toman de lo que mandó el navegador, para evitar que alguien
     //    manipule el total de una venta desde las herramientas del navegador.
@@ -263,6 +268,8 @@ export const salesService = {
     orderId: string,
     input: PayExistingOrderInput
   ) {
+    await cashService.ensureOpenDay(companyId, branchId, userId);
+
     const order = await prisma.order.findFirst({
       where: { id: orderId, companyId, branchId },
       include: { items: true, payments: true },

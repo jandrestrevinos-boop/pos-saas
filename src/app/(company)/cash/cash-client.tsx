@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import { Button, Card } from "@/components/ui";
 import { Modal, Field, inputClass } from "@/components/ui/modal";
 import { formatMxn } from "@/lib/format";
+import { CutReportView, PrintButton } from "@/components/cash/cut-report";
+import type { CutReport } from "@/modules/cash/report";
 
 type Movement = { id: string; type: string; amount: string; reason: string | null; createdAt: string; user: { name: string } };
 type OpenStatus = {
@@ -12,12 +14,12 @@ type OpenStatus = {
   salesTotals: { cash: number; card: number; transfer: number; other: number };
   expectedCash: number;
 };
-type ClosedStatus = { open: false };
+type ClosedStatus = { open: false; requireOpenCashDay?: boolean };
 type Status = OpenStatus | ClosedStatus | null;
 
 const MOVEMENT_LABELS: Record<string, string> = { CASH_IN: "Entrada", CASH_OUT: "Retiro", REFUND: "Devolución" };
 
-export function CashClient({ userName }: { userName: string }) {
+export function CashClient({ userName, canReportX, canReportZ }: { userName: string; canReportX: boolean; canReportZ: boolean }) {
   const [status, setStatus] = useState<Status>(null);
   const [loading, setLoading] = useState(true);
 
@@ -37,7 +39,17 @@ export function CashClient({ userName }: { userName: string }) {
     <div>
       <WhatsAppPendingOrders />
 
-      {!status?.open ? <OpenRegisterForm onOpened={refresh} /> : <OpenRegisterView status={status} userName={userName} onChange={refresh} />}
+      {!status?.open ? (
+        <OpenRegisterForm onOpened={refresh} requireOpenCashDay={status?.requireOpenCashDay ?? false} />
+      ) : (
+        <OpenRegisterView
+          status={status}
+          userName={userName}
+          canReportX={canReportX}
+          canReportZ={canReportZ}
+          onChange={refresh}
+        />
+      )}
     </div>
   );
 }
@@ -230,7 +242,7 @@ function PayOrderModal({ order, onClose, onPaid }: { order: PendingOrder; onClos
 
 // ---------- Apertura / turno de caja (sin cambios de lógica) ----------
 
-function OpenRegisterForm({ onOpened }: { onOpened: () => void }) {
+function OpenRegisterForm({ onOpened, requireOpenCashDay }: { onOpened: () => void; requireOpenCashDay: boolean }) {
   const [openingCash, setOpeningCash] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -256,7 +268,11 @@ function OpenRegisterForm({ onOpened }: { onOpened: () => void }) {
   return (
     <Card className="max-w-sm p-6">
       <p className="font-display text-xl font-semibold mb-1">La caja está cerrada</p>
-      <p className="text-sm text-muted mb-5">Registra el monto inicial en efectivo para abrir el turno.</p>
+      <p className="text-sm text-muted mb-5">
+        {requireOpenCashDay
+          ? "Registra el fondo inicial en efectivo para abrir el día. No se puede vender hasta que la caja esté abierta."
+          : "Registra el fondo inicial en efectivo para abrir el día. Si vendes sin abrirla, el día se abre solo con la primera venta (fondo $0)."}
+      </p>
       <form onSubmit={handleOpen}>
         <Field label="Monto inicial (MXN)">
           <input
@@ -280,9 +296,22 @@ function OpenRegisterForm({ onOpened }: { onOpened: () => void }) {
   );
 }
 
-function OpenRegisterView({ status, userName, onChange }: { status: OpenStatus; userName: string; onChange: () => void }) {
+function OpenRegisterView({
+  status,
+  userName,
+  canReportX,
+  canReportZ,
+  onChange,
+}: {
+  status: OpenStatus;
+  userName: string;
+  canReportX: boolean;
+  canReportZ: boolean;
+  onChange: () => void;
+}) {
   const [movementOpen, setMovementOpen] = useState(false);
   const [closeOpen, setCloseOpen] = useState(false);
+  const [xOpen, setXOpen] = useState(false);
 
   const totalSales = status.salesTotals.cash + status.salesTotals.card + status.salesTotals.transfer + status.salesTotals.other;
 
@@ -290,7 +319,7 @@ function OpenRegisterView({ status, userName, onChange }: { status: OpenStatus; 
     <div>
       <div className="flex items-center justify-between mb-6">
         <p className="text-sm text-muted">
-          Turno abierto desde{" "}
+          Día abierto desde{" "}
           <span className="font-medium text-ink">
             {new Date(status.register.openedAt).toLocaleString("es-MX", { dateStyle: "short", timeStyle: "short" })}
           </span>{" "}
@@ -300,7 +329,12 @@ function OpenRegisterView({ status, userName, onChange }: { status: OpenStatus; 
           <Button variant="secondary" onClick={() => setMovementOpen(true)}>
             + Entrada / Retiro
           </Button>
-          <Button onClick={() => setCloseOpen(true)}>Cerrar caja</Button>
+          {(canReportX || canReportZ) && (
+            <Button variant="secondary" onClick={() => setXOpen(true)}>
+              Corte X
+            </Button>
+          )}
+          {canReportZ && <Button onClick={() => setCloseOpen(true)}>Corte Z · Cerrar día</Button>}
         </div>
       </div>
 
@@ -369,6 +403,7 @@ function OpenRegisterView({ status, userName, onChange }: { status: OpenStatus; 
       </Card>
 
       {movementOpen && <MovementModal onClose={() => setMovementOpen(false)} onDone={() => { setMovementOpen(false); onChange(); }} />}
+      {xOpen && <XReportModal onClose={() => setXOpen(false)} />}
       {closeOpen && (
         <CloseModal expectedCash={status.expectedCash} onClose={() => setCloseOpen(false)} onDone={() => { setCloseOpen(false); onChange(); }} />
       )}
@@ -440,11 +475,55 @@ function MovementModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
   );
 }
 
+// ---------- Corte X (parcial, no cierra nada) ----------
+
+function XReportModal({ onClose }: { onClose: () => void }) {
+  const [report, setReport] = useState<CutReport | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    const res = await fetch("/api/cash/report-x");
+    const data = await res.json();
+    setLoading(false);
+    if (!res.ok) {
+      setError(data.error ?? "No se pudo generar el corte X");
+      return;
+    }
+    setReport(data.report);
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  return (
+    <Modal open onClose={onClose} title="Corte X">
+      {loading && <p className="text-sm text-muted">Generando corte...</p>}
+      {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 mb-4">{error}</p>}
+      {report && <CutReportView report={report} />}
+      <div className="no-print flex justify-end gap-2 mt-5">
+        <Button type="button" variant="secondary" onClick={load} disabled={loading}>
+          Actualizar
+        </Button>
+        {report && <PrintButton />}
+        <Button type="button" onClick={onClose}>
+          Cerrar
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+// ---------- Corte Z (cierra el día de la sucursal) ----------
+
 function CloseModal({ expectedCash, onClose, onDone }: { expectedCash: number; onClose: () => void; onDone: () => void }) {
   const [countedCash, setCountedCash] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const [result, setResult] = useState<{ difference: number } | null>(null);
+  const [report, setReport] = useState<CutReport | null>(null);
 
   const countedNum = parseFloat(countedCash) || 0;
   const difference = countedNum - expectedCash;
@@ -460,33 +539,30 @@ function CloseModal({ expectedCash, onClose, onDone }: { expectedCash: number; o
     const data = await res.json();
     setSaving(false);
     if (!res.ok) {
-      setError(data.error ?? "No se pudo cerrar la caja");
+      setError(data.error ?? "No se pudo hacer el corte Z");
       return;
     }
-    setResult({ difference: Number(data.register.difference) });
+    setReport(data.report);
   }
 
-  if (result) {
-    const isExact = Math.abs(result.difference) < 0.01;
+  if (report) {
     return (
-      <Modal open onClose={onDone} title="Caja cerrada">
-        <div className="text-center py-2">
-          <p className={`font-display text-3xl font-semibold mb-2 ${isExact ? "text-sage" : "text-ember-dark"}`}>
-            {isExact ? "Cuadró exacto" : formatMxn(Math.abs(result.difference))}
-          </p>
-          <p className="text-sm text-muted mb-6">
-            {isExact ? "El efectivo contado coincide con lo esperado." : result.difference > 0 ? "Sobrante en caja." : "Faltante en caja."}
-          </p>
-          <Button onClick={onDone} className="w-full">
-            Listo
-          </Button>
+      <Modal open onClose={onDone} title="Corte Z hecho">
+        <CutReportView report={report} />
+        <div className="no-print flex justify-end gap-2 mt-5">
+          <PrintButton />
+          <Button onClick={onDone}>Listo</Button>
         </div>
       </Modal>
     );
   }
 
   return (
-    <Modal open onClose={onClose} title="Cerrar caja">
+    <Modal open onClose={onClose} title="Corte Z · Cerrar día">
+      <p className="text-sm text-muted mb-4">
+        Al confirmar se cierra el día de esta sucursal y se guarda el corte con un folio consecutivo. Ya no se puede
+        modificar.
+      </p>
       <p className="text-sm text-muted mb-1">Efectivo esperado en caja</p>
       <p className="font-mono text-2xl mb-5">{formatMxn(expectedCash)}</p>
 
@@ -521,7 +597,7 @@ function CloseModal({ expectedCash, onClose, onDone }: { expectedCash: number; o
           Cancelar
         </Button>
         <Button onClick={handleClose} disabled={saving || !countedCash}>
-          {saving ? "Cerrando..." : "Confirmar cierre"}
+          {saving ? "Cerrando..." : "Confirmar corte Z"}
         </Button>
       </div>
     </Modal>

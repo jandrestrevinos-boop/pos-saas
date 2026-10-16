@@ -15,8 +15,12 @@ export default async function CashPage() {
   return (
     <div>
       <h1 className="font-display text-3xl font-semibold mb-1">Caja</h1>
-      <p className="text-muted text-sm mb-8">Apertura, movimientos y corte de tu sucursal.</p>
-      <CashClient userName={session!.user.name ?? ""} />
+      <p className="text-muted text-sm mb-8">Apertura, movimientos y cortes X y Z de tu sucursal.</p>
+      <CashClient
+        userName={session!.user.name ?? ""}
+        canReportX={hasPermission(session.user.permissions, PERMISSIONS.CASH_REPORT_X)}
+        canReportZ={hasPermission(session.user.permissions, PERMISSIONS.CASH_REPORT_Z)}
+      />
     </div>
   );
 }

@@ -16,6 +16,8 @@ export const PERMISSIONS = {
   CASH_OPEN: "cash.open",
   CASH_CLOSE: "cash.close",
   CASH_MOVEMENT: "cash.movement",
+  CASH_REPORT_X: "cash.report_x", // sacar el corte X (lectura parcial del día, no cierra nada)
+  CASH_REPORT_Z: "cash.report_z", // hacer el corte Z (cierra el día de la sucursal) y consultar los Z anteriores
   INVENTORY_MANAGE: "inventory.manage",
   REPORTS_VIEW: "reports.view",
   SETTINGS_MANAGE: "settings.manage",
@@ -50,6 +52,8 @@ const ADMIN_PERMISSIONS: PermissionKey[] = [
   PERMISSIONS.CASH_OPEN,
   PERMISSIONS.CASH_CLOSE,
   PERMISSIONS.CASH_MOVEMENT,
+  PERMISSIONS.CASH_REPORT_X,
+  PERMISSIONS.CASH_REPORT_Z,
   PERMISSIONS.INVENTORY_MANAGE,
   PERMISSIONS.REPORTS_VIEW,
   PERMISSIONS.SETTINGS_MANAGE,
@@ -65,6 +69,7 @@ const VENTAS_PERMISSIONS: PermissionKey[] = [
   PERMISSIONS.CASH_OPEN,
   PERMISSIONS.CASH_CLOSE,
   PERMISSIONS.CASH_MOVEMENT,
+  PERMISSIONS.CASH_REPORT_X,
   PERMISSIONS.TABLES_MANAGE,
   PERMISSIONS.LOYALTY_SCAN,
 ];

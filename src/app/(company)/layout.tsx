@@ -21,6 +21,7 @@ const BASE_NAV_ITEMS: { href: string; label: string; permission?: PermissionKey 
   { href: "/kitchen", label: "Cocina", permission: PERMISSIONS.KITCHEN_VIEW },
   { href: "/dashboard", label: "Dashboard", permission: PERMISSIONS.REPORTS_VIEW },
   { href: "/cash", label: "Caja", permission: PERMISSIONS.CASH_OPEN },
+  { href: "/cortes-z", label: "Cortes Z", permission: PERMISSIONS.CASH_REPORT_Z },
   { href: "/reports", label: "Reportes", permission: PERMISSIONS.REPORTS_VIEW },
   { href: "/sales-history", label: "Historial de ventas", permission: PERMISSIONS.REPORTS_VIEW },
   { href: "/sales-import", label: "Importar ventas", permission: PERMISSIONS.REPORTS_VIEW },

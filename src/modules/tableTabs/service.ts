@@ -4,6 +4,7 @@ import { hasFeature } from "@/lib/feature-gating";
 import { FEATURE_KEYS } from "@/lib/plan-features";
 import { loyaltyService } from "@/modules/loyalty/service";
 import { promotionsService } from "@/modules/promotions/service";
+import { cashService } from "@/modules/cash/service";
 
 export const addRoundSchema = z.object({
   items: z
@@ -38,6 +39,8 @@ export const closeTabSchema = z.object({
 export const tableTabsService = {
   /** Abre la cuenta de una mesa, o regresa la que ya estaba abierta (idempotente — evita dos tabs abiertos a la vez en la misma mesa). */
   async open(companyId: string, branchId: string, userId: string, tableId: string) {
+    await cashService.ensureOpenDay(companyId, branchId, userId);
+
     const table = await prisma.table.findFirst({ where: { id: tableId, companyId, branchId } });
     if (!table) throw new Error("Mesa no encontrada");
 
@@ -190,6 +193,9 @@ export const tableTabsService = {
   },
 
   async close(companyId: string, orderId: string, userId: string, input: z.infer<typeof closeTabSchema>) {
+    const tabForDay = await prisma.order.findFirst({ where: { id: orderId, companyId }, select: { branchId: true } });
+    if (tabForDay) await cashService.ensureOpenDay(companyId, tabForDay.branchId, userId);
+
     const order = await prisma.order.findFirst({
       where: { id: orderId, companyId, isOpenTab: true },
       include: { items: true },

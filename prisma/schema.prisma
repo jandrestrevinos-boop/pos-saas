@@ -43,6 +43,11 @@ model Company {
   // solo una empresa con esto en true puede tener financiamientos de hardware.
   hardwareFinancingEnabled Boolean @default(false)
 
+  // Cortes X/Z: si es true, NO se puede vender sin antes abrir el día de caja de la
+  // sucursal (con su fondo inicial). Si es false (default), el día se abre solo con
+  // la primera venta, con fondo $0. Lo activa Jose por empresa desde Super Admin.
+  requireOpenCashDay Boolean @default(false)
+
   subscriptionPayments SubscriptionPayment[]
 
   stockTransfers  StockTransfer[]
@@ -600,8 +605,16 @@ model CashRegister {
   difference   Decimal? @db.Decimal(10, 2)
   status       CashRegisterStatus @default(OPEN)
 
+  // Corte Z: folio consecutivo por sucursal (se asigna al cerrar el día) y resumen
+  // congelado del cierre. Un Z ya hecho nunca se recalcula ni se edita.
+  folio      Int?
+  zReport    Json?
+  // true cuando el día se abrió solo con la primera venta (empresa sin "abrir caja obligatorio").
+  autoOpened Boolean @default(false)
+
   movements CashMovement[]
 
+  @@unique([branchId, folio])
   @@index([branchId])
   @@map("cash_registers")
 }

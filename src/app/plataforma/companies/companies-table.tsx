@@ -18,6 +18,7 @@ type Company = {
   name: string;
   businessType?: string;
   status: "ACTIVE" | "SUSPENDED" | "CANCELLED";
+  requireOpenCashDay?: boolean;
   branches: { id: string }[];
   users: { id: string }[];
   subscription: {
@@ -86,6 +87,7 @@ export function CompaniesTable({
   const [usersCompany, setUsersCompany] = useState<Company | null>(null);
   const [planCompany, setPlanCompany] = useState<Company | null>(null);
   const [billingCompany, setBillingCompany] = useState<Company | null>(null);
+  const [cashCompany, setCashCompany] = useState<Company | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [form, setForm] = useState({ name: "", branchName: "Principal", planId: plans[0]?.id ?? "", businessType: "RESTAURANTE" });
@@ -246,6 +248,9 @@ export function CompaniesTable({
                   Cobro
                 </Button>
               )}
+              <Button variant="ghost" onClick={() => setCashCompany(c)}>
+                Caja
+              </Button>
               {c.status !== "CANCELLED" && (
                 <Button variant="ghost" onClick={() => toggleStatus(c)}>
                   {c.status === "ACTIVE" ? "Suspender" : "Activar"}
@@ -336,6 +341,16 @@ export function CompaniesTable({
           }
         />
       )}
+      {cashCompany && (
+        <CashSettingsModal
+          company={cashCompany}
+          onClose={() => setCashCompany(null)}
+          onChanged={(value) => {
+            setCompanies((prev) => prev.map((c) => (c.id === cashCompany.id ? { ...c, requireOpenCashDay: value } : c)));
+            setCashCompany(null);
+          }}
+        />
+      )}
       {billingCompany && (
         <BillingModal
           company={billingCompany}
@@ -367,6 +382,61 @@ export function CompaniesTable({
         />
       )}
     </>
+  );
+}
+
+function CashSettingsModal({
+  company,
+  onClose,
+  onChanged,
+}: {
+  company: Company;
+  onClose: () => void;
+  onChanged: (value: boolean) => void;
+}) {
+  const [value, setValue] = useState(company.requireOpenCashDay ?? false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function save() {
+    setSaving(true);
+    setError("");
+    const res = await fetch(`/api/companies/${company.id}/cash-settings`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requireOpenCashDay: value }),
+    });
+    const data = await res.json();
+    setSaving(false);
+    if (!res.ok) {
+      setError(data.error ?? "No se pudo guardar");
+      return;
+    }
+    onChanged(data.company.requireOpenCashDay);
+  }
+
+  return (
+    <Modal open onClose={onClose} title={`Caja de ${company.name}`}>
+      <label className="flex items-start gap-3 mb-2 cursor-pointer">
+        <input type="checkbox" className="mt-1" checked={value} onChange={(e) => setValue(e.target.checked)} />
+        <span>
+          <span className="block text-sm font-medium">Obligar a abrir caja para vender</span>
+          <span className="block text-xs text-muted mt-0.5">
+            Activado: no se puede vender (ni abrir cuentas de mesa) hasta abrir el día de caja con su fondo inicial.
+            Desactivado: el día se abre solo con la primera venta, con fondo $0, y los cortes X y Z funcionan igual.
+          </span>
+        </span>
+      </label>
+      {error && <p className="text-sm text-ember-dark bg-ember/10 rounded-md px-3 py-2 my-3">{error}</p>}
+      <div className="flex justify-end gap-2 mt-4">
+        <Button type="button" variant="secondary" onClick={onClose}>
+          Cancelar
+        </Button>
+        <Button onClick={save} disabled={saving}>
+          {saving ? "Guardando..." : "Guardar"}
+        </Button>
+      </div>
+    </Modal>
   );
 }
 

@@ -78,3 +78,27 @@ body {
   outline: 2px solid var(--ember);
   outline-offset: 2px;
 }
+
+/* Cortes X/Z de caja: al imprimir solo sale el ticket (#cut-report-print) en formato de 80 mm. */
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+  #cut-report-print,
+  #cut-report-print * {
+    visibility: visible !important;
+  }
+  #cut-report-print {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 80mm;
+    padding: 4mm;
+    font-size: 11px;
+    color: #000;
+    background: #fff;
+  }
+  .no-print {
+    display: none !important;
+  }
+}
