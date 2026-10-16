@@ -10,7 +10,7 @@
  * nombre comercial, qué links del menú no aplican y las categorías iniciales.
  */
 
-export const BUSINESS_TYPES = ["RESTAURANTE", "CAFETERIA", "ESCUELA", "DISTRIBUIDOR", "LABORATORIO"] as const;
+export const BUSINESS_TYPES = ["RESTAURANTE", "CAFETERIA", "ESCUELA", "DISTRIBUIDOR", "LABORATORIO", "BARBERIA_ESTETICA"] as const;
 export type BusinessTypeKey = (typeof BUSINESS_TYPES)[number];
 
 export interface VerticalDef {
@@ -74,6 +74,16 @@ export const VERTICALS: Record<BusinessTypeKey, VerticalDef> = {
     status: "planned",
     hiddenNavHrefs: ["/kitchen", "/tables"],
     defaultCategories: [],
+  },
+  BARBERIA_ESTETICA: {
+    key: "BARBERIA_ESTETICA",
+    label: "Barbería / estética",
+    productName: "Tappy Barberías y Estéticas",
+    workspaceName: "Mi Salón",
+    status: "planned",
+    hiddenNavHrefs: ["/kitchen", "/tables"],
+    // Los servicios se cobran como productos en el POS.
+    defaultCategories: ["Cortes", "Barba", "Color y tintes", "Tratamientos", "Productos"],
   },
 };
 

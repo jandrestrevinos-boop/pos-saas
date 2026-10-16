@@ -94,6 +94,7 @@ enum BusinessType {
   ESCUELA
   DISTRIBUIDOR
   LABORATORIO
+  BARBERIA_ESTETICA
 }
 
 /// Configuraci\u00f3n de la plataforma (fila \u00fanica / singleton). Empieza solo
