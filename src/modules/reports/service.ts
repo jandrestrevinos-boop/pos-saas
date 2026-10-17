@@ -9,6 +9,7 @@ type ReportOrder = {
     productId: string;
     quantity: number;
     lineTotal: number | string;
+    extraCostAtSale?: number | string | null; // costo de las opciones elegidas en un menú completo
     product: { name: string; categoryId: string; cost: number | string | null; category: { name: string } };
   }[];
 };
@@ -16,7 +17,7 @@ type ReportOrder = {
 type DashboardOrder = {
   createdAt: Date;
   total: number | string;
-  items: { quantity: number; product: { cost: number | string | null } }[];
+  items: { quantity: number; extraCostAtSale?: number | string | null; product: { cost: number | string | null } }[];
 };
 
 export const reportsService = {
@@ -53,7 +54,7 @@ export const reportsService = {
       for (const item of order.items) {
         const key = item.productId;
         const hasCost = item.product.cost !== null && item.product.cost !== undefined;
-        const unitCost = hasCost ? Number(item.product.cost) : 0;
+        const unitCost = (hasCost ? Number(item.product.cost) : 0) + Number(item.extraCostAtSale ?? 0); // + costo de lo elegido en menús completos
         const lineCost = unitCost * item.quantity;
         totalCost += lineCost;
         if (!hasCost) itemsWithoutCost += item.quantity;
@@ -147,7 +148,7 @@ export const reportsService = {
     for (const order of report.orders as unknown as DashboardOrder[]) {
       const dayKey = new Date(order.createdAt).toISOString().slice(0, 10);
       const orderCost = order.items.reduce(
-        (sum, item) => sum + Number(item.product.cost ?? 0) * item.quantity,
+        (sum, item) => sum + (Number(item.product.cost ?? 0) + Number(item.extraCostAtSale ?? 0)) * item.quantity,
         0
       );
       const current = detailMap.get(dayKey) ?? { profit: 0, orders: 0 };

@@ -73,6 +73,8 @@ export default async function CompanyLayout({ children }: { children: React.Reac
   // cocinero solo ve Cocina, etc.).
   const tablesEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.GESTION_MESAS);
   const dashboardEmpresarialEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.DASHBOARD_EMPRESARIAL);
+  const costeoEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.COSTEO_RECETA);
+  const menusEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.MENUS_COMPLETOS);
 
   let navItems: { href: string; label: string; permission?: PermissionKey }[] = tablesEnabled
     ? [
@@ -81,6 +83,17 @@ export default async function CompanyLayout({ children }: { children: React.Reac
         ...BASE_NAV_ITEMS.slice(1),
       ]
     : BASE_NAV_ITEMS;
+
+  // Costeo por receta y Menús completos: aparecen junto a Productos solo si el plan los incluye.
+  const catalogExtras: { href: string; label: string; permission?: PermissionKey }[] = [];
+  if (costeoEnabled) catalogExtras.push({ href: "/recipes", label: "Insumos y recetas", permission: PERMISSIONS.PRODUCTS_MANAGE });
+  if (menusEnabled) catalogExtras.push({ href: "/menus", label: "Menús completos", permission: PERMISSIONS.PRODUCTS_MANAGE });
+  if (catalogExtras.length > 0) {
+    const productsIndex = navItems.findIndex((item) => item.href === "/products");
+    if (productsIndex !== -1) {
+      navItems = [...navItems.slice(0, productsIndex + 1), ...catalogExtras, ...navItems.slice(productsIndex + 1)];
+    }
+  }
 
   if (dashboardEmpresarialEnabled && hasPermission(session.user.permissions, PERMISSIONS.REPORTS_VIEW)) {
     const dashboardIndex = navItems.findIndex((item) => item.href === "/dashboard");

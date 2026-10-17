@@ -24,6 +24,8 @@ export const catalogService = {
           products: {
             where: {
               isActive: true,
+              // Los menús completos piden elegir guarniciones; WhatsApp todavía no, así que no se ofrecen ahí.
+              isMenu: false,
               // Solo se ofrece lo que esta sucursal tiene en existencia (o no controla inventario).
               OR: [{ tracksInventory: false }, { branchStocks: { some: { branchId, stock: { gt: 0 } } } }],
             },
@@ -57,6 +59,7 @@ export const catalogService = {
           id: productId,
           companyId,
           isActive: true,
+          isMenu: false,
         },
       });
     } catch (error) {

@@ -31,6 +31,7 @@ export const kitchenService = {
       },
       include: {
         product: true,
+        menuChoices: true, // menús completos: qué guarniciones/opciones lleva cada uno
         order: {
           select: {
             id: true,

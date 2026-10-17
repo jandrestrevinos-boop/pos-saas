@@ -40,6 +40,10 @@ export const FEATURE_CATALOG: FeatureDef[] = [
   { key: "pagos_integrados", label: "Pagos integrados (tarjetas desde el POS)", status: "live", enforced: true },
   { key: "whatsapp_business", label: "WhatsApp Business", status: "live", enforced: true },
   { key: "dashboard_empresarial", label: "Dashboard empresarial", status: "live", enforced: true },
+  // Costeo por receta: insumos + receta por platillo; el costo calculado alimenta Food Cost % y margen.
+  { key: "costeo_receta", label: "Costeo por receta", status: "live", enforced: true },
+  // Menús completos (comida corrida/combos): guarniciones incluidas en el precio fijo y opciones con cargo extra.
+  { key: "menus_completos", label: "Menús completos (guarniciones incluidas y opciones con cargo extra)", status: "live", enforced: true },
   // Programa de clientes frecuentes: opción independiente. No viene incluida en ningún plan
   // por defecto; se activa por plan o por empresa (plan personalizado) desde Super Admin.
   { key: "clientes_frecuentes", label: "Programa de clientes frecuentes (tarjeta digital con QR)", status: "live", enforced: true },
@@ -77,7 +81,6 @@ export const FEATURE_CATALOG: FeatureDef[] = [
   { key: "menus_por_turno", label: "Menús por turno/hora", status: "planned", enforced: false },
   { key: "integracion_delivery", label: "Integración con delivery (Uber Eats, DoorDash, Rappi)", status: "planned", enforced: false },
   { key: "conexion_contpaq_sat", label: "Conexión con Contpaq/SAT", status: "planned", enforced: false },
-  { key: "costeo_receta", label: "Costeo por receta", status: "planned", enforced: false },
   { key: "proyecciones_ia", label: "Proyecciones con IA básica", status: "planned", enforced: false },
   { key: "multi_moneda", label: "Multi-moneda", status: "planned", enforced: false },
 

@@ -9,6 +9,7 @@ import { cashService } from "@/modules/cash/service";
 import { hasFeature, requirePosAccess } from "@/lib/feature-gating";
 import { FEATURE_KEYS } from "@/lib/plan-features";
 import { tablesService } from "@/modules/tables/service";
+import { menusService } from "@/modules/menus/service";
 import { mercadoPagoService } from "@/modules/mercadoPago/service";
 import { requireBillingAccess } from "@/lib/billing-gate";
 import { PosClient } from "./pos-client";
@@ -48,7 +49,12 @@ export default async function PosPage() {
     productsService.list(session.user.companyId),
   ]);
 
-  const activeProducts = products.filter((p: (typeof products)[number]) => p.isActive);
+  // Menús completos: solo se venden si el plan los incluye; si no, no aparecen en el POS.
+  const menusEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.MENUS_COMPLETOS);
+  const menus = menusEnabled ? await menusService.listForPos(session.user.companyId) : [];
+  const activeProducts = products.filter(
+    (p: (typeof products)[number]) => p.isActive && (menusEnabled || !p.isMenu)
+  );
 
   const tablesEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.GESTION_MESAS);
   const tables = tablesEnabled && branchId ? await tablesService.list(session.user.companyId, branchId) : [];
@@ -76,6 +82,7 @@ export default async function PosPage() {
       loyaltyEnabled={loyaltyEnabled}
       categories={JSON.parse(JSON.stringify(categories.filter((c: (typeof categories)[number]) => c.isActive)))}
       products={JSON.parse(JSON.stringify(activeProducts))}
+      menus={JSON.parse(JSON.stringify(menus))}
       tables={JSON.parse(JSON.stringify(tables))}
       mercadoPagoEnabled={!!mpAccount}
       terminalLinked={terminalLinked}

@@ -1,0 +1,65 @@
+From 12941433794f7939b9117fc486c54afc8efec182 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 16 Oct 2026 21:13:31 +0000
+Subject: [PATCH] Tipo de negocio: barberia / estetica
+
+---
+ .../migration.sql                                    |  2 ++
+ prisma/schema.prisma                                 |  1 +
+ src/lib/verticals.ts                                 | 12 +++++++++++-
+ 3 files changed, 14 insertions(+), 1 deletion(-)
+ create mode 100644 prisma/migrations/20261016200000_tipo_barberia_estetica/migration.sql
+
+diff --git a/prisma/migrations/20261016200000_tipo_barberia_estetica/migration.sql b/prisma/migrations/20261016200000_tipo_barberia_estetica/migration.sql
+new file mode 100644
+index 0000000..e32663f
+--- /dev/null
++++ b/prisma/migrations/20261016200000_tipo_barberia_estetica/migration.sql
+@@ -0,0 +1,2 @@
++-- AlterEnum: aditivo, no toca datos existentes.
++ALTER TYPE "BusinessType" ADD VALUE 'BARBERIA_ESTETICA';
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index f0e9442..dc5629f 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -94,6 +94,7 @@ enum BusinessType {
+   ESCUELA
+   DISTRIBUIDOR
+   LABORATORIO
++  BARBERIA_ESTETICA
+ }
+ 
+ /// Configuraci\u00f3n de la plataforma (fila \u00fanica / singleton). Empieza solo
+diff --git a/src/lib/verticals.ts b/src/lib/verticals.ts
+index 262d434..241f964 100644
+--- a/src/lib/verticals.ts
++++ b/src/lib/verticals.ts
+@@ -10,7 +10,7 @@
+  * nombre comercial, qué links del menú no aplican y las categorías iniciales.
+  */
+ 
+-export const BUSINESS_TYPES = ["RESTAURANTE", "CAFETERIA", "ESCUELA", "DISTRIBUIDOR", "LABORATORIO"] as const;
++export const BUSINESS_TYPES = ["RESTAURANTE", "CAFETERIA", "ESCUELA", "DISTRIBUIDOR", "LABORATORIO", "BARBERIA_ESTETICA"] as const;
+ export type BusinessTypeKey = (typeof BUSINESS_TYPES)[number];
+ 
+ export interface VerticalDef {
+@@ -75,6 +75,16 @@ export const VERTICALS: Record<BusinessTypeKey, VerticalDef> = {
+     hiddenNavHrefs: ["/kitchen", "/tables"],
+     defaultCategories: [],
+   },
++  BARBERIA_ESTETICA: {
++    key: "BARBERIA_ESTETICA",
++    label: "Barbería / estética",
++    productName: "Tappy Barberías y Estéticas",
++    workspaceName: "Mi Salón",
++    status: "planned",
++    hiddenNavHrefs: ["/kitchen", "/tables"],
++    // Los servicios se cobran como productos en el POS.
++    defaultCategories: ["Cortes", "Barba", "Color y tintes", "Tratamientos", "Productos"],
++  },
+ };
+ 
+ export function getVertical(type: string | null | undefined): VerticalDef {
+-- 
+2.43.0
+

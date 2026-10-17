@@ -56,6 +56,7 @@ model Company {
   loyaltyVisits      LoyaltyVisit[]
   loyaltyRedemptions LoyaltyRedemption[]
   promotions         Promotion[]
+  ingredients        Ingredient[]
 
   @@map("companies")
 }
@@ -405,9 +406,15 @@ model Product {
   // aparece en Alertas como "stock bajo". 0 = sin mínimo configurado.
   minStock    Int      @default(0)
   taxRate     Decimal  @default(0) @db.Decimal(5, 2) // porcentaje, ej. 16.00
+  // Menú completo (comida corrida/combo): producto cuyo precio base incluye las opciones
+  // marcadas como "incluidas" y suma el cargo extra de las demás. Ver MenuGroup/MenuOption.
+  isMenu      Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  recipeItems        RecipeItem[]
+  menuGroups         MenuGroup[]
+  menuOptionLinks    MenuOption[]
   modifierGroups     ProductModifierGroup[]
   orderItems         OrderItem[]
   inventoryMovements InventoryMovement[]
@@ -532,6 +539,11 @@ model OrderItem {
   // uno solo por toda la cuenta (Order.subtotal ya suma todas las rondas).
   roundNumber Int         @default(1)
   createdAt   DateTime    @default(now()) // hora de esta ronda, no la de apertura de la cuenta
+
+  // Solo menús completos: costo (por unidad) de las opciones elegidas, congelado al vender.
+  // El costo base del menú sigue saliendo de Product.cost. 0 en productos normales.
+  extraCostAtSale Decimal @default(0) @db.Decimal(10, 2)
+  menuChoices OrderItemMenuChoice[]
 
   modifiers OrderItemModifier[]
 
@@ -1141,4 +1153,93 @@ model CompanyBranding {
   updatedAt         DateTime @updatedAt
 
   @@map("company_branding")
+}
+
+
+// ------------------------------------------------------------
+// COSTEO POR RECETA Y MENÚS COMPLETOS
+// ------------------------------------------------------------
+
+/// Insumo de cocina (carne, tortilla, aceite...). Su costo por unidad alimenta el costo de las
+/// recetas. wastePercent = merma: % que se pierde al limpiar/cocinar (el costo efectivo sube).
+model Ingredient {
+  id        String   @id @default(uuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name         String
+  unit         String  // "kg", "g", "l", "ml" o "pza"
+  costPerUnit  Decimal @db.Decimal(12, 4)
+  wastePercent Decimal @default(0) @db.Decimal(5, 2)
+  isActive     Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  recipeItems RecipeItem[]
+
+  @@unique([companyId, name])
+  @@map("ingredients")
+}
+
+/// Renglón de la receta de un producto: cuánto de un insumo lleva UNA porción.
+model RecipeItem {
+  id           String     @id @default(uuid())
+  productId    String
+  product      Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  ingredientId String
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+
+  quantity Decimal @db.Decimal(12, 4) // en la unidad del insumo
+
+  @@unique([productId, ingredientId])
+  @@map("recipe_items")
+}
+
+/// Grupo de opciones de un menú completo ("Guarnición", "Bebida"...). El cliente elige entre
+/// minSelect y maxSelect opciones del grupo.
+model MenuGroup {
+  id        String  @id @default(uuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  name      String
+  minSelect Int     @default(1)
+  maxSelect Int     @default(1)
+  sortOrder Int     @default(0)
+
+  options MenuOption[]
+
+  @@index([productId])
+  @@map("menu_groups")
+}
+
+/// Opción de un grupo: apunta a un producto real (con su propia receta/costo). extraPrice = 0
+/// significa "incluida en el precio fijo del menú"; > 0 es cargo extra al elegirla.
+model MenuOption {
+  id              String    @id @default(uuid())
+  groupId         String
+  group           MenuGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  optionProductId String
+  optionProduct   Product   @relation(fields: [optionProductId], references: [id], onDelete: Restrict)
+
+  extraPrice Decimal @default(0) @db.Decimal(10, 2)
+
+  @@unique([groupId, optionProductId])
+  @@map("menu_options")
+}
+
+/// Lo que el cliente eligió dentro de un menú, congelado al vender (nombre, cargo y costo) para
+/// que cocina, reportes y el historial no cambien si después se edita el menú.
+model OrderItemMenuChoice {
+  id              String    @id @default(uuid())
+  orderItemId     String
+  orderItem       OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  optionProductId String
+  name            String
+  extraPriceAtSale Decimal  @default(0) @db.Decimal(10, 2)
+  costAtSale       Decimal  @default(0) @db.Decimal(10, 2)
+
+  @@index([orderItemId])
+  @@map("order_item_menu_choices")
 }

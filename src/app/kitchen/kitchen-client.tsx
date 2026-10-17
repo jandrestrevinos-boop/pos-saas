@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 
-type Item = { id: string; quantity: number; product: { name: string } };
+type Item = { id: string; quantity: number; product: { name: string }; menuChoices?: { id: string; name: string }[] };
 // Un "ticket" es una RONDA de una orden (no la orden completa) — así una
 // mesa con cuenta abierta puede tener varios tickets activos a la vez, cada
 // uno con su propio avance, sin que uno reviva a los demás.
@@ -110,6 +110,13 @@ export function KitchenClient() {
                           {ticket.items.map((item) => (
                             <li key={item.id} className="text-sm text-white/90">
                               <span className="font-mono text-marigold">{item.quantity}x</span> {item.product.name}
+                              {item.menuChoices && item.menuChoices.length > 0 && (
+                                <ul className="ml-6 text-xs text-white/60">
+                                  {item.menuChoices.map((c) => (
+                                    <li key={c.id}>+ {c.name}</li>
+                                  ))}
+                                </ul>
+                              )}
                             </li>
                           ))}
                         </ul>

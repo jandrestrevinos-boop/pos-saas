@@ -19,8 +19,20 @@ type LoyaltyResult = {
 };
 
 type Category = { id: string; name: string };
-type Product = { id: string; name: string; price: string; categoryId: string; imageUrl?: string | null };
-type CartLine = { product: Product; quantity: number };
+type Product = { id: string; name: string; price: string; categoryId: string; imageUrl?: string | null; isMenu?: boolean };
+// Menús completos: grupos de opciones (guarnición, bebida...). extraPrice 0 = incluida en el precio fijo.
+type MenuChoiceOption = { id: string; name: string; extraPrice: number };
+type MenuConfig = {
+  id: string; // = id del producto-menú
+  groups: { id: string; name: string; minSelect: number; maxSelect: number; options: MenuChoiceOption[] }[];
+};
+// lineId: un producto normal se agrupa por producto; un menú, por producto + elecciones (dos comidas
+// con guarniciones distintas son renglones distintos). unitPrice ya incluye el cargo extra elegido.
+type CartLine = { lineId: string; product: Product; quantity: number; unitPrice: number; choices: MenuChoiceOption[] };
+
+function lineLabel(l: CartLine): string {
+  return l.choices.length > 0 ? `${l.product.name} (${l.choices.map((c) => c.name).join(", ")})` : l.product.name;
+}
 type TableOption = { id: string; name: string; status: string };
 
 const PAYMENT_METHODS: { value: "CASH" | "CARD" | "TRANSFER" | "OTHER"; label: string }[] = [
@@ -34,6 +46,7 @@ export function PosClient(props: {
   loyaltyEnabled: boolean;
   categories: Category[];
   products: Product[];
+  menus: MenuConfig[];
   tables: TableOption[];
   mercadoPagoEnabled: boolean;
   terminalLinked: boolean;
@@ -50,6 +63,7 @@ function PosClientInner({
   loyaltyEnabled,
   categories,
   products,
+  menus,
   tables,
   mercadoPagoEnabled,
   terminalLinked,
@@ -58,6 +72,7 @@ function PosClientInner({
   loyaltyEnabled: boolean;
   categories: Category[];
   products: Product[];
+  menus: MenuConfig[];
   tables: TableOption[];
   mercadoPagoEnabled: boolean;
   terminalLinked: boolean;
@@ -66,6 +81,8 @@ function PosClientInner({
   const { showProductImages } = useBranding();
   const [activeCategory, setActiveCategory] = useState<string>(categories[0]?.id ?? "");
   const [cart, setCart] = useState<CartLine[]>([]);
+  // Menú completo que se está armando (el cajero elige guarniciones antes de agregarlo al carrito).
+  const [pickingMenu, setPickingMenu] = useState<{ product: Product; config: MenuConfig } | null>(null);
   const [discount, setDiscount] = useState(0);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   // Cliente frecuente identificado en esta venta (y si canjea su descuento)
@@ -141,7 +158,7 @@ function PosClientInner({
       const res = await fetch(`/api/orders/${openOrderId}/items`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: cart.map((l) => ({ productId: l.product.id, quantity: l.quantity })) }),
+        body: JSON.stringify({ items: cart.map((l) => ({ productId: l.product.id, quantity: l.quantity, choices: l.choices.map((c) => c.id) })) }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "No se pudo mandar la ronda a cocina");
@@ -162,7 +179,7 @@ function PosClientInner({
     [products, activeCategory]
   );
 
-  const subtotal = cart.reduce((sum, line) => sum + Number(line.product.price) * line.quantity, 0);
+  const subtotal = cart.reduce((sum, line) => sum + line.unitPrice * line.quantity, 0);
   // Promociones primero (en cuentas de mesa se aplican al cerrar la cuenta, no aquí).
   const promo = useMemo(
     () =>
@@ -172,7 +189,7 @@ function PosClientInner({
             cart.map((l) => ({
               productId: l.product.id,
               categoryId: l.product.categoryId,
-              unitPrice: Number(l.product.price),
+              unitPrice: l.unitPrice,
               quantity: l.quantity,
             })),
             coupon ? [...promoRules, coupon] : promoRules,
@@ -189,20 +206,33 @@ function PosClientInner({
   const safeDiscount = promo.discount + (loyalty?.redeem ? loyaltyDiscount : manualDiscount);
   const total = subtotal - safeDiscount;
 
-  function addToCart(product: Product) {
+  function addLine(product: Product, choices: MenuChoiceOption[]) {
+    const lineId = choices.length > 0 ? `${product.id}:${choices.map((c) => c.id).sort().join(",")}` : product.id;
+    const unitPrice = Number(product.price) + choices.reduce((sum, c) => sum + c.extraPrice, 0);
     setCart((prev) => {
-      const existing = prev.find((l) => l.product.id === product.id);
+      const existing = prev.find((l) => l.lineId === lineId);
       if (existing) {
-        return prev.map((l) => (l.product.id === product.id ? { ...l, quantity: l.quantity + 1 } : l));
+        return prev.map((l) => (l.lineId === lineId ? { ...l, quantity: l.quantity + 1 } : l));
       }
-      return [...prev, { product, quantity: 1 }];
+      return [...prev, { lineId, product, quantity: 1, unitPrice, choices }];
     });
   }
 
-  function changeQuantity(productId: string, delta: number) {
+  function addToCart(product: Product) {
+    if (product.isMenu) {
+      const config = menus.find((m) => m.id === product.id);
+      if (config && config.groups.length > 0) {
+        setPickingMenu({ product, config });
+        return;
+      }
+    }
+    addLine(product, []);
+  }
+
+  function changeQuantity(lineId: string, delta: number) {
     setCart((prev) =>
       prev
-        .map((l) => (l.product.id === productId ? { ...l, quantity: l.quantity + delta } : l))
+        .map((l) => (l.lineId === lineId ? { ...l, quantity: l.quantity + delta } : l))
         .filter((l) => l.quantity > 0)
     );
   }
@@ -280,7 +310,10 @@ function PosClientInner({
                     ))}
                   <div className="p-4">
                     <p className="font-medium mb-1">{p.name}</p>
-                    <p className="font-mono text-sm text-muted">{formatMxn(p.price)}</p>
+                    <p className="font-mono text-sm text-muted">
+                      {formatMxn(p.price)}
+                      {p.isMenu && <span className="ml-2 font-sans text-xs bg-ember/15 text-ember-dark px-1.5 py-0.5 rounded">Menú</span>}
+                    </p>
                   </div>
                 </button>
               ))}
@@ -303,14 +336,19 @@ function PosClientInner({
             ) : (
               <ul className="space-y-3">
                 {cart.map((line) => (
-                  <li key={line.product.id} className="flex items-center justify-between gap-2">
+                  <li key={line.lineId} className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <p className="text-sm font-medium truncate">{line.product.name}</p>
-                      <p className="text-xs text-muted font-mono">{formatMxn(line.product.price)} c/u</p>
+                      {line.choices.length > 0 && (
+                        <p className="text-xs text-muted">
+                          {line.choices.map((c) => (c.extraPrice > 0 ? `${c.name} (+${formatMxn(c.extraPrice)})` : c.name)).join(" · ")}
+                        </p>
+                      )}
+                      <p className="text-xs text-muted font-mono">{formatMxn(line.unitPrice)} c/u</p>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <button
-                        onClick={() => changeQuantity(line.product.id, -1)}
+                        onClick={() => changeQuantity(line.lineId, -1)}
                         className="w-8 h-8 rounded-md border border-line text-lg leading-none"
                         aria-label="Restar"
                       >
@@ -318,7 +356,7 @@ function PosClientInner({
                       </button>
                       <span className="w-5 text-center font-mono text-sm">{line.quantity}</span>
                       <button
-                        onClick={() => changeQuantity(line.product.id, 1)}
+                        onClick={() => changeQuantity(line.lineId, 1)}
                         className="w-8 h-8 rounded-md border border-line text-lg leading-none"
                         aria-label="Sumar"
                       >
@@ -447,6 +485,118 @@ function PosClientInner({
           onDone={resetSale}
         />
       )}
+
+      {pickingMenu && (
+        <MenuPickerModal
+          product={pickingMenu.product}
+          config={pickingMenu.config}
+          onClose={() => setPickingMenu(null)}
+          onConfirm={(choices) => {
+            addLine(pickingMenu.product, choices);
+            setPickingMenu(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Selector de un menú completo: el cajero elige guarniciones/bebida; las de cargo extra suman al precio. */
+function MenuPickerModal({
+  product,
+  config,
+  onClose,
+  onConfirm,
+}: {
+  product: Product;
+  config: MenuConfig;
+  onClose: () => void;
+  onConfirm: (choices: MenuChoiceOption[]) => void;
+}) {
+  const [selected, setSelected] = useState<Record<string, string[]>>({}); // groupId -> ids de opción
+
+  function toggle(groupId: string, optionId: string, maxSelect: number) {
+    setSelected((prev) => {
+      const current = prev[groupId] ?? [];
+      if (current.includes(optionId)) return { ...prev, [groupId]: current.filter((id) => id !== optionId) };
+      // Con máximo 1 funciona como botón de radio: elegir otra opción reemplaza la anterior.
+      if (maxSelect === 1) return { ...prev, [groupId]: [optionId] };
+      if (current.length >= maxSelect) return prev;
+      return { ...prev, [groupId]: [...current, optionId] };
+    });
+  }
+
+  const choices: MenuChoiceOption[] = config.groups.flatMap((g) =>
+    (selected[g.id] ?? []).map((id) => g.options.find((o) => o.id === id)!).filter(Boolean)
+  );
+  const missing = config.groups.find((g) => (selected[g.id]?.length ?? 0) < g.minSelect);
+  const extra = choices.reduce((sum, c) => sum + c.extraPrice, 0);
+  const price = Number(product.price) + extra;
+
+  return (
+    <div className="fixed inset-0 bg-ink-950/60 flex items-center justify-center z-50 p-4">
+      <div className="bg-paper-raised rounded-lg w-full max-w-md max-h-[90vh] flex flex-col">
+        <div className="px-6 py-4 border-b border-line">
+          <p className="font-display text-xl font-semibold">{product.name}</p>
+          <p className="text-xs text-muted">Elige lo que lleva el menú</p>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
+          {config.groups.map((g) => {
+            const count = selected[g.id]?.length ?? 0;
+            return (
+              <div key={g.id}>
+                <div className="flex items-baseline justify-between mb-2">
+                  <p className="text-sm font-medium">{g.name}</p>
+                  <p className="text-xs text-muted">
+                    {g.minSelect === g.maxSelect
+                      ? `Elige ${g.maxSelect}`
+                      : g.minSelect === 0
+                        ? `Hasta ${g.maxSelect}`
+                        : `Elige de ${g.minSelect} a ${g.maxSelect}`}{" "}
+                    · {count} elegida{count === 1 ? "" : "s"}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {g.options.map((o) => {
+                    const on = selected[g.id]?.includes(o.id) ?? false;
+                    return (
+                      <button
+                        key={o.id}
+                        type="button"
+                        onClick={() => toggle(g.id, o.id, g.maxSelect)}
+                        className={`rounded-md px-4 py-2.5 text-sm border transition-colors ${
+                          on ? "bg-ink-950 text-white border-ink-950" : "bg-white border-line text-ink"
+                        }`}
+                      >
+                        {o.name}
+                        {o.extraPrice > 0 && <span className="ml-1.5 font-mono text-xs opacity-80">+{formatMxn(o.extraPrice)}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="px-6 py-4 border-t border-line">
+          {missing && <p className="text-xs text-muted mb-2">Falta elegir en &quot;{missing.name}&quot;.</p>}
+          <div className="flex gap-3">
+            <button type="button" onClick={onClose} className="flex-1 rounded-md border border-line py-3 text-sm font-medium">
+              Cancelar
+            </button>
+            <button
+              type="button"
+              disabled={!!missing}
+              onClick={() => onConfirm(choices)}
+              className="flex-1 rounded-md bg-ember text-white py-3 text-sm font-medium disabled:opacity-40"
+            >
+              Agregar · {formatMxn(price)}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -540,6 +690,7 @@ function CheckoutModal({
           items: cart.map((l) => ({
             productId: l.product.id,
             quantity: l.quantity,
+            choices: l.choices.map((c) => c.id),
           })),
           discount: manualDiscount,
           couponCode: couponCode || undefined,
@@ -599,8 +750,8 @@ function CheckoutModal({
         orderNumber: data.order.orderNumber,
         items: cart.map((l) => ({
           quantity: l.quantity,
-          name: l.product.name,
-          unitPrice: Number(l.product.price),
+          name: lineLabel(l),
+          unitPrice: l.unitPrice,
         })),
         subtotal,
         discount,
@@ -633,7 +784,7 @@ function CheckoutModal({
         setCompletedOrder({
           orderId: pendingMpCheckout.orderId,
           orderNumber: pendingMpCheckout.orderNumber,
-          items: cart.map((l) => ({ quantity: l.quantity, name: l.product.name, unitPrice: Number(l.product.price) })),
+          items: cart.map((l) => ({ quantity: l.quantity, name: lineLabel(l), unitPrice: l.unitPrice })),
           subtotal,
           discount,
           total,
@@ -670,7 +821,7 @@ function CheckoutModal({
         setCompletedOrder({
           orderId: pendingPointCharge.orderId,
           orderNumber: pendingPointCharge.orderNumber,
-          items: cart.map((l) => ({ quantity: l.quantity, name: l.product.name, unitPrice: Number(l.product.price) })),
+          items: cart.map((l) => ({ quantity: l.quantity, name: lineLabel(l), unitPrice: l.unitPrice })),
           subtotal,
           discount,
           total,

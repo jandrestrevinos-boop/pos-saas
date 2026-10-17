@@ -5,6 +5,8 @@ import { FEATURE_KEYS } from "@/lib/plan-features";
 import { loyaltyService } from "@/modules/loyalty/service";
 import { promotionsService } from "@/modules/promotions/service";
 import { cashService } from "@/modules/cash/service";
+import { menusService } from "@/modules/menus/service";
+import { expandMenuInventory } from "@/lib/menu-inventory";
 
 export const addRoundSchema = z.object({
   items: z
@@ -12,6 +14,8 @@ export const addRoundSchema = z.object({
       z.object({
         productId: z.string().min(1),
         quantity: z.coerce.number().int().positive(),
+        // Solo menús completos: ids de MenuOption elegidos (guarniciones, bebida...).
+        choices: z.array(z.string().min(1)).max(40).default([]),
       })
     )
     .min(1, "El carrito está vacío"),
@@ -47,7 +51,7 @@ export const tableTabsService = {
     if (table.currentOrderId) {
       const existing = await prisma.order.findUnique({
         where: { id: table.currentOrderId },
-        include: { items: { include: { product: true } } },
+        include: { items: { include: { product: true, menuChoices: true } } },
       });
       if (existing) return existing;
     }
@@ -67,7 +71,7 @@ export const tableTabsService = {
         tax: 0,
         total: 0,
       },
-      include: { items: { include: { product: true } } },
+      include: { items: { include: { product: true, menuChoices: true } } },
     });
 
     await prisma.table.update({
@@ -85,7 +89,7 @@ export const tableTabsService = {
 
     return prisma.order.findUnique({
       where: { id: table.currentOrderId },
-      include: { items: { include: { product: true } } },
+      include: { items: { include: { product: true, menuChoices: true } } },
     });
   },
 
@@ -116,10 +120,16 @@ export const tableTabsService = {
     });
     const roundNumber = (maxRound._max.roundNumber ?? 0) + 1;
 
+    // Menús completos: precio extra y costo de lo elegido, calculados por el servidor.
+    const resolved = await Promise.all(
+      input.items.map((item) => menusService.resolveChoices(companyId, item.productId, item.choices))
+    );
+
     let roundSubtotal = 0;
-    const orderItemsData = input.items.map((item) => {
+    const orderItemsData = input.items.map((item, idx) => {
       const product = productMap.get(item.productId)!;
-      const unitPrice = Number(product.price);
+      const menu = resolved[idx];
+      const unitPrice = Number(product.price) + menu.extraPrice;
       const lineTotal = unitPrice * item.quantity;
       roundSubtotal += lineTotal;
       return {
@@ -129,6 +139,19 @@ export const tableTabsService = {
         lineTotal,
         roundNumber,
         status: "PENDING" as const,
+        extraCostAtSale: menu.extraCost,
+        ...(menu.choices.length > 0
+          ? {
+              menuChoices: {
+                create: menu.choices.map((c) => ({
+                  optionProductId: c.optionProductId,
+                  name: c.name,
+                  extraPriceAtSale: c.extraPriceAtSale,
+                  costAtSale: c.costAtSale,
+                })),
+              },
+            }
+          : {}),
       };
     });
 
@@ -144,12 +167,16 @@ export const tableTabsService = {
         subtotal: newSubtotal,
         total: newSubtotal - Number(order.discount),
       },
-      include: { items: { include: { product: true } } },
+      include: { items: { include: { product: true, menuChoices: true } } },
     });
 
     const { inventoryService } = await import("@/modules/inventory/service");
     try {
-      await inventoryService.deductForSale(branchId, userId, input.items);
+      await inventoryService.deductForSale(
+        branchId,
+        userId,
+        expandMenuInventory(input.items.map((i, idx) => ({ productId: i.productId, quantity: i.quantity, menuChoices: resolved[idx].choices })))
+      );
     } catch {
       // El inventario es informativo; no debe bloquear que la ronda ya se mandó a cocina.
     }

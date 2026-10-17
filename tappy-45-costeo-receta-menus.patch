@@ -1,0 +1,2858 @@
+From 679c824341cef09fe4ddb9c72a177507d1862956 Mon Sep 17 00:00:00 2001
+From: Tappy <dev@tappysoftware.com>
+Date: Sat, 17 Oct 2026 17:02:20 +0000
+Subject: [PATCH] Costeo por receta + menus completos (guarniciones incluidas y
+ con cargo extra)
+
+---
+ .../migration.sql                             | 100 ++++
+ prisma/schema.prisma                          | 101 ++++
+ src/app/(company)/layout.tsx                  |  13 +
+ src/app/(company)/menus/menus-client.tsx      | 382 ++++++++++++++
+ src/app/(company)/menus/page.tsx              |  50 ++
+ src/app/(company)/recipes/page.tsx            |  42 ++
+ src/app/(company)/recipes/recipes-client.tsx  | 479 ++++++++++++++++++
+ src/app/(company)/tables/tables-client.tsx    |   5 +-
+ src/app/api/ingredients/[id]/route.ts         |  32 ++
+ src/app/api/ingredients/route.ts              |  28 +
+ src/app/api/menus/[id]/groups/route.ts        |  19 +
+ src/app/api/menus/[id]/route.ts               |  19 +
+ src/app/api/menus/route.ts                    |  27 +
+ src/app/api/products/[id]/recipe/route.ts     |  30 ++
+ src/app/api/recipes/costing/route.ts          |  10 +
+ src/app/kitchen/kitchen-client.tsx            |   9 +-
+ src/app/pos/page.tsx                          |   9 +-
+ src/app/pos/pos-client.tsx                    | 191 ++++++-
+ src/lib/manage-guard.ts                       |  30 ++
+ src/lib/menu-inventory.ts                     |  23 +
+ src/lib/plan-features.ts                      |   5 +-
+ src/lib/recipe-cost.ts                        |  31 ++
+ src/modules/kitchen/service.ts                |   1 +
+ src/modules/menus/service.ts                  | 263 ++++++++++
+ src/modules/recipes/service.ts                | 201 ++++++++
+ src/modules/reports/service.ts                |   7 +-
+ src/modules/sales/service.ts                  |  64 ++-
+ src/modules/tableTabs/service.ts              |  41 +-
+ src/modules/whatsapp/catalogService.ts        |   3 +
+ 29 files changed, 2157 insertions(+), 58 deletions(-)
+ create mode 100644 prisma/migrations/20261017120000_costeo_receta_menus/migration.sql
+ create mode 100644 src/app/(company)/menus/menus-client.tsx
+ create mode 100644 src/app/(company)/menus/page.tsx
+ create mode 100644 src/app/(company)/recipes/page.tsx
+ create mode 100644 src/app/(company)/recipes/recipes-client.tsx
+ create mode 100644 src/app/api/ingredients/[id]/route.ts
+ create mode 100644 src/app/api/ingredients/route.ts
+ create mode 100644 src/app/api/menus/[id]/groups/route.ts
+ create mode 100644 src/app/api/menus/[id]/route.ts
+ create mode 100644 src/app/api/menus/route.ts
+ create mode 100644 src/app/api/products/[id]/recipe/route.ts
+ create mode 100644 src/app/api/recipes/costing/route.ts
+ create mode 100644 src/lib/manage-guard.ts
+ create mode 100644 src/lib/menu-inventory.ts
+ create mode 100644 src/lib/recipe-cost.ts
+ create mode 100644 src/modules/menus/service.ts
+ create mode 100644 src/modules/recipes/service.ts
+
+diff --git a/prisma/migrations/20261017120000_costeo_receta_menus/migration.sql b/prisma/migrations/20261017120000_costeo_receta_menus/migration.sql
+new file mode 100644
+index 0000000..e8834b6
+--- /dev/null
++++ b/prisma/migrations/20261017120000_costeo_receta_menus/migration.sql
+@@ -0,0 +1,100 @@
++-- AlterTable
++ALTER TABLE "products" ADD COLUMN     "isMenu" BOOLEAN NOT NULL DEFAULT false;
++
++-- AlterTable
++ALTER TABLE "order_items" ADD COLUMN     "extraCostAtSale" DECIMAL(10,2) NOT NULL DEFAULT 0;
++
++-- CreateTable
++CREATE TABLE "ingredients" (
++    "id" TEXT NOT NULL,
++    "companyId" TEXT NOT NULL,
++    "name" TEXT NOT NULL,
++    "unit" TEXT NOT NULL,
++    "costPerUnit" DECIMAL(12,4) NOT NULL,
++    "wastePercent" DECIMAL(5,2) NOT NULL DEFAULT 0,
++    "isActive" BOOLEAN NOT NULL DEFAULT true,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++
++    CONSTRAINT "ingredients_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateTable
++CREATE TABLE "recipe_items" (
++    "id" TEXT NOT NULL,
++    "productId" TEXT NOT NULL,
++    "ingredientId" TEXT NOT NULL,
++    "quantity" DECIMAL(12,4) NOT NULL,
++
++    CONSTRAINT "recipe_items_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateTable
++CREATE TABLE "menu_groups" (
++    "id" TEXT NOT NULL,
++    "productId" TEXT NOT NULL,
++    "name" TEXT NOT NULL,
++    "minSelect" INTEGER NOT NULL DEFAULT 1,
++    "maxSelect" INTEGER NOT NULL DEFAULT 1,
++    "sortOrder" INTEGER NOT NULL DEFAULT 0,
++
++    CONSTRAINT "menu_groups_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateTable
++CREATE TABLE "menu_options" (
++    "id" TEXT NOT NULL,
++    "groupId" TEXT NOT NULL,
++    "optionProductId" TEXT NOT NULL,
++    "extraPrice" DECIMAL(10,2) NOT NULL DEFAULT 0,
++
++    CONSTRAINT "menu_options_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateTable
++CREATE TABLE "order_item_menu_choices" (
++    "id" TEXT NOT NULL,
++    "orderItemId" TEXT NOT NULL,
++    "optionProductId" TEXT NOT NULL,
++    "name" TEXT NOT NULL,
++    "extraPriceAtSale" DECIMAL(10,2) NOT NULL DEFAULT 0,
++    "costAtSale" DECIMAL(10,2) NOT NULL DEFAULT 0,
++
++    CONSTRAINT "order_item_menu_choices_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateIndex
++CREATE UNIQUE INDEX "ingredients_companyId_name_key" ON "ingredients"("companyId", "name");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "recipe_items_productId_ingredientId_key" ON "recipe_items"("productId", "ingredientId");
++
++-- CreateIndex
++CREATE INDEX "menu_groups_productId_idx" ON "menu_groups"("productId");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "menu_options_groupId_optionProductId_key" ON "menu_options"("groupId", "optionProductId");
++
++-- CreateIndex
++CREATE INDEX "order_item_menu_choices_orderItemId_idx" ON "order_item_menu_choices"("orderItemId");
++
++-- AddForeignKey
++ALTER TABLE "ingredients" ADD CONSTRAINT "ingredients_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "recipe_items" ADD CONSTRAINT "recipe_items_productId_fkey" FOREIGN KEY ("productId") REFERENCES "products"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "recipe_items" ADD CONSTRAINT "recipe_items_ingredientId_fkey" FOREIGN KEY ("ingredientId") REFERENCES "ingredients"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "menu_groups" ADD CONSTRAINT "menu_groups_productId_fkey" FOREIGN KEY ("productId") REFERENCES "products"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "menu_options" ADD CONSTRAINT "menu_options_groupId_fkey" FOREIGN KEY ("groupId") REFERENCES "menu_groups"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "menu_options" ADD CONSTRAINT "menu_options_optionProductId_fkey" FOREIGN KEY ("optionProductId") REFERENCES "products"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "order_item_menu_choices" ADD CONSTRAINT "order_item_menu_choices_orderItemId_fkey" FOREIGN KEY ("orderItemId") REFERENCES "order_items"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index dc5629f..70f3575 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -56,6 +56,7 @@ model Company {
+   loyaltyVisits      LoyaltyVisit[]
+   loyaltyRedemptions LoyaltyRedemption[]
+   promotions         Promotion[]
++  ingredients        Ingredient[]
+ 
+   @@map("companies")
+ }
+@@ -405,9 +406,15 @@ model Product {
+   // aparece en Alertas como "stock bajo". 0 = sin mínimo configurado.
+   minStock    Int      @default(0)
+   taxRate     Decimal  @default(0) @db.Decimal(5, 2) // porcentaje, ej. 16.00
++  // Menú completo (comida corrida/combo): producto cuyo precio base incluye las opciones
++  // marcadas como "incluidas" y suma el cargo extra de las demás. Ver MenuGroup/MenuOption.
++  isMenu      Boolean  @default(false)
+   createdAt   DateTime @default(now())
+   updatedAt   DateTime @updatedAt
+ 
++  recipeItems        RecipeItem[]
++  menuGroups         MenuGroup[]
++  menuOptionLinks    MenuOption[]
+   modifierGroups     ProductModifierGroup[]
+   orderItems         OrderItem[]
+   inventoryMovements InventoryMovement[]
+@@ -533,6 +540,11 @@ model OrderItem {
+   roundNumber Int         @default(1)
+   createdAt   DateTime    @default(now()) // hora de esta ronda, no la de apertura de la cuenta
+ 
++  // Solo menús completos: costo (por unidad) de las opciones elegidas, congelado al vender.
++  // El costo base del menú sigue saliendo de Product.cost. 0 en productos normales.
++  extraCostAtSale Decimal @default(0) @db.Decimal(10, 2)
++  menuChoices OrderItemMenuChoice[]
++
+   modifiers OrderItemModifier[]
+ 
+   @@index([orderId, roundNumber])
+@@ -1142,3 +1154,92 @@ model CompanyBranding {
+ 
+   @@map("company_branding")
+ }
++
++
++// ------------------------------------------------------------
++// COSTEO POR RECETA Y MENÚS COMPLETOS
++// ------------------------------------------------------------
++
++/// Insumo de cocina (carne, tortilla, aceite...). Su costo por unidad alimenta el costo de las
++/// recetas. wastePercent = merma: % que se pierde al limpiar/cocinar (el costo efectivo sube).
++model Ingredient {
++  id        String   @id @default(uuid())
++  companyId String
++  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
++
++  name         String
++  unit         String  // "kg", "g", "l", "ml" o "pza"
++  costPerUnit  Decimal @db.Decimal(12, 4)
++  wastePercent Decimal @default(0) @db.Decimal(5, 2)
++  isActive     Boolean @default(true)
++
++  createdAt DateTime @default(now())
++  updatedAt DateTime @updatedAt
++
++  recipeItems RecipeItem[]
++
++  @@unique([companyId, name])
++  @@map("ingredients")
++}
++
++/// Renglón de la receta de un producto: cuánto de un insumo lleva UNA porción.
++model RecipeItem {
++  id           String     @id @default(uuid())
++  productId    String
++  product      Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
++  ingredientId String
++  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
++
++  quantity Decimal @db.Decimal(12, 4) // en la unidad del insumo
++
++  @@unique([productId, ingredientId])
++  @@map("recipe_items")
++}
++
++/// Grupo de opciones de un menú completo ("Guarnición", "Bebida"...). El cliente elige entre
++/// minSelect y maxSelect opciones del grupo.
++model MenuGroup {
++  id        String  @id @default(uuid())
++  productId String
++  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
++
++  name      String
++  minSelect Int     @default(1)
++  maxSelect Int     @default(1)
++  sortOrder Int     @default(0)
++
++  options MenuOption[]
++
++  @@index([productId])
++  @@map("menu_groups")
++}
++
++/// Opción de un grupo: apunta a un producto real (con su propia receta/costo). extraPrice = 0
++/// significa "incluida en el precio fijo del menú"; > 0 es cargo extra al elegirla.
++model MenuOption {
++  id              String    @id @default(uuid())
++  groupId         String
++  group           MenuGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
++  optionProductId String
++  optionProduct   Product   @relation(fields: [optionProductId], references: [id], onDelete: Restrict)
++
++  extraPrice Decimal @default(0) @db.Decimal(10, 2)
++
++  @@unique([groupId, optionProductId])
++  @@map("menu_options")
++}
++
++/// Lo que el cliente eligió dentro de un menú, congelado al vender (nombre, cargo y costo) para
++/// que cocina, reportes y el historial no cambien si después se edita el menú.
++model OrderItemMenuChoice {
++  id              String    @id @default(uuid())
++  orderItemId     String
++  orderItem       OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
++  optionProductId String
++  name            String
++  extraPriceAtSale Decimal  @default(0) @db.Decimal(10, 2)
++  costAtSale       Decimal  @default(0) @db.Decimal(10, 2)
++
++  @@index([orderItemId])
++  @@map("order_item_menu_choices")
++}
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index 0daa599..a41b2a2 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -73,6 +73,8 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+   // cocinero solo ve Cocina, etc.).
+   const tablesEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.GESTION_MESAS);
+   const dashboardEmpresarialEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.DASHBOARD_EMPRESARIAL);
++  const costeoEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.COSTEO_RECETA);
++  const menusEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.MENUS_COMPLETOS);
+ 
+   let navItems: { href: string; label: string; permission?: PermissionKey }[] = tablesEnabled
+     ? [
+@@ -82,6 +84,17 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+       ]
+     : BASE_NAV_ITEMS;
+ 
++  // Costeo por receta y Menús completos: aparecen junto a Productos solo si el plan los incluye.
++  const catalogExtras: { href: string; label: string; permission?: PermissionKey }[] = [];
++  if (costeoEnabled) catalogExtras.push({ href: "/recipes", label: "Insumos y recetas", permission: PERMISSIONS.PRODUCTS_MANAGE });
++  if (menusEnabled) catalogExtras.push({ href: "/menus", label: "Menús completos", permission: PERMISSIONS.PRODUCTS_MANAGE });
++  if (catalogExtras.length > 0) {
++    const productsIndex = navItems.findIndex((item) => item.href === "/products");
++    if (productsIndex !== -1) {
++      navItems = [...navItems.slice(0, productsIndex + 1), ...catalogExtras, ...navItems.slice(productsIndex + 1)];
++    }
++  }
++
+   if (dashboardEmpresarialEnabled && hasPermission(session.user.permissions, PERMISSIONS.REPORTS_VIEW)) {
+     const dashboardIndex = navItems.findIndex((item) => item.href === "/dashboard");
+     navItems = [
+diff --git a/src/app/(company)/menus/menus-client.tsx b/src/app/(company)/menus/menus-client.tsx
+new file mode 100644
+index 0000000..8972e9c
+--- /dev/null
++++ b/src/app/(company)/menus/menus-client.tsx
+@@ -0,0 +1,382 @@
++"use client";
++
++import { useCallback, useEffect, useState } from "react";
++import { formatMxn } from "@/lib/format";
++
++type Menu = {
++  id: string;
++  name: string;
++  price: number;
++  baseCost: number;
++  worstCost: number;
++  worstFoodCostPercent: number | null;
++  isActive: boolean;
++  categoryId: string;
++  category: string;
++  groups: {
++    id: string;
++    name: string;
++    minSelect: number;
++    maxSelect: number;
++    options: { id: string; optionProductId: string; name: string; extraPrice: number; cost: number; isActive: boolean }[];
++  }[];
++};
++
++type Simple = { id: string; name: string };
++type GroupForm = {
++  name: string;
++  minSelect: string;
++  maxSelect: string;
++  options: { optionProductId: string; extraPrice: string }[];
++};
++
++const inputCls = "w-full rounded-md border border-line px-3 py-2 text-sm";
++
++export function MenusClient({ categories, products }: { categories: Simple[]; products: Simple[] }) {
++  const [menus, setMenus] = useState<Menu[]>([]);
++  const [loading, setLoading] = useState(true);
++  const [error, setError] = useState("");
++  const [editingMenu, setEditingMenu] = useState<Menu | "new" | null>(null);
++  const [editingGroups, setEditingGroups] = useState<Menu | null>(null);
++
++  const load = useCallback(async () => {
++    setError("");
++    try {
++      const res = await fetch("/api/menus");
++      const data = await res.json();
++      if (!res.ok) throw new Error(data.error ?? "No se pudieron cargar los menús");
++      setMenus(data.menus);
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "No se pudieron cargar los menús");
++    } finally {
++      setLoading(false);
++    }
++  }, []);
++
++  useEffect(() => {
++    load();
++  }, [load]);
++
++  if (loading) return <p className="text-sm text-muted">Cargando...</p>;
++
++  return (
++    <div>
++      <button onClick={() => setEditingMenu("new")} className="rounded-md bg-ember text-white px-5 py-2.5 text-sm font-medium mb-5">
++        Nuevo menú
++      </button>
++      {error && <p className="text-sm text-red-600 mb-4">{error}</p>}
++
++      <div className="space-y-4">
++        {menus.map((m) => (
++          <div key={m.id} className={`bg-paper-raised border border-line rounded-lg p-5 ${m.isActive ? "" : "opacity-60"}`}>
++            <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
++              <div>
++                <p className="font-display text-lg font-semibold">
++                  {m.name} {!m.isActive && <span className="text-xs text-muted font-sans">(inactivo)</span>}
++                </p>
++                <p className="text-xs text-muted">{m.category}</p>
++              </div>
++              <div className="text-right">
++                <p className="font-mono text-lg">{formatMxn(m.price)}</p>
++                <p className="text-xs text-muted">
++                  Costo base {formatMxn(m.baseCost)} · peor caso {formatMxn(m.worstCost)}
++                  {m.worstFoodCostPercent !== null && ` (${m.worstFoodCostPercent.toFixed(0)}% Food Cost)`}
++                </p>
++              </div>
++            </div>
++
++            {m.groups.length === 0 ? (
++              <p className="text-sm text-muted mb-3">Este menú todavía no tiene grupos de opciones.</p>
++            ) : (
++              <div className="space-y-2 mb-3">
++                {m.groups.map((g) => (
++                  <div key={g.id} className="text-sm">
++                    <span className="font-medium">{g.name}</span>
++                    <span className="text-muted">
++                      {" "}
++                      ({g.minSelect === g.maxSelect ? `elige ${g.maxSelect}` : `de ${g.minSelect} a ${g.maxSelect}`}):{" "}
++                    </span>
++                    {g.options.map((o, i) => (
++                      <span key={o.id}>
++                        {o.name}
++                        <span className="text-muted">{o.extraPrice > 0 ? ` +${formatMxn(o.extraPrice)}` : " (incluida)"}</span>
++                        {i < g.options.length - 1 ? ", " : ""}
++                      </span>
++                    ))}
++                  </div>
++                ))}
++              </div>
++            )}
++
++            <div className="flex gap-4 text-sm">
++              <button onClick={() => setEditingGroups(m)} className="text-ember underline">
++                Opciones y guarniciones
++              </button>
++              <button onClick={() => setEditingMenu(m)} className="text-ember underline">
++                Editar menú
++              </button>
++            </div>
++          </div>
++        ))}
++        {menus.length === 0 && (
++          <p className="text-sm text-muted">Todavía no hay menús. Crea el primero, por ejemplo una &quot;Comida corrida&quot;.</p>
++        )}
++      </div>
++
++      {editingMenu && (
++        <MenuModal
++          menu={editingMenu === "new" ? null : editingMenu}
++          categories={categories}
++          onClose={() => setEditingMenu(null)}
++          onSaved={() => {
++            setEditingMenu(null);
++            load();
++          }}
++        />
++      )}
++
++      {editingGroups && (
++        <GroupsModal
++          menu={editingGroups}
++          products={products}
++          onClose={() => setEditingGroups(null)}
++          onSaved={() => {
++            setEditingGroups(null);
++            load();
++          }}
++        />
++      )}
++    </div>
++  );
++}
++
++function MenuModal({
++  menu,
++  categories,
++  onClose,
++  onSaved,
++}: {
++  menu: Menu | null;
++  categories: Simple[];
++  onClose: () => void;
++  onSaved: () => void;
++}) {
++  const [name, setName] = useState(menu?.name ?? "");
++  const [categoryId, setCategoryId] = useState(menu?.categoryId ?? categories[0]?.id ?? "");
++  const [price, setPrice] = useState(menu ? String(menu.price) : "");
++  const [isActive, setIsActive] = useState(menu?.isActive ?? true);
++  const [saving, setSaving] = useState(false);
++  const [error, setError] = useState("");
++
++  async function save() {
++    setSaving(true);
++    setError("");
++    try {
++      const res = await fetch(menu ? `/api/menus/${menu.id}` : "/api/menus", {
++        method: menu ? "PUT" : "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ name, categoryId, price, isActive }),
++      });
++      const data = await res.json();
++      if (!res.ok) throw new Error(data.error ?? "No se pudo guardar el menú");
++      onSaved();
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "No se pudo guardar el menú");
++    } finally {
++      setSaving(false);
++    }
++  }
++
++  return (
++    <div className="fixed inset-0 bg-ink-950/60 flex items-center justify-center z-50 p-4">
++      <div className="bg-paper-raised rounded-lg w-full max-w-md p-6 space-y-4">
++        <p className="font-display text-xl font-semibold">{menu ? "Editar menú" : "Nuevo menú"}</p>
++        <div>
++          <label className="text-xs text-muted">Nombre</label>
++          <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} placeholder="Ej. Comida corrida" />
++        </div>
++        <div className="grid grid-cols-2 gap-3">
++          <div>
++            <label className="text-xs text-muted">Categoría</label>
++            <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className={inputCls}>
++              {categories.map((c) => (
++                <option key={c.id} value={c.id}>
++                  {c.name}
++                </option>
++              ))}
++            </select>
++          </div>
++          <div>
++            <label className="text-xs text-muted">Precio fijo</label>
++            <input type="number" min="0" step="0.01" value={price} onChange={(e) => setPrice(e.target.value)} className={inputCls} />
++          </div>
++        </div>
++        {menu && (
++          <label className="flex items-center gap-2 text-sm">
++            <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
++            Activo en el Punto de Venta
++          </label>
++        )}
++        {error && <p className="text-sm text-red-600">{error}</p>}
++        <div className="flex gap-3">
++          <button onClick={onClose} className="flex-1 rounded-md border border-line py-2.5 text-sm">
++            Cancelar
++          </button>
++          <button onClick={save} disabled={saving} className="flex-1 rounded-md bg-ember text-white py-2.5 text-sm font-medium disabled:opacity-50">
++            {saving ? "Guardando..." : "Guardar"}
++          </button>
++        </div>
++      </div>
++    </div>
++  );
++}
++
++function GroupsModal({
++  menu,
++  products,
++  onClose,
++  onSaved,
++}: {
++  menu: Menu;
++  products: Simple[];
++  onClose: () => void;
++  onSaved: () => void;
++}) {
++  const [groups, setGroups] = useState<GroupForm[]>(
++    menu.groups.map((g) => ({
++      name: g.name,
++      minSelect: String(g.minSelect),
++      maxSelect: String(g.maxSelect),
++      options: g.options.map((o) => ({ optionProductId: o.optionProductId, extraPrice: String(o.extraPrice) })),
++    }))
++  );
++  const [saving, setSaving] = useState(false);
++  const [error, setError] = useState("");
++
++  function updateGroup(gi: number, patch: Partial<GroupForm>) {
++    setGroups((prev) => prev.map((g, i) => (i === gi ? { ...g, ...patch } : g)));
++  }
++  function updateOption(gi: number, oi: number, patch: Partial<GroupForm["options"][number]>) {
++    setGroups((prev) =>
++      prev.map((g, i) => (i === gi ? { ...g, options: g.options.map((o, j) => (j === oi ? { ...o, ...patch } : o)) } : g))
++    );
++  }
++
++  async function save() {
++    setSaving(true);
++    setError("");
++    try {
++      const body = {
++        groups: groups.map((g) => ({
++          name: g.name,
++          minSelect: Number(g.minSelect),
++          maxSelect: Number(g.maxSelect),
++          options: g.options.filter((o) => o.optionProductId).map((o) => ({ optionProductId: o.optionProductId, extraPrice: Number(o.extraPrice || 0) })),
++        })),
++      };
++      const res = await fetch(`/api/menus/${menu.id}/groups`, {
++        method: "PUT",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify(body),
++      });
++      const data = await res.json();
++      if (!res.ok) throw new Error(data.error ?? "No se pudieron guardar las opciones");
++      onSaved();
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "No se pudieron guardar las opciones");
++    } finally {
++      setSaving(false);
++    }
++  }
++
++  return (
++    <div className="fixed inset-0 bg-ink-950/60 flex items-center justify-center z-50 p-4">
++      <div className="bg-paper-raised rounded-lg w-full max-w-2xl max-h-[90vh] flex flex-col">
++        <div className="px-6 py-4 border-b border-line">
++          <p className="font-display text-xl font-semibold">Opciones de: {menu.name}</p>
++          <p className="text-xs text-muted">
++            Cada grupo es algo que el cliente elige (guarnición, sopa, bebida). Cargo extra en 0 = incluida en {formatMxn(menu.price)}.
++          </p>
++        </div>
++
++        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
++          {groups.map((g, gi) => (
++            <div key={gi} className="border border-line rounded-md p-4 space-y-3">
++              <div className="flex items-end gap-2">
++                <div className="flex-1">
++                  <label className="text-xs text-muted">Grupo</label>
++                  <input value={g.name} onChange={(e) => updateGroup(gi, { name: e.target.value })} className={inputCls} placeholder="Ej. Guarnición" />
++                </div>
++                <div className="w-20">
++                  <label className="text-xs text-muted">Mín.</label>
++                  <input type="number" min="0" value={g.minSelect} onChange={(e) => updateGroup(gi, { minSelect: e.target.value })} className={inputCls} />
++                </div>
++                <div className="w-20">
++                  <label className="text-xs text-muted">Máx.</label>
++                  <input type="number" min="1" value={g.maxSelect} onChange={(e) => updateGroup(gi, { maxSelect: e.target.value })} className={inputCls} />
++                </div>
++                <button onClick={() => setGroups((prev) => prev.filter((_, i) => i !== gi))} className="text-red-600 text-sm underline pb-2">
++                  Quitar
++                </button>
++              </div>
++
++              {g.options.map((o, oi) => (
++                <div key={oi} className="flex items-center gap-2">
++                  <select value={o.optionProductId} onChange={(e) => updateOption(gi, oi, { optionProductId: e.target.value })} className={`${inputCls} flex-1`}>
++                    <option value="">Elige un producto...</option>
++                    {products.map((p) => (
++                      <option key={p.id} value={p.id}>
++                        {p.name}
++                      </option>
++                    ))}
++                  </select>
++                  <span className="text-xs text-muted">Extra $</span>
++                  <input
++                    type="number"
++                    min="0"
++                    step="0.01"
++                    value={o.extraPrice}
++                    onChange={(e) => updateOption(gi, oi, { extraPrice: e.target.value })}
++                    className={`${inputCls} w-24`}
++                  />
++                  <button
++                    onClick={() => updateGroup(gi, { options: g.options.filter((_, j) => j !== oi) })}
++                    className="text-red-600 text-lg leading-none px-1"
++                    aria-label="Quitar opción"
++                  >
++                    ×
++                  </button>
++                </div>
++              ))}
++              <button
++                onClick={() => updateGroup(gi, { options: [...g.options, { optionProductId: "", extraPrice: "0" }] })}
++                className="text-ember underline text-sm"
++              >
++                + Agregar opción
++              </button>
++            </div>
++          ))}
++
++          <button
++            onClick={() => setGroups((prev) => [...prev, { name: "", minSelect: "1", maxSelect: "1", options: [{ optionProductId: "", extraPrice: "0" }] }])}
++            className="rounded-md border border-line px-4 py-2 text-sm"
++          >
++            + Nuevo grupo
++          </button>
++        </div>
++
++        <div className="px-6 py-4 border-t border-line space-y-3">
++          {error && <p className="text-sm text-red-600">{error}</p>}
++          <div className="flex gap-3">
++            <button onClick={onClose} className="flex-1 rounded-md border border-line py-2.5 text-sm">
++              Cancelar
++            </button>
++            <button onClick={save} disabled={saving} className="flex-1 rounded-md bg-ember text-white py-2.5 text-sm font-medium disabled:opacity-50">
++              {saving ? "Guardando..." : "Guardar opciones"}
++            </button>
++          </div>
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/src/app/(company)/menus/page.tsx b/src/app/(company)/menus/page.tsx
+new file mode 100644
+index 0000000..81ad31d
+--- /dev/null
++++ b/src/app/(company)/menus/page.tsx
+@@ -0,0 +1,50 @@
++import { redirect } from "next/navigation";
++import { getServerSession } from "next-auth";
++import Link from "next/link";
++import { authOptions } from "@/lib/auth";
++import { prisma } from "@/lib/prisma";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { MenusClient } from "./menus-client";
++
++export default async function MenusPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.PRODUCTS_MANAGE)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++
++  const companyId = session.user.companyId;
++  if (!(await hasFeature(companyId, FEATURE_KEYS.MENUS_COMPLETOS))) {
++    return (
++      <div className="max-w-md mx-auto text-center py-20">
++        <p className="font-display text-2xl font-semibold mb-2">Función no incluida en tu plan</p>
++        <p className="text-muted text-sm mb-6">
++          Los menús completos no están activos para tu empresa. Contacta a soporte para agregarlos a tu plan.
++        </p>
++        <Link href="/products" className="inline-block rounded-md bg-ember text-white px-5 py-3 text-sm font-medium">
++          Ir a Productos
++        </Link>
++      </div>
++    );
++  }
++
++  const [categories, products] = await Promise.all([
++    prisma.category.findMany({ where: { companyId, isActive: true }, select: { id: true, name: true }, orderBy: { sortOrder: "asc" } }),
++    // Las opciones de un menú son productos normales (con su propia receta/costo), nunca otros menús.
++    prisma.product.findMany({ where: { companyId, isActive: true, isMenu: false }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
++  ]);
++
++  return (
++    <div>
++      <h1 className="font-display text-3xl font-semibold mb-1">Menús completos</h1>
++      <p className="text-muted text-sm mb-8">
++        Arma comidas con precio fijo: elige qué guarniciones, sopas o bebidas lleva cada una. Las opciones con cargo extra 0 van incluidas
++        en el precio; las demás suman al total al elegirlas.
++      </p>
++      <MenusClient categories={categories} products={products} />
++    </div>
++  );
++}
+diff --git a/src/app/(company)/recipes/page.tsx b/src/app/(company)/recipes/page.tsx
+new file mode 100644
+index 0000000..c84e73a
+--- /dev/null
++++ b/src/app/(company)/recipes/page.tsx
+@@ -0,0 +1,42 @@
++import { redirect } from "next/navigation";
++import { getServerSession } from "next-auth";
++import Link from "next/link";
++import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { RecipesClient } from "./recipes-client";
++
++export default async function RecipesPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.PRODUCTS_MANAGE)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++
++  if (!(await hasFeature(session.user.companyId, FEATURE_KEYS.COSTEO_RECETA))) {
++    return (
++      <div className="max-w-md mx-auto text-center py-20">
++        <p className="font-display text-2xl font-semibold mb-2">Función no incluida en tu plan</p>
++        <p className="text-muted text-sm mb-6">
++          El costeo por receta no está activo para tu empresa. Contacta a soporte para agregarlo a tu plan.
++        </p>
++        <Link href="/products" className="inline-block rounded-md bg-ember text-white px-5 py-3 text-sm font-medium">
++          Ir a Productos
++        </Link>
++      </div>
++    );
++  }
++
++  return (
++    <div>
++      <h1 className="font-display text-3xl font-semibold mb-1">Insumos y recetas</h1>
++      <p className="text-muted text-sm mb-8">
++        Da de alta tus insumos con su costo y arma la receta de cada platillo: Tappy calcula su costo, margen y Food Cost %, y
++        ese costo alimenta tus reportes y el dashboard.
++      </p>
++      <RecipesClient />
++    </div>
++  );
++}
+diff --git a/src/app/(company)/recipes/recipes-client.tsx b/src/app/(company)/recipes/recipes-client.tsx
+new file mode 100644
+index 0000000..391637e
+--- /dev/null
++++ b/src/app/(company)/recipes/recipes-client.tsx
+@@ -0,0 +1,479 @@
++"use client";
++
++import { useCallback, useEffect, useMemo, useState } from "react";
++import { formatMxn } from "@/lib/format";
++import { INGREDIENT_UNITS, effectiveUnitCost, recipeCost, foodCostPercent } from "@/lib/recipe-cost";
++
++type Ingredient = {
++  id: string;
++  name: string;
++  unit: string;
++  costPerUnit: string | number;
++  wastePercent: string | number;
++  isActive: boolean;
++  _count?: { recipeItems: number };
++};
++
++type CostingRow = {
++  id: string;
++  name: string;
++  category: string;
++  isMenu: boolean;
++  price: number;
++  cost: number | null;
++  hasRecipe: boolean;
++  margin: number | null;
++  foodCostPercent: number | null;
++};
++
++type RecipeLineForm = { ingredientId: string; quantity: string };
++
++const inputCls = "w-full rounded-md border border-line px-3 py-2 text-sm";
++
++function fcColor(pct: number | null): string {
++  if (pct === null) return "text-muted";
++  if (pct <= 35) return "text-sage";
++  if (pct <= 45) return "text-marigold";
++  return "text-red-600";
++}
++
++export function RecipesClient() {
++  const [tab, setTab] = useState<"costeo" | "insumos">("costeo");
++  const [ingredients, setIngredients] = useState<Ingredient[]>([]);
++  const [costing, setCosting] = useState<CostingRow[]>([]);
++  const [loading, setLoading] = useState(true);
++  const [error, setError] = useState("");
++  const [search, setSearch] = useState("");
++  const [editingIngredient, setEditingIngredient] = useState<Ingredient | "new" | null>(null);
++  const [recipeFor, setRecipeFor] = useState<CostingRow | null>(null);
++
++  const load = useCallback(async () => {
++    setError("");
++    try {
++      const [ing, cost] = await Promise.all([fetch("/api/ingredients"), fetch("/api/recipes/costing")]);
++      const ingData = await ing.json();
++      const costData = await cost.json();
++      if (!ing.ok) throw new Error(ingData.error ?? "No se pudieron cargar los insumos");
++      if (!cost.ok) throw new Error(costData.error ?? "No se pudo cargar el costeo");
++      setIngredients(ingData.ingredients);
++      setCosting(costData.products);
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "No se pudo cargar la información");
++    } finally {
++      setLoading(false);
++    }
++  }, []);
++
++  useEffect(() => {
++    load();
++  }, [load]);
++
++  const filtered = useMemo(
++    () => costing.filter((p) => p.name.toLowerCase().includes(search.trim().toLowerCase())),
++    [costing, search]
++  );
++
++  async function removeIngredient(ing: Ingredient) {
++    if (!confirm(`¿Eliminar "${ing.name}"?`)) return;
++    const res = await fetch(`/api/ingredients/${ing.id}`, { method: "DELETE" });
++    const data = await res.json();
++    if (!res.ok) {
++      setError(data.error ?? "No se pudo eliminar el insumo");
++      return;
++    }
++    if (data.deactivated) setError("Ese insumo ya está en recetas, así que se desactivó en lugar de borrarse.");
++    load();
++  }
++
++  if (loading) return <p className="text-sm text-muted">Cargando...</p>;
++
++  return (
++    <div>
++      <div className="flex gap-2 mb-5">
++        {(["costeo", "insumos"] as const).map((t) => (
++          <button
++            key={t}
++            onClick={() => setTab(t)}
++            className={`rounded-md px-5 py-2.5 text-sm font-medium ${tab === t ? "bg-ink-950 text-white" : "bg-white border border-line"}`}
++          >
++            {t === "costeo" ? "Costeo por platillo" : `Insumos (${ingredients.length})`}
++          </button>
++        ))}
++      </div>
++
++      {error && <p className="text-sm text-red-600 mb-4">{error}</p>}
++
++      {tab === "costeo" && (
++        <div>
++          <input
++            value={search}
++            onChange={(e) => setSearch(e.target.value)}
++            placeholder="Buscar platillo..."
++            className={`${inputCls} max-w-xs mb-4`}
++          />
++          <div className="bg-paper-raised border border-line rounded-lg overflow-x-auto">
++            <table className="w-full text-sm">
++              <thead>
++                <tr className="text-left text-muted border-b border-line">
++                  <th className="px-5 py-3 font-medium">Platillo</th>
++                  <th className="px-5 py-3 font-medium">Precio</th>
++                  <th className="px-5 py-3 font-medium">Costo</th>
++                  <th className="px-5 py-3 font-medium">Margen</th>
++                  <th className="px-5 py-3 font-medium">Food Cost %</th>
++                  <th className="px-5 py-3" />
++                </tr>
++              </thead>
++              <tbody>
++                {filtered.map((p) => (
++                  <tr key={p.id} className="border-b border-line last:border-0">
++                    <td className="px-5 py-3">
++                      <p className="font-medium">{p.name}</p>
++                      <p className="text-xs text-muted">
++                        {p.category}
++                        {p.isMenu && " · Menú"} · {p.hasRecipe ? "Con receta" : p.cost === null ? "Sin costo" : "Costo capturado a mano"}
++                      </p>
++                    </td>
++                    <td className="px-5 py-3 font-mono">{formatMxn(p.price)}</td>
++                    <td className="px-5 py-3 font-mono">{p.cost === null ? "—" : formatMxn(p.cost)}</td>
++                    <td className="px-5 py-3 font-mono">{p.margin === null ? "—" : formatMxn(p.margin)}</td>
++                    <td className={`px-5 py-3 font-mono ${fcColor(p.foodCostPercent)}`}>
++                      {p.foodCostPercent === null ? "—" : `${p.foodCostPercent.toFixed(1)}%`}
++                    </td>
++                    <td className="px-5 py-3 text-right">
++                      <button onClick={() => setRecipeFor(p)} className="text-ember underline text-sm">
++                        {p.hasRecipe ? "Editar receta" : "Armar receta"}
++                      </button>
++                    </td>
++                  </tr>
++                ))}
++                {filtered.length === 0 && (
++                  <tr>
++                    <td colSpan={6} className="px-5 py-8 text-center text-muted">
++                      No hay productos que coincidan.
++                    </td>
++                  </tr>
++                )}
++              </tbody>
++            </table>
++          </div>
++        </div>
++      )}
++
++      {tab === "insumos" && (
++        <div>
++          <button onClick={() => setEditingIngredient("new")} className="rounded-md bg-ember text-white px-5 py-2.5 text-sm font-medium mb-4">
++            Nuevo insumo
++          </button>
++          <div className="bg-paper-raised border border-line rounded-lg overflow-x-auto">
++            <table className="w-full text-sm">
++              <thead>
++                <tr className="text-left text-muted border-b border-line">
++                  <th className="px-5 py-3 font-medium">Insumo</th>
++                  <th className="px-5 py-3 font-medium">Costo por unidad</th>
++                  <th className="px-5 py-3 font-medium">Merma</th>
++                  <th className="px-5 py-3 font-medium">Costo real</th>
++                  <th className="px-5 py-3 font-medium">En recetas</th>
++                  <th className="px-5 py-3" />
++                </tr>
++              </thead>
++              <tbody>
++                {ingredients.map((i) => (
++                  <tr key={i.id} className={`border-b border-line last:border-0 ${i.isActive ? "" : "opacity-50"}`}>
++                    <td className="px-5 py-3 font-medium">
++                      {i.name}
++                      {!i.isActive && <span className="ml-2 text-xs text-muted">(inactivo)</span>}
++                    </td>
++                    <td className="px-5 py-3 font-mono">
++                      {formatMxn(Number(i.costPerUnit))} / {i.unit}
++                    </td>
++                    <td className="px-5 py-3 font-mono">{Number(i.wastePercent)}%</td>
++                    <td className="px-5 py-3 font-mono">
++                      {formatMxn(effectiveUnitCost(Number(i.costPerUnit), Number(i.wastePercent)))} / {i.unit}
++                    </td>
++                    <td className="px-5 py-3">{i._count?.recipeItems ?? 0}</td>
++                    <td className="px-5 py-3 text-right space-x-4">
++                      <button onClick={() => setEditingIngredient(i)} className="text-ember underline">
++                        Editar
++                      </button>
++                      <button onClick={() => removeIngredient(i)} className="text-red-600 underline">
++                        Eliminar
++                      </button>
++                    </td>
++                  </tr>
++                ))}
++                {ingredients.length === 0 && (
++                  <tr>
++                    <td colSpan={6} className="px-5 py-8 text-center text-muted">
++                      Todavía no hay insumos. Empieza con los principales (carne, tortilla, aceite...).
++                    </td>
++                  </tr>
++                )}
++              </tbody>
++            </table>
++          </div>
++          <p className="text-xs text-muted mt-3">
++            La merma es el % que se pierde al limpiar o cocinar el insumo; el costo real por unidad ya la incluye. Si cambias el costo
++            de un insumo, todas las recetas que lo usan se recalculan solas.
++          </p>
++        </div>
++      )}
++
++      {editingIngredient && (
++        <IngredientModal
++          ingredient={editingIngredient === "new" ? null : editingIngredient}
++          onClose={() => setEditingIngredient(null)}
++          onSaved={() => {
++            setEditingIngredient(null);
++            load();
++          }}
++        />
++      )}
++
++      {recipeFor && (
++        <RecipeModal
++          product={recipeFor}
++          ingredients={ingredients.filter((i) => i.isActive)}
++          onClose={() => setRecipeFor(null)}
++          onSaved={() => {
++            setRecipeFor(null);
++            load();
++          }}
++        />
++      )}
++    </div>
++  );
++}
++
++function IngredientModal({
++  ingredient,
++  onClose,
++  onSaved,
++}: {
++  ingredient: Ingredient | null;
++  onClose: () => void;
++  onSaved: () => void;
++}) {
++  const [name, setName] = useState(ingredient?.name ?? "");
++  const [unit, setUnit] = useState(ingredient?.unit ?? "kg");
++  const [costPerUnit, setCostPerUnit] = useState(ingredient ? String(Number(ingredient.costPerUnit)) : "");
++  const [wastePercent, setWastePercent] = useState(ingredient ? String(Number(ingredient.wastePercent)) : "0");
++  const [saving, setSaving] = useState(false);
++  const [error, setError] = useState("");
++
++  async function save() {
++    setSaving(true);
++    setError("");
++    try {
++      const res = await fetch(ingredient ? `/api/ingredients/${ingredient.id}` : "/api/ingredients", {
++        method: ingredient ? "PUT" : "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ name, unit, costPerUnit, wastePercent }),
++      });
++      const data = await res.json();
++      if (!res.ok) throw new Error(data.error ?? "No se pudo guardar el insumo");
++      onSaved();
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "No se pudo guardar el insumo");
++    } finally {
++      setSaving(false);
++    }
++  }
++
++  return (
++    <div className="fixed inset-0 bg-ink-950/60 flex items-center justify-center z-50 p-4">
++      <div className="bg-paper-raised rounded-lg w-full max-w-md p-6 space-y-4">
++        <p className="font-display text-xl font-semibold">{ingredient ? "Editar insumo" : "Nuevo insumo"}</p>
++        <div>
++          <label className="text-xs text-muted">Nombre</label>
++          <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} placeholder="Ej. Carne de res" />
++        </div>
++        <div className="grid grid-cols-2 gap-3">
++          <div>
++            <label className="text-xs text-muted">Unidad de compra</label>
++            <select value={unit} onChange={(e) => setUnit(e.target.value)} className={inputCls}>
++              {INGREDIENT_UNITS.map((u) => (
++                <option key={u} value={u}>
++                  {u}
++                </option>
++              ))}
++            </select>
++          </div>
++          <div>
++            <label className="text-xs text-muted">Costo por {unit}</label>
++            <input type="number" min="0" step="0.01" value={costPerUnit} onChange={(e) => setCostPerUnit(e.target.value)} className={inputCls} />
++          </div>
++        </div>
++        <div>
++          <label className="text-xs text-muted">Merma (%)</label>
++          <input type="number" min="0" max="95" step="0.5" value={wastePercent} onChange={(e) => setWastePercent(e.target.value)} className={inputCls} />
++        </div>
++        {error && <p className="text-sm text-red-600">{error}</p>}
++        <div className="flex gap-3">
++          <button onClick={onClose} className="flex-1 rounded-md border border-line py-2.5 text-sm">
++            Cancelar
++          </button>
++          <button onClick={save} disabled={saving} className="flex-1 rounded-md bg-ember text-white py-2.5 text-sm font-medium disabled:opacity-50">
++            {saving ? "Guardando..." : "Guardar"}
++          </button>
++        </div>
++      </div>
++    </div>
++  );
++}
++
++function RecipeModal({
++  product,
++  ingredients,
++  onClose,
++  onSaved,
++}: {
++  product: CostingRow;
++  ingredients: Ingredient[];
++  onClose: () => void;
++  onSaved: () => void;
++}) {
++  const [lines, setLines] = useState<RecipeLineForm[]>([]);
++  const [loading, setLoading] = useState(true);
++  const [saving, setSaving] = useState(false);
++  const [error, setError] = useState("");
++
++  useEffect(() => {
++    (async () => {
++      try {
++        const res = await fetch(`/api/products/${product.id}/recipe`);
++        const data = await res.json();
++        if (!res.ok) throw new Error(data.error ?? "No se pudo cargar la receta");
++        setLines(
++          (data.items as { ingredientId: string; quantity: string | number }[]).map((i) => ({
++            ingredientId: i.ingredientId,
++            quantity: String(Number(i.quantity)),
++          }))
++        );
++      } catch (err) {
++        setError(err instanceof Error ? err.message : "No se pudo cargar la receta");
++      } finally {
++        setLoading(false);
++      }
++    })();
++  }, [product.id]);
++
++  const byId = useMemo(() => new Map(ingredients.map((i) => [i.id, i])), [ingredients]);
++
++  const liveCost = recipeCost(
++    lines
++      .filter((l) => byId.has(l.ingredientId) && Number(l.quantity) > 0)
++      .map((l) => {
++        const ing = byId.get(l.ingredientId)!;
++        return { quantity: Number(l.quantity), costPerUnit: Number(ing.costPerUnit), wastePercent: Number(ing.wastePercent) };
++      })
++  );
++  const liveFoodCost = foodCostPercent(liveCost, product.price);
++
++  function update(index: number, patch: Partial<RecipeLineForm>) {
++    setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)));
++  }
++
++  async function save() {
++    setSaving(true);
++    setError("");
++    try {
++      const items = lines
++        .filter((l) => l.ingredientId)
++        .map((l) => ({ ingredientId: l.ingredientId, quantity: Number(l.quantity) }));
++      if (items.some((i) => !(i.quantity > 0))) throw new Error("Cada insumo necesita una cantidad mayor a 0");
++      const res = await fetch(`/api/products/${product.id}/recipe`, {
++        method: "PUT",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ items }),
++      });
++      const data = await res.json();
++      if (!res.ok) throw new Error(data.error ?? "No se pudo guardar la receta");
++      onSaved();
++    } catch (err) {
++      setError(err instanceof Error ? err.message : "No se pudo guardar la receta");
++    } finally {
++      setSaving(false);
++    }
++  }
++
++  const usedIds = new Set(lines.map((l) => l.ingredientId));
++
++  return (
++    <div className="fixed inset-0 bg-ink-950/60 flex items-center justify-center z-50 p-4">
++      <div className="bg-paper-raised rounded-lg w-full max-w-xl max-h-[90vh] flex flex-col">
++        <div className="px-6 py-4 border-b border-line">
++          <p className="font-display text-xl font-semibold">Receta: {product.name}</p>
++          <p className="text-xs text-muted">Cantidad de cada insumo que lleva UNA porción. Precio de venta: {formatMxn(product.price)}</p>
++        </div>
++
++        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
++          {loading ? (
++            <p className="text-sm text-muted">Cargando...</p>
++          ) : (
++            <>
++              {lines.map((l, idx) => {
++                const ing = byId.get(l.ingredientId);
++                return (
++                  <div key={idx} className="flex items-center gap-2">
++                    <select value={l.ingredientId} onChange={(e) => update(idx, { ingredientId: e.target.value })} className={`${inputCls} flex-1`}>
++                      <option value="">Elige un insumo...</option>
++                      {ingredients.map((i) => (
++                        <option key={i.id} value={i.id} disabled={usedIds.has(i.id) && i.id !== l.ingredientId}>
++                          {i.name}
++                        </option>
++                      ))}
++                    </select>
++                    <input
++                      type="number"
++                      min="0"
++                      step="0.001"
++                      value={l.quantity}
++                      onChange={(e) => update(idx, { quantity: e.target.value })}
++                      className={`${inputCls} w-24`}
++                      placeholder="Cant."
++                    />
++                    <span className="text-xs text-muted w-8">{ing?.unit ?? ""}</span>
++                    <button onClick={() => setLines((prev) => prev.filter((_, i) => i !== idx))} className="text-red-600 text-lg leading-none px-1" aria-label="Quitar">
++                      ×
++                    </button>
++                  </div>
++                );
++              })}
++              <button onClick={() => setLines((prev) => [...prev, { ingredientId: "", quantity: "" }])} className="text-ember underline text-sm">
++                + Agregar insumo
++              </button>
++              {ingredients.length === 0 && (
++                <p className="text-xs text-muted">Primero da de alta tus insumos en la pestaña &quot;Insumos&quot;.</p>
++              )}
++            </>
++          )}
++        </div>
++
++        <div className="px-6 py-4 border-t border-line space-y-3">
++          <div className="flex justify-between text-sm">
++            <span className="text-muted">Costo por porción</span>
++            <span className="font-mono font-medium">{lines.length === 0 ? "—" : formatMxn(liveCost)}</span>
++          </div>
++          <div className="flex justify-between text-sm">
++            <span className="text-muted">Food Cost %</span>
++            <span className={`font-mono font-medium ${fcColor(lines.length === 0 ? null : liveFoodCost)}`}>
++              {lines.length === 0 || liveFoodCost === null ? "—" : `${liveFoodCost.toFixed(1)}%`}
++            </span>
++          </div>
++          {lines.length === 0 && !loading && (
++            <p className="text-xs text-muted">Sin insumos, el producto conserva el costo que ya tenía capturado.</p>
++          )}
++          {error && <p className="text-sm text-red-600">{error}</p>}
++          <div className="flex gap-3">
++            <button onClick={onClose} className="flex-1 rounded-md border border-line py-2.5 text-sm">
++              Cancelar
++            </button>
++            <button onClick={save} disabled={saving || loading} className="flex-1 rounded-md bg-ember text-white py-2.5 text-sm font-medium disabled:opacity-50">
++              {saving ? "Guardando..." : "Guardar receta"}
++            </button>
++          </div>
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/src/app/(company)/tables/tables-client.tsx b/src/app/(company)/tables/tables-client.tsx
+index 1e07f53..cb9ffa7 100644
+--- a/src/app/(company)/tables/tables-client.tsx
++++ b/src/app/(company)/tables/tables-client.tsx
+@@ -8,7 +8,7 @@ import { PosLoyaltyPanel, type LoyaltySelection } from "@/components/loyalty/pos
+ 
+ type TableStatus = "LIBRE" | "OCUPADA" | "CUENTA" | "LIMPIEZA";
+ type TableRow = { id: string; name: string; capacity: number | null; status: TableStatus };
+-type OrderItemRow = { id: string; quantity: number; lineTotal: string; product: { name: string } };
++type OrderItemRow = { id: string; quantity: number; lineTotal: string; product: { name: string }; menuChoices?: { id: string; name: string }[] };
+ type OpenOrder = { id: string; subtotal: string; total: string; items: OrderItemRow[] };
+ 
+ const STATUS_LABEL: Record<TableStatus, string> = {
+@@ -214,6 +214,9 @@ export function TablesClient({
+                   <div key={item.id} className="flex justify-between text-sm py-1 border-b border-line last:border-0">
+                     <span>
+                       {item.quantity}x {item.product.name}
++                      {item.menuChoices && item.menuChoices.length > 0 && (
++                        <span className="block text-xs text-muted">{item.menuChoices.map((c) => c.name).join(" · ")}</span>
++                      )}
+                     </span>
+                     <span>${Number(item.lineTotal).toFixed(2)}</span>
+                   </div>
+diff --git a/src/app/api/ingredients/[id]/route.ts b/src/app/api/ingredients/[id]/route.ts
+new file mode 100644
+index 0000000..4ae644a
+--- /dev/null
++++ b/src/app/api/ingredients/[id]/route.ts
+@@ -0,0 +1,32 @@
++import { NextResponse } from "next/server";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { requireCatalogManage, errorResponse } from "@/lib/manage-guard";
++import { recipesService, ingredientSchema } from "@/modules/recipes/service";
++
++const LABEL = "Costeo por receta";
++
++export async function PUT(req: Request, { params }: { params: { id: string } }) {
++  const guard = await requireCatalogManage(FEATURE_KEYS.COSTEO_RECETA, LABEL);
++  if (!guard.ok) return guard.response;
++
++  const parsed = ingredientSchema.safeParse(await req.json());
++  if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++
++  try {
++    const ingredient = await recipesService.updateIngredient(guard.companyId, params.id, parsed.data, guard.ctx.userId);
++    return NextResponse.json({ ingredient });
++  } catch (err) {
++    return errorResponse(err, "No se pudo actualizar el insumo");
++  }
++}
++
++export async function DELETE(_req: Request, { params }: { params: { id: string } }) {
++  const guard = await requireCatalogManage(FEATURE_KEYS.COSTEO_RECETA, LABEL);
++  if (!guard.ok) return guard.response;
++  try {
++    const result = await recipesService.deleteIngredient(guard.companyId, params.id);
++    return NextResponse.json(result);
++  } catch (err) {
++    return errorResponse(err, "No se pudo eliminar el insumo");
++  }
++}
+diff --git a/src/app/api/ingredients/route.ts b/src/app/api/ingredients/route.ts
+new file mode 100644
+index 0000000..bff2d19
+--- /dev/null
++++ b/src/app/api/ingredients/route.ts
+@@ -0,0 +1,28 @@
++import { NextResponse } from "next/server";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { requireCatalogManage, errorResponse } from "@/lib/manage-guard";
++import { recipesService, ingredientSchema } from "@/modules/recipes/service";
++
++const LABEL = "Costeo por receta";
++
++export async function GET() {
++  const guard = await requireCatalogManage(FEATURE_KEYS.COSTEO_RECETA, LABEL);
++  if (!guard.ok) return guard.response;
++  const ingredients = await recipesService.listIngredients(guard.companyId);
++  return NextResponse.json({ ingredients });
++}
++
++export async function POST(req: Request) {
++  const guard = await requireCatalogManage(FEATURE_KEYS.COSTEO_RECETA, LABEL);
++  if (!guard.ok) return guard.response;
++
++  const parsed = ingredientSchema.safeParse(await req.json());
++  if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++
++  try {
++    const ingredient = await recipesService.createIngredient(guard.companyId, parsed.data);
++    return NextResponse.json({ ingredient }, { status: 201 });
++  } catch (err) {
++    return errorResponse(err, "No se pudo crear el insumo");
++  }
++}
+diff --git a/src/app/api/menus/[id]/groups/route.ts b/src/app/api/menus/[id]/groups/route.ts
+new file mode 100644
+index 0000000..5b0d77c
+--- /dev/null
++++ b/src/app/api/menus/[id]/groups/route.ts
+@@ -0,0 +1,19 @@
++import { NextResponse } from "next/server";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { requireCatalogManage, errorResponse } from "@/lib/manage-guard";
++import { menusService, menuGroupsSchema } from "@/modules/menus/service";
++
++export async function PUT(req: Request, { params }: { params: { id: string } }) {
++  const guard = await requireCatalogManage(FEATURE_KEYS.MENUS_COMPLETOS, "Menús completos");
++  if (!guard.ok) return guard.response;
++
++  const parsed = menuGroupsSchema.safeParse(await req.json());
++  if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++
++  try {
++    const menu = await menusService.setGroups(guard.companyId, params.id, parsed.data);
++    return NextResponse.json({ menu });
++  } catch (err) {
++    return errorResponse(err, "No se pudieron guardar los grupos del menú");
++  }
++}
+diff --git a/src/app/api/menus/[id]/route.ts b/src/app/api/menus/[id]/route.ts
+new file mode 100644
+index 0000000..8c548f0
+--- /dev/null
++++ b/src/app/api/menus/[id]/route.ts
+@@ -0,0 +1,19 @@
++import { NextResponse } from "next/server";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { requireCatalogManage, errorResponse } from "@/lib/manage-guard";
++import { menusService, menuSchema } from "@/modules/menus/service";
++
++export async function PUT(req: Request, { params }: { params: { id: string } }) {
++  const guard = await requireCatalogManage(FEATURE_KEYS.MENUS_COMPLETOS, "Menús completos");
++  if (!guard.ok) return guard.response;
++
++  const parsed = menuSchema.safeParse(await req.json());
++  if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++
++  try {
++    const menu = await menusService.update(guard.companyId, params.id, parsed.data);
++    return NextResponse.json({ menu });
++  } catch (err) {
++    return errorResponse(err, "No se pudo actualizar el menú");
++  }
++}
+diff --git a/src/app/api/menus/route.ts b/src/app/api/menus/route.ts
+new file mode 100644
+index 0000000..05ec53c
+--- /dev/null
++++ b/src/app/api/menus/route.ts
+@@ -0,0 +1,27 @@
++import { NextResponse } from "next/server";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { requireCatalogManage, errorResponse } from "@/lib/manage-guard";
++import { menusService, menuSchema } from "@/modules/menus/service";
++
++const LABEL = "Menús completos";
++
++export async function GET() {
++  const guard = await requireCatalogManage(FEATURE_KEYS.MENUS_COMPLETOS, LABEL);
++  if (!guard.ok) return guard.response;
++  return NextResponse.json({ menus: await menusService.list(guard.companyId) });
++}
++
++export async function POST(req: Request) {
++  const guard = await requireCatalogManage(FEATURE_KEYS.MENUS_COMPLETOS, LABEL);
++  if (!guard.ok) return guard.response;
++
++  const parsed = menuSchema.safeParse(await req.json());
++  if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++
++  try {
++    const menu = await menusService.create(guard.companyId, parsed.data);
++    return NextResponse.json({ menu }, { status: 201 });
++  } catch (err) {
++    return errorResponse(err, "No se pudo crear el menú");
++  }
++}
+diff --git a/src/app/api/products/[id]/recipe/route.ts b/src/app/api/products/[id]/recipe/route.ts
+new file mode 100644
+index 0000000..4d0888b
+--- /dev/null
++++ b/src/app/api/products/[id]/recipe/route.ts
+@@ -0,0 +1,30 @@
++import { NextResponse } from "next/server";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { requireCatalogManage, errorResponse } from "@/lib/manage-guard";
++import { recipesService, recipeSchema } from "@/modules/recipes/service";
++
++const LABEL = "Costeo por receta";
++
++export async function GET(_req: Request, { params }: { params: { id: string } }) {
++  const guard = await requireCatalogManage(FEATURE_KEYS.COSTEO_RECETA, LABEL);
++  if (!guard.ok) return guard.response;
++  try {
++    return NextResponse.json(await recipesService.getRecipe(guard.companyId, params.id));
++  } catch (err) {
++    return errorResponse(err, "No se pudo cargar la receta");
++  }
++}
++
++export async function PUT(req: Request, { params }: { params: { id: string } }) {
++  const guard = await requireCatalogManage(FEATURE_KEYS.COSTEO_RECETA, LABEL);
++  if (!guard.ok) return guard.response;
++
++  const parsed = recipeSchema.safeParse(await req.json());
++  if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0].message }, { status: 400 });
++
++  try {
++    return NextResponse.json(await recipesService.setRecipe(guard.companyId, params.id, parsed.data, guard.ctx.userId));
++  } catch (err) {
++    return errorResponse(err, "No se pudo guardar la receta");
++  }
++}
+diff --git a/src/app/api/recipes/costing/route.ts b/src/app/api/recipes/costing/route.ts
+new file mode 100644
+index 0000000..9b478a9
+--- /dev/null
++++ b/src/app/api/recipes/costing/route.ts
+@@ -0,0 +1,10 @@
++import { NextResponse } from "next/server";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { requireCatalogManage } from "@/lib/manage-guard";
++import { recipesService } from "@/modules/recipes/service";
++
++export async function GET() {
++  const guard = await requireCatalogManage(FEATURE_KEYS.COSTEO_RECETA, "Costeo por receta");
++  if (!guard.ok) return guard.response;
++  return NextResponse.json({ products: await recipesService.costingReport(guard.companyId) });
++}
+diff --git a/src/app/kitchen/kitchen-client.tsx b/src/app/kitchen/kitchen-client.tsx
+index 0124b15..f3d731b 100644
+--- a/src/app/kitchen/kitchen-client.tsx
++++ b/src/app/kitchen/kitchen-client.tsx
+@@ -3,7 +3,7 @@
+ import { useEffect, useState } from "react";
+ import Link from "next/link";
+ 
+-type Item = { id: string; quantity: number; product: { name: string } };
++type Item = { id: string; quantity: number; product: { name: string }; menuChoices?: { id: string; name: string }[] };
+ // Un "ticket" es una RONDA de una orden (no la orden completa) — así una
+ // mesa con cuenta abierta puede tener varios tickets activos a la vez, cada
+ // uno con su propio avance, sin que uno reviva a los demás.
+@@ -110,6 +110,13 @@ export function KitchenClient() {
+                           {ticket.items.map((item) => (
+                             <li key={item.id} className="text-sm text-white/90">
+                               <span className="font-mono text-marigold">{item.quantity}x</span> {item.product.name}
++                              {item.menuChoices && item.menuChoices.length > 0 && (
++                                <ul className="ml-6 text-xs text-white/60">
++                                  {item.menuChoices.map((c) => (
++                                    <li key={c.id}>+ {c.name}</li>
++                                  ))}
++                                </ul>
++                              )}
+                             </li>
+                           ))}
+                         </ul>
+diff --git a/src/app/pos/page.tsx b/src/app/pos/page.tsx
+index 4bf7e60..5c382ba 100644
+--- a/src/app/pos/page.tsx
++++ b/src/app/pos/page.tsx
+@@ -9,6 +9,7 @@ import { cashService } from "@/modules/cash/service";
+ import { hasFeature, requirePosAccess } from "@/lib/feature-gating";
+ import { FEATURE_KEYS } from "@/lib/plan-features";
+ import { tablesService } from "@/modules/tables/service";
++import { menusService } from "@/modules/menus/service";
+ import { mercadoPagoService } from "@/modules/mercadoPago/service";
+ import { requireBillingAccess } from "@/lib/billing-gate";
+ import { PosClient } from "./pos-client";
+@@ -48,7 +49,12 @@ export default async function PosPage() {
+     productsService.list(session.user.companyId),
+   ]);
+ 
+-  const activeProducts = products.filter((p: (typeof products)[number]) => p.isActive);
++  // Menús completos: solo se venden si el plan los incluye; si no, no aparecen en el POS.
++  const menusEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.MENUS_COMPLETOS);
++  const menus = menusEnabled ? await menusService.listForPos(session.user.companyId) : [];
++  const activeProducts = products.filter(
++    (p: (typeof products)[number]) => p.isActive && (menusEnabled || !p.isMenu)
++  );
+ 
+   const tablesEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.GESTION_MESAS);
+   const tables = tablesEnabled && branchId ? await tablesService.list(session.user.companyId, branchId) : [];
+@@ -76,6 +82,7 @@ export default async function PosPage() {
+       loyaltyEnabled={loyaltyEnabled}
+       categories={JSON.parse(JSON.stringify(categories.filter((c: (typeof categories)[number]) => c.isActive)))}
+       products={JSON.parse(JSON.stringify(activeProducts))}
++      menus={JSON.parse(JSON.stringify(menus))}
+       tables={JSON.parse(JSON.stringify(tables))}
+       mercadoPagoEnabled={!!mpAccount}
+       terminalLinked={terminalLinked}
+diff --git a/src/app/pos/pos-client.tsx b/src/app/pos/pos-client.tsx
+index 38b8b71..5d3bc69 100644
+--- a/src/app/pos/pos-client.tsx
++++ b/src/app/pos/pos-client.tsx
+@@ -19,8 +19,20 @@ type LoyaltyResult = {
+ };
+ 
+ type Category = { id: string; name: string };
+-type Product = { id: string; name: string; price: string; categoryId: string; imageUrl?: string | null };
+-type CartLine = { product: Product; quantity: number };
++type Product = { id: string; name: string; price: string; categoryId: string; imageUrl?: string | null; isMenu?: boolean };
++// Menús completos: grupos de opciones (guarnición, bebida...). extraPrice 0 = incluida en el precio fijo.
++type MenuChoiceOption = { id: string; name: string; extraPrice: number };
++type MenuConfig = {
++  id: string; // = id del producto-menú
++  groups: { id: string; name: string; minSelect: number; maxSelect: number; options: MenuChoiceOption[] }[];
++};
++// lineId: un producto normal se agrupa por producto; un menú, por producto + elecciones (dos comidas
++// con guarniciones distintas son renglones distintos). unitPrice ya incluye el cargo extra elegido.
++type CartLine = { lineId: string; product: Product; quantity: number; unitPrice: number; choices: MenuChoiceOption[] };
++
++function lineLabel(l: CartLine): string {
++  return l.choices.length > 0 ? `${l.product.name} (${l.choices.map((c) => c.name).join(", ")})` : l.product.name;
++}
+ type TableOption = { id: string; name: string; status: string };
+ 
+ const PAYMENT_METHODS: { value: "CASH" | "CARD" | "TRANSFER" | "OTHER"; label: string }[] = [
+@@ -34,6 +46,7 @@ export function PosClient(props: {
+   loyaltyEnabled: boolean;
+   categories: Category[];
+   products: Product[];
++  menus: MenuConfig[];
+   tables: TableOption[];
+   mercadoPagoEnabled: boolean;
+   terminalLinked: boolean;
+@@ -50,6 +63,7 @@ function PosClientInner({
+   loyaltyEnabled,
+   categories,
+   products,
++  menus,
+   tables,
+   mercadoPagoEnabled,
+   terminalLinked,
+@@ -58,6 +72,7 @@ function PosClientInner({
+   loyaltyEnabled: boolean;
+   categories: Category[];
+   products: Product[];
++  menus: MenuConfig[];
+   tables: TableOption[];
+   mercadoPagoEnabled: boolean;
+   terminalLinked: boolean;
+@@ -66,6 +81,8 @@ function PosClientInner({
+   const { showProductImages } = useBranding();
+   const [activeCategory, setActiveCategory] = useState<string>(categories[0]?.id ?? "");
+   const [cart, setCart] = useState<CartLine[]>([]);
++  // Menú completo que se está armando (el cajero elige guarniciones antes de agregarlo al carrito).
++  const [pickingMenu, setPickingMenu] = useState<{ product: Product; config: MenuConfig } | null>(null);
+   const [discount, setDiscount] = useState(0);
+   const [checkoutOpen, setCheckoutOpen] = useState(false);
+   // Cliente frecuente identificado en esta venta (y si canjea su descuento)
+@@ -141,7 +158,7 @@ function PosClientInner({
+       const res = await fetch(`/api/orders/${openOrderId}/items`, {
+         method: "POST",
+         headers: { "Content-Type": "application/json" },
+-        body: JSON.stringify({ items: cart.map((l) => ({ productId: l.product.id, quantity: l.quantity })) }),
++        body: JSON.stringify({ items: cart.map((l) => ({ productId: l.product.id, quantity: l.quantity, choices: l.choices.map((c) => c.id) })) }),
+       });
+       const data = await res.json();
+       if (!res.ok) throw new Error(data.error ?? "No se pudo mandar la ronda a cocina");
+@@ -162,7 +179,7 @@ function PosClientInner({
+     [products, activeCategory]
+   );
+ 
+-  const subtotal = cart.reduce((sum, line) => sum + Number(line.product.price) * line.quantity, 0);
++  const subtotal = cart.reduce((sum, line) => sum + line.unitPrice * line.quantity, 0);
+   // Promociones primero (en cuentas de mesa se aplican al cerrar la cuenta, no aquí).
+   const promo = useMemo(
+     () =>
+@@ -172,7 +189,7 @@ function PosClientInner({
+             cart.map((l) => ({
+               productId: l.product.id,
+               categoryId: l.product.categoryId,
+-              unitPrice: Number(l.product.price),
++              unitPrice: l.unitPrice,
+               quantity: l.quantity,
+             })),
+             coupon ? [...promoRules, coupon] : promoRules,
+@@ -189,20 +206,33 @@ function PosClientInner({
+   const safeDiscount = promo.discount + (loyalty?.redeem ? loyaltyDiscount : manualDiscount);
+   const total = subtotal - safeDiscount;
+ 
+-  function addToCart(product: Product) {
++  function addLine(product: Product, choices: MenuChoiceOption[]) {
++    const lineId = choices.length > 0 ? `${product.id}:${choices.map((c) => c.id).sort().join(",")}` : product.id;
++    const unitPrice = Number(product.price) + choices.reduce((sum, c) => sum + c.extraPrice, 0);
+     setCart((prev) => {
+-      const existing = prev.find((l) => l.product.id === product.id);
++      const existing = prev.find((l) => l.lineId === lineId);
+       if (existing) {
+-        return prev.map((l) => (l.product.id === product.id ? { ...l, quantity: l.quantity + 1 } : l));
++        return prev.map((l) => (l.lineId === lineId ? { ...l, quantity: l.quantity + 1 } : l));
+       }
+-      return [...prev, { product, quantity: 1 }];
++      return [...prev, { lineId, product, quantity: 1, unitPrice, choices }];
+     });
+   }
+ 
+-  function changeQuantity(productId: string, delta: number) {
++  function addToCart(product: Product) {
++    if (product.isMenu) {
++      const config = menus.find((m) => m.id === product.id);
++      if (config && config.groups.length > 0) {
++        setPickingMenu({ product, config });
++        return;
++      }
++    }
++    addLine(product, []);
++  }
++
++  function changeQuantity(lineId: string, delta: number) {
+     setCart((prev) =>
+       prev
+-        .map((l) => (l.product.id === productId ? { ...l, quantity: l.quantity + delta } : l))
++        .map((l) => (l.lineId === lineId ? { ...l, quantity: l.quantity + delta } : l))
+         .filter((l) => l.quantity > 0)
+     );
+   }
+@@ -280,7 +310,10 @@ function PosClientInner({
+                     ))}
+                   <div className="p-4">
+                     <p className="font-medium mb-1">{p.name}</p>
+-                    <p className="font-mono text-sm text-muted">{formatMxn(p.price)}</p>
++                    <p className="font-mono text-sm text-muted">
++                      {formatMxn(p.price)}
++                      {p.isMenu && <span className="ml-2 font-sans text-xs bg-ember/15 text-ember-dark px-1.5 py-0.5 rounded">Menú</span>}
++                    </p>
+                   </div>
+                 </button>
+               ))}
+@@ -303,14 +336,19 @@ function PosClientInner({
+             ) : (
+               <ul className="space-y-3">
+                 {cart.map((line) => (
+-                  <li key={line.product.id} className="flex items-center justify-between gap-2">
++                  <li key={line.lineId} className="flex items-center justify-between gap-2">
+                     <div className="min-w-0">
+                       <p className="text-sm font-medium truncate">{line.product.name}</p>
+-                      <p className="text-xs text-muted font-mono">{formatMxn(line.product.price)} c/u</p>
++                      {line.choices.length > 0 && (
++                        <p className="text-xs text-muted">
++                          {line.choices.map((c) => (c.extraPrice > 0 ? `${c.name} (+${formatMxn(c.extraPrice)})` : c.name)).join(" · ")}
++                        </p>
++                      )}
++                      <p className="text-xs text-muted font-mono">{formatMxn(line.unitPrice)} c/u</p>
+                     </div>
+                     <div className="flex items-center gap-2 shrink-0">
+                       <button
+-                        onClick={() => changeQuantity(line.product.id, -1)}
++                        onClick={() => changeQuantity(line.lineId, -1)}
+                         className="w-8 h-8 rounded-md border border-line text-lg leading-none"
+                         aria-label="Restar"
+                       >
+@@ -318,7 +356,7 @@ function PosClientInner({
+                       </button>
+                       <span className="w-5 text-center font-mono text-sm">{line.quantity}</span>
+                       <button
+-                        onClick={() => changeQuantity(line.product.id, 1)}
++                        onClick={() => changeQuantity(line.lineId, 1)}
+                         className="w-8 h-8 rounded-md border border-line text-lg leading-none"
+                         aria-label="Sumar"
+                       >
+@@ -447,6 +485,118 @@ function PosClientInner({
+           onDone={resetSale}
+         />
+       )}
++
++      {pickingMenu && (
++        <MenuPickerModal
++          product={pickingMenu.product}
++          config={pickingMenu.config}
++          onClose={() => setPickingMenu(null)}
++          onConfirm={(choices) => {
++            addLine(pickingMenu.product, choices);
++            setPickingMenu(null);
++          }}
++        />
++      )}
++    </div>
++  );
++}
++
++/** Selector de un menú completo: el cajero elige guarniciones/bebida; las de cargo extra suman al precio. */
++function MenuPickerModal({
++  product,
++  config,
++  onClose,
++  onConfirm,
++}: {
++  product: Product;
++  config: MenuConfig;
++  onClose: () => void;
++  onConfirm: (choices: MenuChoiceOption[]) => void;
++}) {
++  const [selected, setSelected] = useState<Record<string, string[]>>({}); // groupId -> ids de opción
++
++  function toggle(groupId: string, optionId: string, maxSelect: number) {
++    setSelected((prev) => {
++      const current = prev[groupId] ?? [];
++      if (current.includes(optionId)) return { ...prev, [groupId]: current.filter((id) => id !== optionId) };
++      // Con máximo 1 funciona como botón de radio: elegir otra opción reemplaza la anterior.
++      if (maxSelect === 1) return { ...prev, [groupId]: [optionId] };
++      if (current.length >= maxSelect) return prev;
++      return { ...prev, [groupId]: [...current, optionId] };
++    });
++  }
++
++  const choices: MenuChoiceOption[] = config.groups.flatMap((g) =>
++    (selected[g.id] ?? []).map((id) => g.options.find((o) => o.id === id)!).filter(Boolean)
++  );
++  const missing = config.groups.find((g) => (selected[g.id]?.length ?? 0) < g.minSelect);
++  const extra = choices.reduce((sum, c) => sum + c.extraPrice, 0);
++  const price = Number(product.price) + extra;
++
++  return (
++    <div className="fixed inset-0 bg-ink-950/60 flex items-center justify-center z-50 p-4">
++      <div className="bg-paper-raised rounded-lg w-full max-w-md max-h-[90vh] flex flex-col">
++        <div className="px-6 py-4 border-b border-line">
++          <p className="font-display text-xl font-semibold">{product.name}</p>
++          <p className="text-xs text-muted">Elige lo que lleva el menú</p>
++        </div>
++
++        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
++          {config.groups.map((g) => {
++            const count = selected[g.id]?.length ?? 0;
++            return (
++              <div key={g.id}>
++                <div className="flex items-baseline justify-between mb-2">
++                  <p className="text-sm font-medium">{g.name}</p>
++                  <p className="text-xs text-muted">
++                    {g.minSelect === g.maxSelect
++                      ? `Elige ${g.maxSelect}`
++                      : g.minSelect === 0
++                        ? `Hasta ${g.maxSelect}`
++                        : `Elige de ${g.minSelect} a ${g.maxSelect}`}{" "}
++                    · {count} elegida{count === 1 ? "" : "s"}
++                  </p>
++                </div>
++                <div className="flex flex-wrap gap-2">
++                  {g.options.map((o) => {
++                    const on = selected[g.id]?.includes(o.id) ?? false;
++                    return (
++                      <button
++                        key={o.id}
++                        type="button"
++                        onClick={() => toggle(g.id, o.id, g.maxSelect)}
++                        className={`rounded-md px-4 py-2.5 text-sm border transition-colors ${
++                          on ? "bg-ink-950 text-white border-ink-950" : "bg-white border-line text-ink"
++                        }`}
++                      >
++                        {o.name}
++                        {o.extraPrice > 0 && <span className="ml-1.5 font-mono text-xs opacity-80">+{formatMxn(o.extraPrice)}</span>}
++                      </button>
++                    );
++                  })}
++                </div>
++              </div>
++            );
++          })}
++        </div>
++
++        <div className="px-6 py-4 border-t border-line">
++          {missing && <p className="text-xs text-muted mb-2">Falta elegir en &quot;{missing.name}&quot;.</p>}
++          <div className="flex gap-3">
++            <button type="button" onClick={onClose} className="flex-1 rounded-md border border-line py-3 text-sm font-medium">
++              Cancelar
++            </button>
++            <button
++              type="button"
++              disabled={!!missing}
++              onClick={() => onConfirm(choices)}
++              className="flex-1 rounded-md bg-ember text-white py-3 text-sm font-medium disabled:opacity-40"
++            >
++              Agregar · {formatMxn(price)}
++            </button>
++          </div>
++        </div>
++      </div>
+     </div>
+   );
+ }
+@@ -540,6 +690,7 @@ function CheckoutModal({
+           items: cart.map((l) => ({
+             productId: l.product.id,
+             quantity: l.quantity,
++            choices: l.choices.map((c) => c.id),
+           })),
+           discount: manualDiscount,
+           couponCode: couponCode || undefined,
+@@ -599,8 +750,8 @@ function CheckoutModal({
+         orderNumber: data.order.orderNumber,
+         items: cart.map((l) => ({
+           quantity: l.quantity,
+-          name: l.product.name,
+-          unitPrice: Number(l.product.price),
++          name: lineLabel(l),
++          unitPrice: l.unitPrice,
+         })),
+         subtotal,
+         discount,
+@@ -633,7 +784,7 @@ function CheckoutModal({
+         setCompletedOrder({
+           orderId: pendingMpCheckout.orderId,
+           orderNumber: pendingMpCheckout.orderNumber,
+-          items: cart.map((l) => ({ quantity: l.quantity, name: l.product.name, unitPrice: Number(l.product.price) })),
++          items: cart.map((l) => ({ quantity: l.quantity, name: lineLabel(l), unitPrice: l.unitPrice })),
+           subtotal,
+           discount,
+           total,
+@@ -670,7 +821,7 @@ function CheckoutModal({
+         setCompletedOrder({
+           orderId: pendingPointCharge.orderId,
+           orderNumber: pendingPointCharge.orderNumber,
+-          items: cart.map((l) => ({ quantity: l.quantity, name: l.product.name, unitPrice: Number(l.product.price) })),
++          items: cart.map((l) => ({ quantity: l.quantity, name: lineLabel(l), unitPrice: l.unitPrice })),
+           subtotal,
+           discount,
+           total,
+diff --git a/src/lib/manage-guard.ts b/src/lib/manage-guard.ts
+new file mode 100644
+index 0000000..f6757cc
+--- /dev/null
++++ b/src/lib/manage-guard.ts
+@@ -0,0 +1,30 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, requireCompanyId, type TenantContext } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++
++/**
++ * Candado común de las rutas de catálogo con feature de plan (costeo por receta, menús completos):
++ * quien administra productos Y la empresa tiene la feature en su plan. Devuelve la respuesta de
++ * error lista para regresar, o el contexto si todo está bien.
++ */
++export async function requireCatalogManage(
++  featureKey: string,
++  featureLabel: string
++): Promise<{ ok: true; ctx: TenantContext; companyId: string } | { ok: false; response: NextResponse }> {
++  const ctx = await getTenantContext();
++  const companyId = requireCompanyId(ctx);
++
++  if (!hasPermission(ctx.permissions, PERMISSIONS.PRODUCTS_MANAGE)) {
++    return { ok: false, response: NextResponse.json({ error: "No tienes permiso para esta acción" }, { status: 403 }) };
++  }
++  if (!(await hasFeature(companyId, featureKey))) {
++    return { ok: false, response: NextResponse.json({ error: `Tu plan no incluye ${featureLabel}` }, { status: 403 }) };
++  }
++  return { ok: true, ctx, companyId };
++}
++
++export function errorResponse(err: unknown, fallback: string) {
++  const message = err instanceof Error ? err.message : fallback;
++  return NextResponse.json({ error: message }, { status: 400 });
++}
+diff --git a/src/lib/menu-inventory.ts b/src/lib/menu-inventory.ts
+new file mode 100644
+index 0000000..d86d884
+--- /dev/null
++++ b/src/lib/menu-inventory.ts
+@@ -0,0 +1,23 @@
++/**
++ * Un menú completo consume inventario de lo que el cliente eligió además del propio menú:
++ * si eligió "arroz" como guarnición, se descuenta una porción de arroz por cada menú vendido.
++ * Esta función expande los renglones de una venta a la lista plana de productos a descontar
++ * (o reponer, al cancelar). Los productos sin elecciones pasan tal cual.
++ */
++export interface InventoryLine {
++  productId: string;
++  quantity: number;
++}
++
++export function expandMenuInventory(
++  items: { productId: string; quantity: number; menuChoices?: { optionProductId: string }[] | null }[]
++): InventoryLine[] {
++  const lines: InventoryLine[] = [];
++  for (const item of items) {
++    lines.push({ productId: item.productId, quantity: item.quantity });
++    for (const choice of item.menuChoices ?? []) {
++      lines.push({ productId: choice.optionProductId, quantity: item.quantity });
++    }
++  }
++  return lines;
++}
+diff --git a/src/lib/plan-features.ts b/src/lib/plan-features.ts
+index c17150b..3d3a267 100644
+--- a/src/lib/plan-features.ts
++++ b/src/lib/plan-features.ts
+@@ -40,6 +40,10 @@ export const FEATURE_CATALOG: FeatureDef[] = [
+   { key: "pagos_integrados", label: "Pagos integrados (tarjetas desde el POS)", status: "live", enforced: true },
+   { key: "whatsapp_business", label: "WhatsApp Business", status: "live", enforced: true },
+   { key: "dashboard_empresarial", label: "Dashboard empresarial", status: "live", enforced: true },
++  // Costeo por receta: insumos + receta por platillo; el costo calculado alimenta Food Cost % y margen.
++  { key: "costeo_receta", label: "Costeo por receta", status: "live", enforced: true },
++  // Menús completos (comida corrida/combos): guarniciones incluidas en el precio fijo y opciones con cargo extra.
++  { key: "menus_completos", label: "Menús completos (guarniciones incluidas y opciones con cargo extra)", status: "live", enforced: true },
+   // Programa de clientes frecuentes: opción independiente. No viene incluida en ningún plan
+   // por defecto; se activa por plan o por empresa (plan personalizado) desde Super Admin.
+   { key: "clientes_frecuentes", label: "Programa de clientes frecuentes (tarjeta digital con QR)", status: "live", enforced: true },
+@@ -77,7 +81,6 @@ export const FEATURE_CATALOG: FeatureDef[] = [
+   { key: "menus_por_turno", label: "Menús por turno/hora", status: "planned", enforced: false },
+   { key: "integracion_delivery", label: "Integración con delivery (Uber Eats, DoorDash, Rappi)", status: "planned", enforced: false },
+   { key: "conexion_contpaq_sat", label: "Conexión con Contpaq/SAT", status: "planned", enforced: false },
+-  { key: "costeo_receta", label: "Costeo por receta", status: "planned", enforced: false },
+   { key: "proyecciones_ia", label: "Proyecciones con IA básica", status: "planned", enforced: false },
+   { key: "multi_moneda", label: "Multi-moneda", status: "planned", enforced: false },
+ 
+diff --git a/src/lib/recipe-cost.ts b/src/lib/recipe-cost.ts
+new file mode 100644
+index 0000000..800e9d9
+--- /dev/null
++++ b/src/lib/recipe-cost.ts
+@@ -0,0 +1,31 @@
++/**
++ * Cálculo puro del costo de una receta (sin base de datos), compartido por el servidor y la
++ * pantalla de recetas para que el costo que se ve es el mismo que se guarda.
++ *
++ * Merma: si un insumo pierde 10% al limpiarlo/cocinarlo, para tener 1 kg utilizable hay que comprar
++ * 1 / 0.9 kg, así que el costo efectivo por unidad sube a costPerUnit / (1 - merma).
++ */
++export const INGREDIENT_UNITS = ["kg", "g", "l", "ml", "pza"] as const;
++export type IngredientUnit = (typeof INGREDIENT_UNITS)[number];
++
++export function effectiveUnitCost(costPerUnit: number, wastePercent: number): number {
++  const waste = Math.min(Math.max(wastePercent, 0), 95); // tope para no dividir entre ~0
++  return costPerUnit / (1 - waste / 100);
++}
++
++export interface RecipeLine {
++  quantity: number;
++  costPerUnit: number;
++  wastePercent: number;
++}
++
++export function recipeCost(lines: RecipeLine[]): number {
++  const total = lines.reduce((sum, l) => sum + l.quantity * effectiveUnitCost(l.costPerUnit, l.wastePercent), 0);
++  return Math.round(total * 100) / 100;
++}
++
++/** Food Cost % = costo / precio de venta. null si no hay precio válido. */
++export function foodCostPercent(cost: number, price: number): number | null {
++  if (!(price > 0)) return null;
++  return (cost / price) * 100;
++}
+diff --git a/src/modules/kitchen/service.ts b/src/modules/kitchen/service.ts
+index 4366f43..02b7945 100644
+--- a/src/modules/kitchen/service.ts
++++ b/src/modules/kitchen/service.ts
+@@ -31,6 +31,7 @@ export const kitchenService = {
+       },
+       include: {
+         product: true,
++        menuChoices: true, // menús completos: qué guarniciones/opciones lleva cada uno
+         order: {
+           select: {
+             id: true,
+diff --git a/src/modules/menus/service.ts b/src/modules/menus/service.ts
+new file mode 100644
+index 0000000..17f5341
+--- /dev/null
++++ b/src/modules/menus/service.ts
+@@ -0,0 +1,263 @@
++import { prisma } from "@/lib/prisma";
++import { z } from "zod";
++
++export const menuSchema = z.object({
++  name: z.string().trim().min(1, "El nombre es obligatorio").max(80),
++  categoryId: z.string().min(1, "Selecciona una categoría"),
++  price: z.coerce.number().positive("El precio debe ser mayor a 0"),
++  description: z.string().max(300).optional(),
++  isActive: z.boolean().optional(),
++});
++
++export const menuGroupsSchema = z.object({
++  groups: z
++    .array(
++      z.object({
++        name: z.string().trim().min(1, "Cada grupo necesita un nombre").max(60),
++        minSelect: z.coerce.number().int().min(0).max(20),
++        maxSelect: z.coerce.number().int().min(1).max(20),
++        options: z
++          .array(
++            z.object({
++              optionProductId: z.string().min(1),
++              // 0 = incluida en el precio fijo del menú; > 0 = cargo extra al elegirla.
++              extraPrice: z.coerce.number().min(0).default(0),
++            })
++          )
++          .min(1, "Cada grupo necesita al menos una opción")
++          .max(40),
++      })
++    )
++    .max(12),
++});
++
++export type ChosenOption = {
++  optionProductId: string;
++  name: string;
++  extraPriceAtSale: number;
++  costAtSale: number;
++};
++
++type OptionRow = {
++  id: string;
++  extraPrice: unknown;
++  optionProductId: string;
++  optionProduct: { id: string; name: string; cost: unknown; isActive: boolean };
++};
++type GroupRow = { id: string; name: string; minSelect: number; maxSelect: number; sortOrder: number; options: OptionRow[] };
++
++const GROUP_INCLUDE = {
++  options: { include: { optionProduct: { select: { id: true, name: true, cost: true, isActive: true } } } },
++} as const;
++
++export const menusService = {
++  /** Menús de la empresa con sus grupos/opciones y un resumen de costo. */
++  async list(companyId: string) {
++    const menus = await prisma.product.findMany({
++      where: { companyId, isMenu: true },
++      include: {
++        category: { select: { name: true } },
++        menuGroups: { include: GROUP_INCLUDE, orderBy: { sortOrder: "asc" } },
++      },
++      orderBy: { name: "asc" },
++    });
++
++    type MenuRow = {
++      id: string; name: string; price: unknown; cost: unknown; isActive: boolean; categoryId: string;
++      category: { name: string }; menuGroups: GroupRow[];
++    };
++    return (menus as unknown as MenuRow[]).map((m) => {
++      const price = Number(m.price);
++      const baseCost = m.cost === null || m.cost === undefined ? 0 : Number(m.cost);
++      // Peor caso de costo: en cada grupo, las `maxSelect` opciones más caras.
++      let worstCost = baseCost;
++      for (const g of m.menuGroups) {
++        const costs = g.options.map((o) => Number(o.optionProduct.cost ?? 0)).sort((a, b) => b - a);
++        worstCost += costs.slice(0, g.maxSelect).reduce((s, c) => s + c, 0);
++      }
++      return {
++        id: m.id,
++        name: m.name,
++        price,
++        baseCost,
++        worstCost,
++        worstFoodCostPercent: price > 0 ? (worstCost / price) * 100 : null,
++        isActive: m.isActive,
++        categoryId: m.categoryId,
++        category: m.category.name,
++        groups: m.menuGroups.map((g) => ({
++          id: g.id,
++          name: g.name,
++          minSelect: g.minSelect,
++          maxSelect: g.maxSelect,
++          options: g.options.map((o) => ({
++            id: o.id,
++            optionProductId: o.optionProductId,
++            name: o.optionProduct.name,
++            extraPrice: Number(o.extraPrice),
++            cost: Number(o.optionProduct.cost ?? 0),
++            isActive: o.optionProduct.isActive,
++          })),
++        })),
++      };
++    });
++  },
++
++  async create(companyId: string, input: z.infer<typeof menuSchema>) {
++    const category = await prisma.category.findFirst({ where: { id: input.categoryId, companyId } });
++    if (!category) throw new Error("Categoría no encontrada");
++    return prisma.product.create({
++      data: {
++        companyId,
++        categoryId: input.categoryId,
++        name: input.name,
++        price: input.price,
++        description: input.description,
++        isMenu: true,
++        isActive: input.isActive ?? true,
++      },
++    });
++  },
++
++  async update(companyId: string, id: string, input: z.infer<typeof menuSchema>) {
++    const menu = await prisma.product.findFirst({ where: { id, companyId, isMenu: true } });
++    if (!menu) throw new Error("Menú no encontrado");
++    const category = await prisma.category.findFirst({ where: { id: input.categoryId, companyId } });
++    if (!category) throw new Error("Categoría no encontrada");
++    return prisma.product.update({
++      where: { id },
++      data: {
++        name: input.name,
++        categoryId: input.categoryId,
++        price: input.price,
++        description: input.description,
++        ...(input.isActive === undefined ? {} : { isActive: input.isActive }),
++      },
++    });
++  },
++
++  /**
++   * Reemplaza todos los grupos/opciones del menú. Ventas ya hechas no se afectan: lo que el cliente
++   * eligió se congela en OrderItemMenuChoice al vender.
++   */
++  async setGroups(companyId: string, id: string, input: z.infer<typeof menuGroupsSchema>) {
++    const menu = await prisma.product.findFirst({ where: { id, companyId, isMenu: true } });
++    if (!menu) throw new Error("Menú no encontrado");
++
++    const optionIds = new Set<string>();
++    for (const g of input.groups) {
++      if (g.minSelect > g.maxSelect) throw new Error(`En "${g.name}" el mínimo no puede ser mayor al máximo`);
++      if (g.minSelect > g.options.length) throw new Error(`En "${g.name}" el mínimo es mayor que las opciones disponibles`);
++      const inGroup = g.options.map((o) => o.optionProductId);
++      if (new Set(inGroup).size !== inGroup.length) throw new Error(`En "${g.name}" hay una opción repetida`);
++      inGroup.forEach((pid) => optionIds.add(pid));
++    }
++    if (optionIds.has(id)) throw new Error("Un menú no puede incluirse a sí mismo");
++
++    if (optionIds.size > 0) {
++      const valid = await prisma.product.count({
++        where: { id: { in: Array.from(optionIds) }, companyId, isMenu: false },
++      });
++      if (valid !== optionIds.size) throw new Error("Una o más opciones no son productos válidos (no se pueden usar otros menús como opción)");
++    }
++
++    await prisma.$transaction(async (tx) => {
++      await tx.menuGroup.deleteMany({ where: { productId: id } });
++      let order = 0;
++      for (const g of input.groups) {
++        await tx.menuGroup.create({
++          data: {
++            productId: id,
++            name: g.name,
++            minSelect: g.minSelect,
++            maxSelect: g.maxSelect,
++            sortOrder: order++,
++            options: { create: g.options.map((o) => ({ optionProductId: o.optionProductId, extraPrice: o.extraPrice })) },
++          },
++        });
++      }
++    });
++
++    return this.list(companyId).then((all) => all.find((m) => m.id === id) ?? null);
++  },
++
++  /** Menús activos con grupos, para que el POS pida las elecciones al agregar el menú al carrito. */
++  async listForPos(companyId: string) {
++    const all = await this.list(companyId);
++    return all
++      .filter((m) => m.isActive)
++      .map((m) => ({
++        id: m.id,
++        groups: m.groups.map((g) => ({
++          id: g.id,
++          name: g.name,
++          minSelect: g.minSelect,
++          maxSelect: g.maxSelect,
++          options: g.options.filter((o) => o.isActive).map((o) => ({ id: o.id, name: o.name, extraPrice: o.extraPrice })),
++        })),
++      }));
++  },
++
++  /**
++   * Valida lo que eligió el cliente (ids de MenuOption) contra las reglas del menú y devuelve el cargo
++   * extra, el costo extra y las elecciones ya "congeladas". El servidor es la única fuente de precio y
++   * costo — nunca se confía en lo que mande el navegador.
++   */
++  async resolveChoices(companyId: string, menuProductId: string, choiceIds: string[]) {
++    const product = await prisma.product.findFirst({ where: { id: menuProductId, companyId } });
++    if (!product) throw new Error("Producto no encontrado");
++
++    if (!product.isMenu) {
++      if (choiceIds.length > 0) throw new Error(`"${product.name}" no es un menú completo`);
++      return { extraPrice: 0, extraCost: 0, choices: [] as ChosenOption[] };
++    }
++
++    const groups = (await prisma.menuGroup.findMany({
++      where: { productId: menuProductId },
++      include: GROUP_INCLUDE,
++    })) as unknown as GroupRow[];
++
++    if (new Set(choiceIds).size !== choiceIds.length) throw new Error("No puedes elegir la misma opción dos veces");
++
++    const optionIndex = new Map<string, { group: GroupRow; option: OptionRow }>();
++    for (const g of groups) for (const o of g.options) optionIndex.set(o.id, { group: g, option: o });
++
++    const perGroup = new Map<string, number>();
++    const choices: ChosenOption[] = [];
++    let extraPrice = 0;
++    let extraCost = 0;
++    for (const id of choiceIds) {
++      const hit = optionIndex.get(id);
++      if (!hit) throw new Error(`Una opción elegida ya no pertenece al menú "${product.name}"`);
++      if (!hit.option.optionProduct.isActive) throw new Error(`"${hit.option.optionProduct.name}" ya no está disponible`);
++      perGroup.set(hit.group.id, (perGroup.get(hit.group.id) ?? 0) + 1);
++      const price = Number(hit.option.extraPrice);
++      const cost = Number(hit.option.optionProduct.cost ?? 0);
++      extraPrice += price;
++      extraCost += cost;
++      choices.push({
++        optionProductId: hit.option.optionProductId,
++        name: hit.option.optionProduct.name,
++        extraPriceAtSale: price,
++        costAtSale: cost,
++      });
++    }
++
++    for (const g of groups) {
++      const n = perGroup.get(g.id) ?? 0;
++      if (n < g.minSelect || n > g.maxSelect) {
++        throw new Error(
++          g.minSelect === g.maxSelect
++            ? `En "${g.name}" debes elegir ${g.minSelect}`
++            : `En "${g.name}" elige entre ${g.minSelect} y ${g.maxSelect}`
++        );
++      }
++    }
++
++    return {
++      extraPrice: Math.round(extraPrice * 100) / 100,
++      extraCost: Math.round(extraCost * 100) / 100,
++      choices,
++    };
++  },
++};
+diff --git a/src/modules/recipes/service.ts b/src/modules/recipes/service.ts
+new file mode 100644
+index 0000000..9b7feaa
+--- /dev/null
++++ b/src/modules/recipes/service.ts
+@@ -0,0 +1,201 @@
++import { Prisma } from "@prisma/client";
++import { prisma } from "@/lib/prisma";
++import { z } from "zod";
++import { INGREDIENT_UNITS, recipeCost, foodCostPercent } from "@/lib/recipe-cost";
++
++export const ingredientSchema = z.object({
++  name: z.string().trim().min(1, "El nombre es obligatorio").max(80),
++  unit: z.enum(INGREDIENT_UNITS),
++  costPerUnit: z.coerce.number().min(0, "El costo no puede ser negativo"),
++  wastePercent: z.coerce.number().min(0).max(95).default(0),
++  isActive: z.boolean().optional(),
++});
++
++export const recipeSchema = z.object({
++  items: z
++    .array(
++      z.object({
++        ingredientId: z.string().min(1),
++        quantity: z.coerce.number().positive("La cantidad debe ser mayor a 0"),
++      })
++    )
++    .max(60),
++});
++
++type RecipeRow = { quantity: unknown; ingredient: { costPerUnit: unknown; wastePercent: unknown } };
++
++function costOfRows(rows: RecipeRow[]): number {
++  return recipeCost(
++    rows.map((r) => ({
++      quantity: Number(r.quantity),
++      costPerUnit: Number(r.ingredient.costPerUnit),
++      wastePercent: Number(r.ingredient.wastePercent),
++    }))
++  );
++}
++
++type Tx = Prisma.TransactionClient;
++
++/**
++ * Recalcula Product.cost de los productos con receta y lo guarda. Así Reportes, Dashboard
++ * (Food Cost %, margen) y la tabla de productos usan el costo real sin cambiar su código.
++ * Un producto SIN renglones de receta conserva el costo que ya tenía (capturado a mano).
++ */
++async function recalcProducts(tx: Tx, productIds: string[]) {
++  for (const productId of productIds) {
++    const rows = await tx.recipeItem.findMany({ where: { productId }, include: { ingredient: true } });
++    if (rows.length === 0) continue;
++    await tx.product.update({ where: { id: productId }, data: { cost: costOfRows(rows as unknown as RecipeRow[]) } });
++  }
++}
++
++export const recipesService = {
++  async listIngredients(companyId: string) {
++    const rows = await prisma.ingredient.findMany({
++      where: { companyId },
++      orderBy: { name: "asc" },
++      include: { _count: { select: { recipeItems: true } } },
++    });
++    return rows;
++  },
++
++  async createIngredient(companyId: string, input: z.infer<typeof ingredientSchema>) {
++    const exists = await prisma.ingredient.findFirst({ where: { companyId, name: input.name } });
++    if (exists) throw new Error("Ya existe un insumo con ese nombre");
++    return prisma.ingredient.create({
++      data: {
++        companyId,
++        name: input.name,
++        unit: input.unit,
++        costPerUnit: input.costPerUnit,
++        wastePercent: input.wastePercent,
++        isActive: input.isActive ?? true,
++      },
++    });
++  },
++
++  /** Al cambiar el costo/merma de un insumo se recalculan todas las recetas que lo usan. */
++  async updateIngredient(companyId: string, id: string, input: z.infer<typeof ingredientSchema>, userId: string) {
++    const current = await prisma.ingredient.findFirst({ where: { id, companyId } });
++    if (!current) throw new Error("Insumo no encontrado");
++    if (input.name !== current.name) {
++      const dup = await prisma.ingredient.findFirst({ where: { companyId, name: input.name, NOT: { id } } });
++      if (dup) throw new Error("Ya existe un insumo con ese nombre");
++    }
++
++    return prisma.$transaction(async (tx) => {
++      const updated = await tx.ingredient.update({
++        where: { id },
++        data: {
++          name: input.name,
++          unit: input.unit,
++          costPerUnit: input.costPerUnit,
++          wastePercent: input.wastePercent,
++          ...(input.isActive === undefined ? {} : { isActive: input.isActive }),
++        },
++      });
++      const used = await tx.recipeItem.findMany({ where: { ingredientId: id }, select: { productId: true } });
++      await recalcProducts(tx, Array.from(new Set(used.map((u: { productId: string }) => u.productId))));
++
++      if (Number(current.costPerUnit) !== input.costPerUnit || Number(current.wastePercent) !== input.wastePercent) {
++        await tx.auditLog.create({
++          data: {
++            companyId,
++            userId,
++            action: "INGREDIENT_COST_UPDATE",
++            entity: "Ingredient",
++            entityId: id,
++            previousData: { costPerUnit: String(current.costPerUnit), wastePercent: String(current.wastePercent) },
++            newData: { costPerUnit: String(input.costPerUnit), wastePercent: String(input.wastePercent) },
++          },
++        });
++      }
++      return updated;
++    });
++  },
++
++  /** Un insumo que ya está en alguna receta no se borra (rompería costos): se desactiva. */
++  async deleteIngredient(companyId: string, id: string) {
++    const current = await prisma.ingredient.findFirst({ where: { id, companyId }, include: { _count: { select: { recipeItems: true } } } });
++    if (!current) throw new Error("Insumo no encontrado");
++    if (current._count.recipeItems > 0) {
++      await prisma.ingredient.update({ where: { id }, data: { isActive: false } });
++      return { deleted: false, deactivated: true };
++    }
++    await prisma.ingredient.delete({ where: { id } });
++    return { deleted: true, deactivated: false };
++  },
++
++  async getRecipe(companyId: string, productId: string) {
++    const product = await prisma.product.findFirst({ where: { id: productId, companyId } });
++    if (!product) throw new Error("Producto no encontrado");
++    const items = await prisma.recipeItem.findMany({
++      where: { productId },
++      include: { ingredient: true },
++      orderBy: { ingredient: { name: "asc" } },
++    });
++    return { product, items, cost: items.length ? costOfRows(items as unknown as RecipeRow[]) : null };
++  },
++
++  /** Reemplaza la receta completa del producto y guarda el costo calculado en Product.cost. */
++  async setRecipe(companyId: string, productId: string, input: z.infer<typeof recipeSchema>, userId: string) {
++    const product = await prisma.product.findFirst({ where: { id: productId, companyId } });
++    if (!product) throw new Error("Producto no encontrado");
++
++    const ids = input.items.map((i) => i.ingredientId);
++    if (new Set(ids).size !== ids.length) throw new Error("Un insumo no puede repetirse en la misma receta");
++    if (ids.length > 0) {
++      const found = await prisma.ingredient.count({ where: { id: { in: ids }, companyId } });
++      if (found !== ids.length) throw new Error("Uno o más insumos ya no existen");
++    }
++
++    await prisma.$transaction(async (tx) => {
++      await tx.recipeItem.deleteMany({ where: { productId } });
++      if (input.items.length > 0) {
++        await tx.recipeItem.createMany({
++          data: input.items.map((i) => ({ productId, ingredientId: i.ingredientId, quantity: i.quantity })),
++        });
++      }
++      await recalcProducts(tx, [productId]);
++      await tx.auditLog.create({
++        data: {
++          companyId,
++          userId,
++          action: "RECIPE_UPDATE",
++          entity: "Product",
++          entityId: productId,
++          previousData: { cost: product.cost === null ? null : String(product.cost) },
++          newData: { ingredients: input.items.length },
++        },
++      });
++    });
++
++    return this.getRecipe(companyId, productId);
++  },
++
++  /** Tabla de costeo: todos los productos con su costo, margen y Food Cost %. */
++  async costingReport(companyId: string) {
++    const products = await prisma.product.findMany({
++      where: { companyId },
++      include: { category: { select: { name: true } }, _count: { select: { recipeItems: true } } },
++      orderBy: { name: "asc" },
++    });
++    type Row = { id: string; name: string; isMenu: boolean; price: unknown; cost: unknown; category: { name: string }; _count: { recipeItems: number } };
++    return (products as unknown as Row[]).map((p) => {
++      const price = Number(p.price);
++      const hasCost = p.cost !== null && p.cost !== undefined;
++      const cost = hasCost ? Number(p.cost) : null;
++      return {
++        id: p.id,
++        name: p.name,
++        category: p.category.name,
++        isMenu: p.isMenu,
++        price,
++        cost,
++        hasRecipe: p._count.recipeItems > 0,
++        margin: cost === null ? null : price - cost,
++        foodCostPercent: cost === null ? null : foodCostPercent(cost, price),
++      };
++    });
++  },
++};
+diff --git a/src/modules/reports/service.ts b/src/modules/reports/service.ts
+index d6f21e1..c869d30 100644
+--- a/src/modules/reports/service.ts
++++ b/src/modules/reports/service.ts
+@@ -9,6 +9,7 @@ type ReportOrder = {
+     productId: string;
+     quantity: number;
+     lineTotal: number | string;
++    extraCostAtSale?: number | string | null; // costo de las opciones elegidas en un menú completo
+     product: { name: string; categoryId: string; cost: number | string | null; category: { name: string } };
+   }[];
+ };
+@@ -16,7 +17,7 @@ type ReportOrder = {
+ type DashboardOrder = {
+   createdAt: Date;
+   total: number | string;
+-  items: { quantity: number; product: { cost: number | string | null } }[];
++  items: { quantity: number; extraCostAtSale?: number | string | null; product: { cost: number | string | null } }[];
+ };
+ 
+ export const reportsService = {
+@@ -53,7 +54,7 @@ export const reportsService = {
+       for (const item of order.items) {
+         const key = item.productId;
+         const hasCost = item.product.cost !== null && item.product.cost !== undefined;
+-        const unitCost = hasCost ? Number(item.product.cost) : 0;
++        const unitCost = (hasCost ? Number(item.product.cost) : 0) + Number(item.extraCostAtSale ?? 0); // + costo de lo elegido en menús completos
+         const lineCost = unitCost * item.quantity;
+         totalCost += lineCost;
+         if (!hasCost) itemsWithoutCost += item.quantity;
+@@ -147,7 +148,7 @@ export const reportsService = {
+     for (const order of report.orders as unknown as DashboardOrder[]) {
+       const dayKey = new Date(order.createdAt).toISOString().slice(0, 10);
+       const orderCost = order.items.reduce(
+-        (sum, item) => sum + Number(item.product.cost ?? 0) * item.quantity,
++        (sum, item) => sum + (Number(item.product.cost ?? 0) + Number(item.extraCostAtSale ?? 0)) * item.quantity,
+         0
+       );
+       const current = detailMap.get(dayKey) ?? { profit: 0, orders: 0 };
+diff --git a/src/modules/sales/service.ts b/src/modules/sales/service.ts
+index ce1c681..bf06ef6 100644
+--- a/src/modules/sales/service.ts
++++ b/src/modules/sales/service.ts
+@@ -5,6 +5,8 @@ import { FEATURE_KEYS } from "@/lib/plan-features";
+ import { loyaltyService } from "@/modules/loyalty/service";
+ import { promotionsService } from "@/modules/promotions/service";
+ import { cashService } from "@/modules/cash/service";
++import { menusService } from "@/modules/menus/service";
++import { expandMenuInventory } from "@/lib/menu-inventory";
+ 
+ export const saleSchema = z
+   .object({
+@@ -13,6 +15,8 @@ export const saleSchema = z
+         z.object({
+           productId: z.string().min(1),
+           quantity: z.coerce.number().int().positive(),
++          // Solo menús completos: ids de MenuOption elegidos (guarniciones, bebida...).
++          choices: z.array(z.string().min(1)).max(40).default([]),
+         })
+       )
+       .min(1, "El carrito está vacío"),
+@@ -75,10 +79,17 @@ export const salesService = {
+     type SaleProduct = { id: string; price: number | string; categoryId: string };
+     const productMap = new Map((products as unknown as SaleProduct[]).map((p) => [p.id, p]));
+ 
++    // Menús completos: el servidor valida lo que eligió el cliente y calcula el cargo extra y el
++    // costo de las opciones (nunca se toman del navegador).
++    const resolved = await Promise.all(
++      input.items.map((item) => menusService.resolveChoices(companyId, item.productId, item.choices))
++    );
++
+     let subtotal = 0;
+-    const orderItemsData = input.items.map((item) => {
++    const orderItemsData = input.items.map((item, idx) => {
+       const product = productMap.get(item.productId)!;
+-      const unitPrice = Number(product.price);
++      const menu = resolved[idx];
++      const unitPrice = Number(product.price) + menu.extraPrice;
+       const lineTotal = unitPrice * item.quantity;
+       subtotal += lineTotal;
+       return {
+@@ -86,6 +97,19 @@ export const salesService = {
+         quantity: item.quantity,
+         unitPriceAtSale: unitPrice,
+         lineTotal,
++        extraCostAtSale: menu.extraCost,
++        ...(menu.choices.length > 0
++          ? {
++              menuChoices: {
++                create: menu.choices.map((c) => ({
++                  optionProductId: c.optionProductId,
++                  name: c.name,
++                  extraPriceAtSale: c.extraPriceAtSale,
++                  costAtSale: c.costAtSale,
++                })),
++              },
++            }
++          : {}),
+       };
+     });
+ 
+@@ -95,12 +119,12 @@ export const salesService = {
+     // Promociones (automáticas + cupón): el servidor siempre las calcula, nunca se confía en el navegador.
+     const promo = await promotionsService.evaluateForSale(
+       companyId,
+-      input.items.map((item) => {
++      input.items.map((item, idx) => {
+         const product = productMap.get(item.productId)!;
+         return {
+           productId: product.id,
+           categoryId: product.categoryId,
+-          unitPrice: Number(product.price),
++          unitPrice: Number(product.price) + resolved[idx].extraPrice,
+           quantity: item.quantity,
+         };
+       }),
+@@ -194,7 +218,11 @@ export const salesService = {
+     if (input.paymentMethod !== "MERCADOPAGO" && input.paymentMethod !== "MERCADOPAGO_TERMINAL") {
+       const { inventoryService } = await import("@/modules/inventory/service");
+       try {
+-        await inventoryService.deductForSale(branchId, userId, input.items);
++        await inventoryService.deductForSale(
++          branchId,
++          userId,
++          expandMenuInventory(input.items.map((i, idx) => ({ productId: i.productId, quantity: i.quantity, menuChoices: resolved[idx].choices })))
++        );
+       } catch {
+         // El inventario es informativo respecto a la venta; un fallo aquí
+         // no debe revertir un cobro ya realizado al cliente.
+@@ -206,17 +234,13 @@ export const salesService = {
+ 
+   /** Se llama desde el webhook de Mercado Pago cuando un pago queda aprobado: descuenta el inventario que se difirió en create(). */
+   async finalizeApprovedOrder(orderId: string) {
+-    const order = await prisma.order.findUnique({ where: { id: orderId }, include: { items: true } });
++    const order = await prisma.order.findUnique({ where: { id: orderId }, include: { items: { include: { menuChoices: true } } } });
+     if (!order) return;
+ 
+     const { inventoryService } = await import("@/modules/inventory/service");
+-    type MinimalOrderItem = { productId: string; quantity: number };
++    type MinimalOrderItem = { productId: string; quantity: number; menuChoices: { optionProductId: string }[] };
+     try {
+-      await inventoryService.deductForSale(
+-        order.branchId,
+-        order.userId,
+-        (order.items as MinimalOrderItem[]).map((i) => ({ productId: i.productId, quantity: i.quantity }))
+-      );
++      await inventoryService.deductForSale(order.branchId, order.userId, expandMenuInventory(order.items as MinimalOrderItem[]));
+     } catch {
+       // Igual que en create(): el inventario no debe bloquear que el pago quede confirmado.
+     }
+@@ -272,7 +296,7 @@ export const salesService = {
+ 
+     const order = await prisma.order.findFirst({
+       where: { id: orderId, companyId, branchId },
+-      include: { items: true, payments: true },
++      include: { items: { include: { menuChoices: true } }, payments: true },
+     });
+     if (!order) throw new Error("Pedido no encontrado");
+     if (order.status === "CANCELED") throw new Error("Este pedido fue cancelado");
+@@ -306,11 +330,7 @@ export const salesService = {
+ 
+     const { inventoryService } = await import("@/modules/inventory/service");
+     try {
+-      await inventoryService.deductForSale(
+-        branchId,
+-        userId,
+-        order.items.map((i) => ({ productId: i.productId, quantity: i.quantity }))
+-      );
++      await inventoryService.deductForSale(branchId, userId, expandMenuInventory(order.items));
+     } catch {
+       // Igual que en create(): el inventario no debe bloquear un cobro ya realizado.
+     }
+@@ -365,7 +385,7 @@ export const salesService = {
+   async cancelSale(companyId: string, orderId: string, userId: string) {
+     const order = await prisma.order.findFirst({
+       where: { id: orderId, companyId },
+-      include: { items: true, payments: true },
++      include: { items: { include: { menuChoices: true } }, payments: true },
+     });
+     if (!order) throw new Error("Venta no encontrada");
+     if (order.isOpenTab) throw new Error("Esta mesa todavía tiene la cuenta abierta — no se puede cancelar desde aquí");
+@@ -378,11 +398,7 @@ export const salesService = {
+     if (wasApproved) {
+       const { inventoryService } = await import("@/modules/inventory/service");
+       try {
+-        await inventoryService.restockForCancelledSale(
+-          order.branchId,
+-          userId,
+-          order.items.map((i: { productId: string; quantity: number }) => ({ productId: i.productId, quantity: i.quantity }))
+-        );
++        await inventoryService.restockForCancelledSale(order.branchId, userId, expandMenuInventory(order.items));
+       } catch {
+         // No debe bloquear la cancelación si el inventario falla al reponerse.
+       }
+diff --git a/src/modules/tableTabs/service.ts b/src/modules/tableTabs/service.ts
+index 80a9538..8907c18 100644
+--- a/src/modules/tableTabs/service.ts
++++ b/src/modules/tableTabs/service.ts
+@@ -5,6 +5,8 @@ import { FEATURE_KEYS } from "@/lib/plan-features";
+ import { loyaltyService } from "@/modules/loyalty/service";
+ import { promotionsService } from "@/modules/promotions/service";
+ import { cashService } from "@/modules/cash/service";
++import { menusService } from "@/modules/menus/service";
++import { expandMenuInventory } from "@/lib/menu-inventory";
+ 
+ export const addRoundSchema = z.object({
+   items: z
+@@ -12,6 +14,8 @@ export const addRoundSchema = z.object({
+       z.object({
+         productId: z.string().min(1),
+         quantity: z.coerce.number().int().positive(),
++        // Solo menús completos: ids de MenuOption elegidos (guarniciones, bebida...).
++        choices: z.array(z.string().min(1)).max(40).default([]),
+       })
+     )
+     .min(1, "El carrito está vacío"),
+@@ -47,7 +51,7 @@ export const tableTabsService = {
+     if (table.currentOrderId) {
+       const existing = await prisma.order.findUnique({
+         where: { id: table.currentOrderId },
+-        include: { items: { include: { product: true } } },
++        include: { items: { include: { product: true, menuChoices: true } } },
+       });
+       if (existing) return existing;
+     }
+@@ -67,7 +71,7 @@ export const tableTabsService = {
+         tax: 0,
+         total: 0,
+       },
+-      include: { items: { include: { product: true } } },
++      include: { items: { include: { product: true, menuChoices: true } } },
+     });
+ 
+     await prisma.table.update({
+@@ -85,7 +89,7 @@ export const tableTabsService = {
+ 
+     return prisma.order.findUnique({
+       where: { id: table.currentOrderId },
+-      include: { items: { include: { product: true } } },
++      include: { items: { include: { product: true, menuChoices: true } } },
+     });
+   },
+ 
+@@ -116,10 +120,16 @@ export const tableTabsService = {
+     });
+     const roundNumber = (maxRound._max.roundNumber ?? 0) + 1;
+ 
++    // Menús completos: precio extra y costo de lo elegido, calculados por el servidor.
++    const resolved = await Promise.all(
++      input.items.map((item) => menusService.resolveChoices(companyId, item.productId, item.choices))
++    );
++
+     let roundSubtotal = 0;
+-    const orderItemsData = input.items.map((item) => {
++    const orderItemsData = input.items.map((item, idx) => {
+       const product = productMap.get(item.productId)!;
+-      const unitPrice = Number(product.price);
++      const menu = resolved[idx];
++      const unitPrice = Number(product.price) + menu.extraPrice;
+       const lineTotal = unitPrice * item.quantity;
+       roundSubtotal += lineTotal;
+       return {
+@@ -129,6 +139,19 @@ export const tableTabsService = {
+         lineTotal,
+         roundNumber,
+         status: "PENDING" as const,
++        extraCostAtSale: menu.extraCost,
++        ...(menu.choices.length > 0
++          ? {
++              menuChoices: {
++                create: menu.choices.map((c) => ({
++                  optionProductId: c.optionProductId,
++                  name: c.name,
++                  extraPriceAtSale: c.extraPriceAtSale,
++                  costAtSale: c.costAtSale,
++                })),
++              },
++            }
++          : {}),
+       };
+     });
+ 
+@@ -144,12 +167,16 @@ export const tableTabsService = {
+         subtotal: newSubtotal,
+         total: newSubtotal - Number(order.discount),
+       },
+-      include: { items: { include: { product: true } } },
++      include: { items: { include: { product: true, menuChoices: true } } },
+     });
+ 
+     const { inventoryService } = await import("@/modules/inventory/service");
+     try {
+-      await inventoryService.deductForSale(branchId, userId, input.items);
++      await inventoryService.deductForSale(
++        branchId,
++        userId,
++        expandMenuInventory(input.items.map((i, idx) => ({ productId: i.productId, quantity: i.quantity, menuChoices: resolved[idx].choices })))
++      );
+     } catch {
+       // El inventario es informativo; no debe bloquear que la ronda ya se mandó a cocina.
+     }
+diff --git a/src/modules/whatsapp/catalogService.ts b/src/modules/whatsapp/catalogService.ts
+index 3137eb1..b428199 100644
+--- a/src/modules/whatsapp/catalogService.ts
++++ b/src/modules/whatsapp/catalogService.ts
+@@ -24,6 +24,8 @@ export const catalogService = {
+           products: {
+             where: {
+               isActive: true,
++              // Los menús completos piden elegir guarniciones; WhatsApp todavía no, así que no se ofrecen ahí.
++              isMenu: false,
+               // Solo se ofrece lo que esta sucursal tiene en existencia (o no controla inventario).
+               OR: [{ tracksInventory: false }, { branchStocks: { some: { branchId, stock: { gt: 0 } } } }],
+             },
+@@ -57,6 +59,7 @@ export const catalogService = {
+           id: productId,
+           companyId,
+           isActive: true,
++          isMenu: false,
+         },
+       });
+     } catch (error) {
+-- 
+2.43.0
+

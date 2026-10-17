@@ -5,6 +5,8 @@ import { FEATURE_KEYS } from "@/lib/plan-features";
 import { loyaltyService } from "@/modules/loyalty/service";
 import { promotionsService } from "@/modules/promotions/service";
 import { cashService } from "@/modules/cash/service";
+import { menusService } from "@/modules/menus/service";
+import { expandMenuInventory } from "@/lib/menu-inventory";
 
 export const saleSchema = z
   .object({
@@ -13,6 +15,8 @@ export const saleSchema = z
         z.object({
           productId: z.string().min(1),
           quantity: z.coerce.number().int().positive(),
+          // Solo menús completos: ids de MenuOption elegidos (guarniciones, bebida...).
+          choices: z.array(z.string().min(1)).max(40).default([]),
         })
       )
       .min(1, "El carrito está vacío"),
@@ -75,10 +79,17 @@ export const salesService = {
     type SaleProduct = { id: string; price: number | string; categoryId: string };
     const productMap = new Map((products as unknown as SaleProduct[]).map((p) => [p.id, p]));
 
+    // Menús completos: el servidor valida lo que eligió el cliente y calcula el cargo extra y el
+    // costo de las opciones (nunca se toman del navegador).
+    const resolved = await Promise.all(
+      input.items.map((item) => menusService.resolveChoices(companyId, item.productId, item.choices))
+    );
+
     let subtotal = 0;
-    const orderItemsData = input.items.map((item) => {
+    const orderItemsData = input.items.map((item, idx) => {
       const product = productMap.get(item.productId)!;
-      const unitPrice = Number(product.price);
+      const menu = resolved[idx];
+      const unitPrice = Number(product.price) + menu.extraPrice;
       const lineTotal = unitPrice * item.quantity;
       subtotal += lineTotal;
       return {
@@ -86,6 +97,19 @@ export const salesService = {
         quantity: item.quantity,
         unitPriceAtSale: unitPrice,
         lineTotal,
+        extraCostAtSale: menu.extraCost,
+        ...(menu.choices.length > 0
+          ? {
+              menuChoices: {
+                create: menu.choices.map((c) => ({
+                  optionProductId: c.optionProductId,
+                  name: c.name,
+                  extraPriceAtSale: c.extraPriceAtSale,
+                  costAtSale: c.costAtSale,
+                })),
+              },
+            }
+          : {}),
       };
     });
 
@@ -95,12 +119,12 @@ export const salesService = {
     // Promociones (automáticas + cupón): el servidor siempre las calcula, nunca se confía en el navegador.
     const promo = await promotionsService.evaluateForSale(
       companyId,
-      input.items.map((item) => {
+      input.items.map((item, idx) => {
         const product = productMap.get(item.productId)!;
         return {
           productId: product.id,
           categoryId: product.categoryId,
-          unitPrice: Number(product.price),
+          unitPrice: Number(product.price) + resolved[idx].extraPrice,
           quantity: item.quantity,
         };
       }),
@@ -194,7 +218,11 @@ export const salesService = {
     if (input.paymentMethod !== "MERCADOPAGO" && input.paymentMethod !== "MERCADOPAGO_TERMINAL") {
       const { inventoryService } = await import("@/modules/inventory/service");
       try {
-        await inventoryService.deductForSale(branchId, userId, input.items);
+        await inventoryService.deductForSale(
+          branchId,
+          userId,
+          expandMenuInventory(input.items.map((i, idx) => ({ productId: i.productId, quantity: i.quantity, menuChoices: resolved[idx].choices })))
+        );
       } catch {
         // El inventario es informativo respecto a la venta; un fallo aquí
         // no debe revertir un cobro ya realizado al cliente.
@@ -206,17 +234,13 @@ export const salesService = {
 
   /** Se llama desde el webhook de Mercado Pago cuando un pago queda aprobado: descuenta el inventario que se difirió en create(). */
   async finalizeApprovedOrder(orderId: string) {
-    const order = await prisma.order.findUnique({ where: { id: orderId }, include: { items: true } });
+    const order = await prisma.order.findUnique({ where: { id: orderId }, include: { items: { include: { menuChoices: true } } } });
     if (!order) return;
 
     const { inventoryService } = await import("@/modules/inventory/service");
-    type MinimalOrderItem = { productId: string; quantity: number };
+    type MinimalOrderItem = { productId: string; quantity: number; menuChoices: { optionProductId: string }[] };
     try {
-      await inventoryService.deductForSale(
-        order.branchId,
-        order.userId,
-        (order.items as MinimalOrderItem[]).map((i) => ({ productId: i.productId, quantity: i.quantity }))
-      );
+      await inventoryService.deductForSale(order.branchId, order.userId, expandMenuInventory(order.items as MinimalOrderItem[]));
     } catch {
       // Igual que en create(): el inventario no debe bloquear que el pago quede confirmado.
     }
@@ -272,7 +296,7 @@ export const salesService = {
 
     const order = await prisma.order.findFirst({
       where: { id: orderId, companyId, branchId },
-      include: { items: true, payments: true },
+      include: { items: { include: { menuChoices: true } }, payments: true },
     });
     if (!order) throw new Error("Pedido no encontrado");
     if (order.status === "CANCELED") throw new Error("Este pedido fue cancelado");
@@ -306,11 +330,7 @@ export const salesService = {
 
     const { inventoryService } = await import("@/modules/inventory/service");
     try {
-      await inventoryService.deductForSale(
-        branchId,
-        userId,
-        order.items.map((i) => ({ productId: i.productId, quantity: i.quantity }))
-      );
+      await inventoryService.deductForSale(branchId, userId, expandMenuInventory(order.items));
     } catch {
       // Igual que en create(): el inventario no debe bloquear un cobro ya realizado.
     }
@@ -365,7 +385,7 @@ export const salesService = {
   async cancelSale(companyId: string, orderId: string, userId: string) {
     const order = await prisma.order.findFirst({
       where: { id: orderId, companyId },
-      include: { items: true, payments: true },
+      include: { items: { include: { menuChoices: true } }, payments: true },
     });
     if (!order) throw new Error("Venta no encontrada");
     if (order.isOpenTab) throw new Error("Esta mesa todavía tiene la cuenta abierta — no se puede cancelar desde aquí");
@@ -378,11 +398,7 @@ export const salesService = {
     if (wasApproved) {
       const { inventoryService } = await import("@/modules/inventory/service");
       try {
-        await inventoryService.restockForCancelledSale(
-          order.branchId,
-          userId,
-          order.items.map((i: { productId: string; quantity: number }) => ({ productId: i.productId, quantity: i.quantity }))
-        );
+        await inventoryService.restockForCancelledSale(order.branchId, userId, expandMenuInventory(order.items));
       } catch {
         // No debe bloquear la cancelación si el inventario falla al reponerse.
       }
