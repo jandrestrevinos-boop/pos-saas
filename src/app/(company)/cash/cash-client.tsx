@@ -56,7 +56,18 @@ export function CashClient({ userName, canReportX, canReportZ }: { userName: str
 
 // ---------- Pedidos de WhatsApp pendientes de pago ----------
 
-type PendingOrderItem = { id: string; quantity: number; product: { name: string } };
+type PendingOrderItem = {
+  id: string;
+  quantity: number;
+  product: { name: string };
+  menuChoices?: { id: string; name: string; extraPriceAtSale?: string | number }[];
+};
+
+// Menús completos: "Comida (Arroz, Puré de papa - extra)" para que quien cobra vea qué lleva y qué cobra aparte.
+function itemLabel(i: PendingOrderItem): string {
+  const choices = (i.menuChoices ?? []).map((c) => (Number(c.extraPriceAtSale ?? 0) > 0 ? `${c.name} - extra` : c.name));
+  return choices.length > 0 ? `${i.product.name} (${choices.join(", ")})` : i.product.name;
+}
 type PendingOrder = {
   id: string;
   orderNumber: number;
@@ -121,7 +132,7 @@ function WhatsAppPendingOrders() {
             <div>
               <p className="text-sm font-medium">
                 <span className="font-mono text-ember-dark">#{o.orderNumber}</span> ·{" "}
-                {o.items.map((i) => `${i.quantity}× ${i.product.name}`).join(", ")}
+                {o.items.map((i) => `${i.quantity}× ${itemLabel(i)}`).join(", ")}
               </p>
               <p className="text-xs text-muted">
                 {o.whatsAppCart?.session.phoneNumber ?? "Cliente"} · hace{" "}
@@ -187,7 +198,7 @@ function PayOrderModal({ order, onClose, onPaid }: { order: PendingOrder; onClos
       <div className="mb-4 bg-ink-100 rounded-md p-4">
         {order.items.map((i) => (
           <p key={i.id} className="text-sm">
-            {i.quantity}× {i.product.name}
+            {i.quantity}× {itemLabel(i)}
           </p>
         ))}
         <p className="font-mono text-xl font-semibold mt-2">{formatMxn(order.total)}</p>

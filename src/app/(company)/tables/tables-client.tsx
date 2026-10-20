@@ -8,7 +8,7 @@ import { PosLoyaltyPanel, type LoyaltySelection } from "@/components/loyalty/pos
 
 type TableStatus = "LIBRE" | "OCUPADA" | "CUENTA" | "LIMPIEZA";
 type TableRow = { id: string; name: string; capacity: number | null; status: TableStatus };
-type OrderItemRow = { id: string; quantity: number; lineTotal: string; product: { name: string }; menuChoices?: { id: string; name: string }[] };
+type OrderItemRow = { id: string; quantity: number; lineTotal: string; product: { name: string }; menuChoices?: { id: string; name: string; extraPriceAtSale?: string | number }[] };
 type OpenOrder = { id: string; subtotal: string; total: string; items: OrderItemRow[] };
 
 const STATUS_LABEL: Record<TableStatus, string> = {
@@ -215,7 +215,11 @@ export function TablesClient({
                     <span>
                       {item.quantity}x {item.product.name}
                       {item.menuChoices && item.menuChoices.length > 0 && (
-                        <span className="block text-xs text-muted">{item.menuChoices.map((c) => c.name).join(" · ")}</span>
+                        <span className="block text-xs text-muted">
+                          {item.menuChoices
+                            .map((c) => (Number(c.extraPriceAtSale ?? 0) > 0 ? `${c.name} (extra +$${Number(c.extraPriceAtSale).toFixed(2)})` : c.name))
+                            .join(" · ")}
+                        </span>
                       )}
                     </span>
                     <span>${Number(item.lineTotal).toFixed(2)}</span>

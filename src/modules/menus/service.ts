@@ -198,6 +198,13 @@ export const menusService = {
       }));
   },
 
+  /** Configuración de UN menú activo (grupos y opciones) — la usa el pedido por WhatsApp. null si no es un menú con grupos. */
+  async getForPos(companyId: string, productId: string) {
+    const all = await this.listForPos(companyId);
+    const menu = all.find((m) => m.id === productId);
+    return menu && menu.groups.length > 0 ? menu : null;
+  },
+
   /**
    * Valida lo que eligió el cliente (ids de MenuOption) contra las reglas del menú y devuelve el cargo
    * extra, el costo extra y las elecciones ya "congeladas". El servidor es la única fuente de precio y

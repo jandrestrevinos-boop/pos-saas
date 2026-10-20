@@ -271,7 +271,7 @@ export const salesService = {
         payments: { none: { status: "APPROVED" } },
       },
       include: {
-        items: { include: { product: { select: { name: true } } } },
+        items: { include: { product: { select: { name: true } }, menuChoices: true } },
         whatsAppCart: { include: { session: { select: { phoneNumber: true } } } },
       },
       orderBy: { createdAt: "asc" },

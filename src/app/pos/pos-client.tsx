@@ -30,8 +30,11 @@ type MenuConfig = {
 // con guarniciones distintas son renglones distintos). unitPrice ya incluye el cargo extra elegido.
 type CartLine = { lineId: string; product: Product; quantity: number; unitPrice: number; choices: MenuChoiceOption[] };
 
+// Nombre del renglón para recibos/tickets: lo elegido va entre paréntesis y lo que cobra aparte se marca "extra".
 function lineLabel(l: CartLine): string {
-  return l.choices.length > 0 ? `${l.product.name} (${l.choices.map((c) => c.name).join(", ")})` : l.product.name;
+  return l.choices.length > 0
+    ? `${l.product.name} (${l.choices.map((c) => (c.extraPrice > 0 ? `${c.name} - extra` : c.name)).join(", ")})`
+    : l.product.name;
 }
 type TableOption = { id: string; name: string; status: string };
 
@@ -339,11 +342,16 @@ function PosClientInner({
                   <li key={line.lineId} className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <p className="text-sm font-medium truncate">{line.product.name}</p>
-                      {line.choices.length > 0 && (
+                      {line.choices.some((c) => c.extraPrice === 0) && (
                         <p className="text-xs text-muted">
-                          {line.choices.map((c) => (c.extraPrice > 0 ? `${c.name} (+${formatMxn(c.extraPrice)})` : c.name)).join(" · ")}
+                          Incluye: {line.choices.filter((c) => c.extraPrice === 0).map((c) => c.name).join(" · ")}
                         </p>
                       )}
+                      {line.choices.filter((c) => c.extraPrice > 0).map((c) => (
+                        <p key={c.id} className="text-xs font-medium text-ember-dark">
+                          Extra: {c.name} +{formatMxn(c.extraPrice)}
+                        </p>
+                      ))}
                       <p className="text-xs text-muted font-mono">{formatMxn(line.unitPrice)} c/u</p>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">

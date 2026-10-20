@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { promotionsService } from "@/modules/promotions/service";
+import { isPendingItem } from "./menuState";
 
 /**
  * Promociones automáticas de un carrito de WhatsApp. Por este canal no se escribe cupón,
@@ -13,16 +14,18 @@ export async function evaluateCartPromotions(cartId: string) {
   if (!cart) throw new Error("Carrito no existe");
 
   const companyId = cart.session.companyId;
+  // Un menú que el cliente todavía está armando no cuenta para promociones ni totales.
+  const items = cart.items.filter((i) => !isPendingItem(i));
   const products = await prisma.product.findMany({
-    where: { companyId, id: { in: [...new Set(cart.items.map((i) => i.productId))] } },
+    where: { companyId, id: { in: [...new Set(items.map((i) => i.productId))] } },
     select: { id: true, categoryId: true },
   });
   const categoryOf = new Map(products.map((p) => [p.id, p.categoryId]));
 
-  const subtotal = cart.items.reduce((sum, i) => sum + i.lineTotal, 0);
+  const subtotal = items.reduce((sum, i) => sum + i.lineTotal, 0);
   const promo = await promotionsService.evaluateForSale(
     companyId,
-    cart.items.map((i) => ({
+    items.map((i) => ({
       productId: i.productId,
       categoryId: categoryOf.get(i.productId) ?? "",
       unitPrice: i.unitPrice,

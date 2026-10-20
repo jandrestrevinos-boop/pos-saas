@@ -1,6 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import { promotionsService } from "@/modules/promotions/service";
 import { evaluateCartPromotions } from "./cartPromotions";
+import { menusService } from "@/modules/menus/service";
+import { choicesOf, isPendingItem } from "./menuState";
 
 interface OrderCreationResult {
   id: string;
@@ -23,8 +25,17 @@ export const orderCreator = {
         include: { items: true },
       });
 
-      if (!cart || cart.items.length === 0) {
+      // Un menú que el cliente nunca terminó de armar no entra al pedido.
+      const readyItems = cart ? cart.items.filter((i) => !isPendingItem(i)) : [];
+      if (!cart || readyItems.length === 0) {
         throw new Error("El carrito está vacío, no se puede crear la orden");
+      }
+
+      // Menús completos: se vuelve a validar lo que eligió el cliente y se congela nombre, cargo y costo de cada opción.
+      const menuByItem = new Map<string, Awaited<ReturnType<typeof menusService.resolveChoices>>>();
+      for (const item of readyItems) {
+        const ids = choicesOf(item.modifiers);
+        if (ids.length > 0) menuByItem.set(item.id, await menusService.resolveChoices(companyId, item.productId, ids));
       }
 
       // Usuario "sistema" para atribuir ventas que entran por WhatsApp
@@ -60,12 +71,28 @@ export const orderCreator = {
           tax: cart.tax,
           total: Math.round((cart.subtotal - promo.discount) * 100) / 100,
           items: {
-            create: cart.items.map((item) => ({
-              productId: item.productId,
-              quantity: item.quantity,
-              unitPriceAtSale: item.unitPrice,
-              lineTotal: item.lineTotal,
-            })),
+            create: readyItems.map((item) => {
+              const menu = menuByItem.get(item.id);
+              return {
+                productId: item.productId,
+                quantity: item.quantity,
+                unitPriceAtSale: item.unitPrice,
+                lineTotal: item.lineTotal,
+                ...(menu
+                  ? {
+                      extraCostAtSale: menu.extraCost,
+                      menuChoices: {
+                        create: menu.choices.map((c) => ({
+                          optionProductId: c.optionProductId,
+                          name: c.name,
+                          extraPriceAtSale: c.extraPriceAtSale,
+                          costAtSale: c.costAtSale,
+                        })),
+                      },
+                    }
+                  : {}),
+              };
+            }),
           },
         },
       });

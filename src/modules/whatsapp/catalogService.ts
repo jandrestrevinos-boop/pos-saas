@@ -11,10 +11,14 @@
  */
 
 import { prisma } from "@/lib/prisma";
+import { hasFeature } from "@/lib/feature-gating";
+import { FEATURE_KEYS } from "@/lib/plan-features";
 
 export const catalogService = {
   async getCatalog(companyId: string, branchId: string) {
     try {
+      // Los menús completos se ofrecen por WhatsApp solo si el plan de la empresa los incluye.
+      const menusEnabled = await hasFeature(companyId, FEATURE_KEYS.MENUS_COMPLETOS);
       return await prisma.category.findMany({
         where: {
           companyId,
@@ -24,8 +28,7 @@ export const catalogService = {
           products: {
             where: {
               isActive: true,
-              // Los menús completos piden elegir guarniciones; WhatsApp todavía no, así que no se ofrecen ahí.
-              isMenu: false,
+              ...(menusEnabled ? {} : { isMenu: false }),
               // Solo se ofrece lo que esta sucursal tiene en existencia (o no controla inventario).
               OR: [{ tracksInventory: false }, { branchStocks: { some: { branchId, stock: { gt: 0 } } } }],
             },
@@ -34,6 +37,7 @@ export const catalogService = {
               name: true,
               description: true,
               price: true,
+              isMenu: true,
               stock: true,
               tracksInventory: true,
             },
@@ -54,12 +58,13 @@ export const catalogService = {
 
   async getProduct(productId: string, companyId: string) {
     try {
+      const menusEnabled = await hasFeature(companyId, FEATURE_KEYS.MENUS_COMPLETOS);
       return await prisma.product.findFirst({
         where: {
           id: productId,
           companyId,
           isActive: true,
-          isMenu: false,
+          ...(menusEnabled ? {} : { isMenu: false }),
         },
       });
     } catch (error) {

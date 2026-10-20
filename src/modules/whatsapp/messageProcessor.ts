@@ -10,6 +10,9 @@ import { catalogService } from "./catalogService";
 import { cartManager } from "./cartManager";
 import { orderCreator } from "./orderCreator";
 import { sender } from "./sender";
+import { menusService } from "@/modules/menus/service";
+import { describeGroup, groupPrompt, parseGroupAnswer, isCancelText, formatWaPrice } from "@/lib/whatsapp-menu";
+import { pendingOf, choicesOf, isPendingItem } from "./menuState";
 
 const SESSION_MINUTES = 30;
 const sessionExpiry = () => new Date(Date.now() + SESSION_MINUTES * 60 * 1000);
@@ -31,7 +34,7 @@ interface MessageContext {
 interface ProcessingResult {
   success: boolean;
   response: string;
-  action: "browse" | "add_to_cart" | "confirm_order" | "error" | "abandon";
+  action: "browse" | "add_to_cart" | "confirm_order" | "error" | "abandon" | "choose_menu";
   orderId?: string;
   error?: string;
 }
@@ -61,8 +64,28 @@ async function buildCartSummary(cartId: string): Promise<string> {
     include: { product: { select: { name: true } } },
     orderBy: { createdAt: "asc" },
   });
-  return items
-    .map((i) => `▫️ ${i.quantity}× ${capitalize(i.product.name)} — ${formatPrice(i.lineTotal)}`)
+  // Un menú que el cliente todavía está armando no aparece en el resumen.
+  const ready = items.filter((i) => !isPendingItem(i));
+
+  // Menús completos: se listan debajo lo que lleva y, aparte, lo que cobra extra.
+  const choiceIds = ready.flatMap((i) => choicesOf(i.modifiers));
+  const options: { id: string; extraPrice: unknown; optionProduct: { name: string } }[] = choiceIds.length
+    ? await prisma.menuOption.findMany({ where: { id: { in: choiceIds } }, include: { optionProduct: { select: { name: true } } } })
+    : [];
+  const optionById = new Map(options.map((o) => [o.id, o]));
+
+  return ready
+    .map((i) => {
+      const head = `▫️ ${i.quantity}× ${capitalize(i.product.name)} — ${formatPrice(i.lineTotal)}`;
+      const lines = choicesOf(i.modifiers)
+        .map((id) => optionById.get(id))
+        .filter((o): o is NonNullable<typeof o> => !!o)
+        .map((o) => {
+          const extra = Number(o.extraPrice);
+          return `      ◦ ${capitalize(o.optionProduct.name)}${extra > 0 ? ` (+${formatPrice(extra)} extra)` : ""}`;
+        });
+      return [head, ...lines].join("\n");
+    })
     .join("\n");
 }
 
@@ -135,19 +158,25 @@ export const messageProcessor = {
         },
       });
 
-      const aiResult = await aiInterpreter.interpret({
-        messageText: context.messageText,
-        companyId: context.companyId,
-        branchId: context.branchId,
-        sessionState: session.state,
-      });
+      // Mientras el cliente arma un menú completo (elige guarnición, bebida...), su mensaje es la
+      // respuesta a la pregunta del bot, no un pedido nuevo: no pasa por la IA.
+      const choosingMenu = session.state === "CHOOSING_MENU";
+      const aiResult = choosingMenu
+        ? ({ success: false, intent: "OTHER", fallbackResponse: "", confidence: 0 } as Awaited<ReturnType<typeof aiInterpreter.interpret>>)
+        : await aiInterpreter.interpret({
+            messageText: context.messageText,
+            companyId: context.companyId,
+            branchId: context.branchId,
+            sessionState: session.state,
+          });
 
-      let intent: typeof aiResult.intent = aiResult.success ? aiResult.intent : "OTHER";
+      let intent: typeof aiResult.intent | "MENU_ANSWER" = aiResult.success ? aiResult.intent : "OTHER";
 
       // Un cliente nuevo que solo saluda ("hola") ve el menú de una vez.
       if (isNewSession && intent === "OTHER") {
         intent = "BROWSE_MENU";
       }
+      if (choosingMenu) intent = "MENU_ANSWER";
 
       let result: ProcessingResult;
 
@@ -163,6 +192,9 @@ export const messageProcessor = {
             aiResult.products || [],
             aiResult.modifiers || []
           );
+          break;
+        case "MENU_ANSWER":
+          result = await this._handleMenuAnswer(session.id, context.companyId, context.messageText);
           break;
         case "MODIFY_CART":
           result = await this._handleModifyCart(session.id, context.companyId);
@@ -196,7 +228,12 @@ export const messageProcessor = {
               ? "COMPLETED"
               : result.action === "add_to_cart"
                 ? "IN_CART"
-                : session.state,
+                : result.action === "choose_menu"
+                  ? "CHOOSING_MENU"
+                  : // Si estaba armando un menú y esa conversación terminó (cancelado/error), regresa a "en carrito".
+                    session.state === "CHOOSING_MENU"
+                    ? "IN_CART"
+                    : session.state,
           expiresAt: sessionExpiry(),
         },
       });
@@ -253,10 +290,19 @@ export const messageProcessor = {
       };
     }
 
+    // Menús completos: se muestra qué lleva cada uno y qué opciones cobran extra.
+    const hasMenus = withProducts.some((cat: any) => cat.products.some((p: any) => p.isMenu));
+    const menuConfigs = hasMenus ? await menusService.listForPos(companyId) : [];
+    const menuById = new Map(menuConfigs.map((m) => [m.id, m]));
+
     const sections = withProducts
       .map((cat: any) => {
         const lines = cat.products
-          .map((p: any) => `▫️ ${capitalize(p.name)} — *${formatPrice(p.price)}*`)
+          .map((p: any) => {
+            const head = `▫️ ${capitalize(p.name)} — *${formatPrice(p.price)}*`;
+            const cfg = p.isMenu ? menuById.get(p.id) : undefined;
+            return cfg && cfg.groups.length > 0 ? [head, ...cfg.groups.map((g) => `      ◦ ${describeGroup(g)}`)].join("\n") : head;
+          })
           .join("\n");
         return `${categoryEmoji(cat.name)} *${cat.name.toUpperCase()}*\n${lines}`;
       })
@@ -305,6 +351,13 @@ export const messageProcessor = {
 
       const added: string[] = [];
       const unavailable: string[] = [];
+      const deferred: string[] = [];
+      let menuToChoose: { name: string; qty: number; groups: NonNullable<Awaited<ReturnType<typeof menusService.getForPos>>> } | null = null;
+
+      // Un menú a medio armar que quedó de antes no debe estorbar: se descarta.
+      const staleItems = await prisma.whatsAppCartItem.findMany({ where: { cartId: cart.id } });
+      const stalePending = staleItems.filter((i) => isPendingItem(i)).map((i) => i.id);
+      if (stalePending.length > 0) await prisma.whatsAppCartItem.deleteMany({ where: { id: { in: stalePending } } });
 
       for (const product of products) {
         const qty = Math.max(1, Math.floor(Number(product.quantity) || 1));
@@ -318,6 +371,28 @@ export const messageProcessor = {
           continue;
         }
 
+        // Menú completo con grupos de opciones: el bot pregunta grupo por grupo antes de agregarlo.
+        const menuConfig = dbProduct.isMenu ? await menusService.getForPos(companyId, dbProduct.id) : null;
+        if (menuConfig) {
+          if (menuToChoose) {
+            deferred.push(capitalize(dbProduct.name));
+            continue;
+          }
+          await prisma.whatsAppCartItem.create({
+            data: {
+              cartId: cart.id,
+              productId: dbProduct.id,
+              quantity: qty,
+              unitPrice: Number(dbProduct.price),
+              lineTotal: 0, // vale $0 hasta que termine de elegir
+              modifiers: { menuPending: { choiceIds: [], groupIndex: 0 } },
+              notes: "",
+            },
+          });
+          menuToChoose = { name: capitalize(dbProduct.name), qty, groups: menuConfig };
+          continue;
+        }
+
         await cartManager.addItem(branchId, cart.id, {
           productId: dbProduct.id,
           quantity: qty,
@@ -325,6 +400,22 @@ export const messageProcessor = {
           modifiers: modifiers || [],
         });
         added.push(`${qty}× ${capitalize(dbProduct.name)}`);
+      }
+
+      if (menuToChoose) {
+        const first = menuToChoose.groups.groups[0];
+        await cartManager.updateTotals(cart.id);
+        return {
+          success: true,
+          response: [
+            ...(added.length ? [`✅ *Agregado:* ${added.join(", ")}`, ""] : []),
+            ...(deferred.length ? [`⚠️ Pide ${deferred.join(", ")} cuando termines este menú.`, ""] : []),
+            `🍽️ Vamos a armar tu *${menuToChoose.name}*${menuToChoose.qty > 1 ? ` (${menuToChoose.qty} con las mismas opciones)` : ""}`,
+            "",
+            groupPrompt(first, 1, menuToChoose.groups.groups.length),
+          ].join("\n"),
+          action: "choose_menu",
+        };
       }
 
       if (added.length === 0) {
@@ -369,6 +460,113 @@ export const messageProcessor = {
     }
   },
 
+  /** Respuesta del cliente a la pregunta de un grupo del menú que está armando (guarnición, bebida...). */
+  async _handleMenuAnswer(sessionId: string, companyId: string, text: string): Promise<ProcessingResult> {
+    const cart = await prisma.whatsAppCart.findFirst({
+      where: { sessionId, status: "ACTIVE" },
+      include: { items: true },
+    });
+    const pending = cart?.items.find((i) => isPendingItem(i));
+    if (!cart || !pending) {
+      return {
+        success: true,
+        response: "🤔 No tengo ningún menú pendiente.\nEscribe *menú* para ver lo que tenemos disponible.",
+        action: "error",
+      };
+    }
+
+    const dropPending = async () => {
+      await prisma.whatsAppCartItem.delete({ where: { id: pending.id } });
+      return cartManager.updateTotals(cart.id);
+    };
+
+    if (isCancelText(text)) {
+      const updated = await dropPending();
+      const summary = await buildCartSummary(cart.id);
+      return {
+        success: true,
+        response: summary
+          ? ["👌 Listo, quité ese menú.", "", "🛒 *Tu pedido*", summary, "━━━━━━━━━━", `💰 *Total: ${formatPrice(updated.total)}*`, "", "¿Algo más? Escríbelo.", "Cuando termines escribe *confirmar* ✅"].join("\n")
+          : "👌 Listo, quité ese menú. Escribe *menú* para ver las opciones.",
+        action: "error",
+      };
+    }
+
+    const config = await menusService.getForPos(companyId, pending.productId);
+    const state = pendingOf(pending.modifiers);
+    const group = config && state ? config.groups[state.groupIndex] : undefined;
+    if (!config || !state || !group) {
+      await dropPending();
+      return { success: false, response: "😕 Ese menú ya no está disponible. Escribe *menú* para ver las opciones.", action: "error" };
+    }
+
+    const total = config.groups.length;
+    const parsed = parseGroupAnswer(text, group);
+    if (!parsed.ok) {
+      return {
+        success: true,
+        response: `🤔 ${parsed.error}\n\n${groupPrompt(group, state.groupIndex + 1, total)}`,
+        action: "choose_menu",
+      };
+    }
+
+    const choiceIds = [...state.choiceIds, ...parsed.optionIds];
+    const nextIndex = state.groupIndex + 1;
+
+    if (nextIndex < total) {
+      await prisma.whatsAppCartItem.update({
+        where: { id: pending.id },
+        data: { modifiers: { menuPending: { choiceIds, groupIndex: nextIndex } } },
+      });
+      return { success: true, response: groupPrompt(config.groups[nextIndex], nextIndex + 1, total), action: "choose_menu" };
+    }
+
+    // Último grupo: el servidor valida todo contra las reglas del menú y calcula el precio final.
+    try {
+      const resolved = await menusService.resolveChoices(companyId, pending.productId, choiceIds);
+      const dbProduct = await catalogService.getProduct(pending.productId, companyId);
+      if (!dbProduct) throw new Error("Ese menú ya no está disponible");
+      const unitPrice = Number(dbProduct.price) + resolved.extraPrice;
+
+      await prisma.whatsAppCartItem.update({
+        where: { id: pending.id },
+        data: {
+          unitPrice,
+          lineTotal: Math.round(unitPrice * pending.quantity * 100) / 100,
+          modifiers: { menuChoices: choiceIds },
+        },
+      });
+
+      const updated = await cartManager.updateTotals(cart.id);
+      const summary = await buildCartSummary(cart.id);
+      return {
+        success: true,
+        response: [
+          `✅ *Agregado:* ${pending.quantity}× ${capitalize(dbProduct.name)}`,
+          ...(resolved.extraPrice > 0 ? [`➕ Incluye ${formatWaPrice(resolved.extraPrice)} de extras`] : []),
+          "",
+          "🛒 *Tu pedido*",
+          summary,
+          "━━━━━━━━━━",
+          ...(updated.discount > 0 ? [`🏷️ Promoción: -${formatPrice(updated.discount)}`] : []),
+          `💰 *Total: ${formatPrice(updated.total)}*`,
+          "",
+          "¿Algo más? Escríbelo.",
+          "Cuando termines escribe *confirmar* ✅",
+        ].join("\n"),
+        action: "add_to_cart",
+      };
+    } catch (error) {
+      console.error("[MessageProcessor] Error cerrando menú:", error);
+      await dropPending();
+      return {
+        success: false,
+        response: `😕 ${error instanceof Error ? error.message : "No pude armar ese menú"}.\nIntenta pedirlo de nuevo o escribe *menú*.`,
+        action: "error",
+      };
+    }
+  },
+
   async _handleModifyCart(
     sessionId: string,
     companyId: string
@@ -402,10 +600,10 @@ export const messageProcessor = {
     try {
       const cart = await prisma.whatsAppCart.findFirst({
         where: { sessionId, status: "ACTIVE" },
-        include: { items: { select: { id: true } } },
+        include: { items: { select: { id: true, modifiers: true } } },
       });
 
-      if (!cart || cart.items.length === 0) {
+      if (!cart || cart.items.filter((i) => !isPendingItem(i)).length === 0) {
         return {
           success: false,
           response: "🛒 Todavía no tienes productos en tu pedido. Escribe *menú* para empezar.",
