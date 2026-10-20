@@ -30,7 +30,8 @@ type GroupForm = {
   options: { optionProductId: string; extraPrice: string }[];
 };
 
-const inputCls = "w-full rounded-md border border-line px-3 py-2 text-sm";
+const inputBase = "rounded-md border border-line px-3 py-2 text-sm";
+const inputCls = `w-full ${inputBase}`;
 
 export function MenusClient({ categories, products }: { categories: Simple[]; products: Simple[] }) {
   const [menus, setMenus] = useState<Menu[]>([]);
@@ -266,6 +267,13 @@ function GroupsModal({
     setSaving(true);
     setError("");
     try {
+      for (const g of groups) {
+        const label = g.name.trim() || "sin nombre";
+        if (!g.name.trim()) throw new Error("Cada grupo necesita un nombre (por ejemplo: Guarnición)");
+        if (!g.options.some((o) => o.optionProductId)) {
+          throw new Error(`En el grupo "${label}" falta elegir un producto en la lista de opciones (el desplegable "Elige un producto...")`);
+        }
+      }
       const body = {
         groups: groups.map((g) => ({
           name: g.name,
@@ -295,7 +303,8 @@ function GroupsModal({
         <div className="px-6 py-4 border-b border-line">
           <p className="font-display text-xl font-semibold">Opciones de: {menu.name}</p>
           <p className="text-xs text-muted">
-            Cada grupo es algo que el cliente elige (guarnición, sopa, bebida). Cargo extra en 0 = incluida en {formatMxn(menu.price)}.
+            Cada grupo es algo que el cliente elige (guarnición, sopa, bebida) y dentro van las opciones. Ejemplo: grupo &quot;Guarnición&quot; con las opciones
+            arroz y puré de papa. Cargo extra en 0 = incluida en {formatMxn(menu.price)}.
           </p>
         </div>
 
@@ -322,7 +331,7 @@ function GroupsModal({
 
               {g.options.map((o, oi) => (
                 <div key={oi} className="flex items-center gap-2">
-                  <select value={o.optionProductId} onChange={(e) => updateOption(gi, oi, { optionProductId: e.target.value })} className={`${inputCls} flex-1`}>
+                  <select value={o.optionProductId} onChange={(e) => updateOption(gi, oi, { optionProductId: e.target.value })} className={`${inputBase} flex-1 min-w-0`}>
                     <option value="">Elige un producto...</option>
                     {products.map((p) => (
                       <option key={p.id} value={p.id}>
@@ -337,7 +346,7 @@ function GroupsModal({
                     step="0.01"
                     value={o.extraPrice}
                     onChange={(e) => updateOption(gi, oi, { extraPrice: e.target.value })}
-                    className={`${inputCls} w-24`}
+                    className={`${inputBase} w-24 shrink-0`}
                   />
                   <button
                     onClick={() => updateGroup(gi, { options: g.options.filter((_, j) => j !== oi) })}

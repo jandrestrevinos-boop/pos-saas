@@ -28,7 +28,8 @@ type CostingRow = {
 
 type RecipeLineForm = { ingredientId: string; quantity: string };
 
-const inputCls = "w-full rounded-md border border-line px-3 py-2 text-sm";
+const inputBase = "rounded-md border border-line px-3 py-2 text-sm";
+const inputCls = `w-full ${inputBase}`;
 
 function fcColor(pct: number | null): string {
   if (pct === null) return "text-muted";
@@ -415,7 +416,7 @@ function RecipeModal({
                 const ing = byId.get(l.ingredientId);
                 return (
                   <div key={idx} className="flex items-center gap-2">
-                    <select value={l.ingredientId} onChange={(e) => update(idx, { ingredientId: e.target.value })} className={`${inputCls} flex-1`}>
+                    <select value={l.ingredientId} onChange={(e) => update(idx, { ingredientId: e.target.value })} className={`${inputBase} flex-1 min-w-0`}>
                       <option value="">Elige un insumo...</option>
                       {ingredients.map((i) => (
                         <option key={i.id} value={i.id} disabled={usedIds.has(i.id) && i.id !== l.ingredientId}>
@@ -429,7 +430,7 @@ function RecipeModal({
                       step="0.001"
                       value={l.quantity}
                       onChange={(e) => update(idx, { quantity: e.target.value })}
-                      className={`${inputCls} w-24`}
+                      className={`${inputBase} w-24 shrink-0`}
                       placeholder="Cant."
                     />
                     <span className="text-xs text-muted w-8">{ing?.unit ?? ""}</span>

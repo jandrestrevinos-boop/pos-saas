@@ -1,0 +1,102 @@
+From 59a9c23346b310edc595dcf47390da509c98c449 Mon Sep 17 00:00:00 2001
+From: Tappy <dev@tappysoftware.com>
+Date: Tue, 20 Oct 2026 18:54:30 +0000
+Subject: [PATCH] Fix: campos de opciones de menu y receta (selector de
+ producto/insumo visible) + mensaje claro
+
+---
+ src/app/(company)/menus/menus-client.tsx     | 17 +++++++++++++----
+ src/app/(company)/recipes/recipes-client.tsx |  7 ++++---
+ 2 files changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/src/app/(company)/menus/menus-client.tsx b/src/app/(company)/menus/menus-client.tsx
+index 8972e9c..1ad9471 100644
+--- a/src/app/(company)/menus/menus-client.tsx
++++ b/src/app/(company)/menus/menus-client.tsx
+@@ -30,7 +30,8 @@ type GroupForm = {
+   options: { optionProductId: string; extraPrice: string }[];
+ };
+ 
+-const inputCls = "w-full rounded-md border border-line px-3 py-2 text-sm";
++const inputBase = "rounded-md border border-line px-3 py-2 text-sm";
++const inputCls = `w-full ${inputBase}`;
+ 
+ export function MenusClient({ categories, products }: { categories: Simple[]; products: Simple[] }) {
+   const [menus, setMenus] = useState<Menu[]>([]);
+@@ -266,6 +267,13 @@ function GroupsModal({
+     setSaving(true);
+     setError("");
+     try {
++      for (const g of groups) {
++        const label = g.name.trim() || "sin nombre";
++        if (!g.name.trim()) throw new Error("Cada grupo necesita un nombre (por ejemplo: Guarnición)");
++        if (!g.options.some((o) => o.optionProductId)) {
++          throw new Error(`En el grupo "${label}" falta elegir un producto en la lista de opciones (el desplegable "Elige un producto...")`);
++        }
++      }
+       const body = {
+         groups: groups.map((g) => ({
+           name: g.name,
+@@ -295,7 +303,8 @@ function GroupsModal({
+         <div className="px-6 py-4 border-b border-line">
+           <p className="font-display text-xl font-semibold">Opciones de: {menu.name}</p>
+           <p className="text-xs text-muted">
+-            Cada grupo es algo que el cliente elige (guarnición, sopa, bebida). Cargo extra en 0 = incluida en {formatMxn(menu.price)}.
++            Cada grupo es algo que el cliente elige (guarnición, sopa, bebida) y dentro van las opciones. Ejemplo: grupo &quot;Guarnición&quot; con las opciones
++            arroz y puré de papa. Cargo extra en 0 = incluida en {formatMxn(menu.price)}.
+           </p>
+         </div>
+ 
+@@ -322,7 +331,7 @@ function GroupsModal({
+ 
+               {g.options.map((o, oi) => (
+                 <div key={oi} className="flex items-center gap-2">
+-                  <select value={o.optionProductId} onChange={(e) => updateOption(gi, oi, { optionProductId: e.target.value })} className={`${inputCls} flex-1`}>
++                  <select value={o.optionProductId} onChange={(e) => updateOption(gi, oi, { optionProductId: e.target.value })} className={`${inputBase} flex-1 min-w-0`}>
+                     <option value="">Elige un producto...</option>
+                     {products.map((p) => (
+                       <option key={p.id} value={p.id}>
+@@ -337,7 +346,7 @@ function GroupsModal({
+                     step="0.01"
+                     value={o.extraPrice}
+                     onChange={(e) => updateOption(gi, oi, { extraPrice: e.target.value })}
+-                    className={`${inputCls} w-24`}
++                    className={`${inputBase} w-24 shrink-0`}
+                   />
+                   <button
+                     onClick={() => updateGroup(gi, { options: g.options.filter((_, j) => j !== oi) })}
+diff --git a/src/app/(company)/recipes/recipes-client.tsx b/src/app/(company)/recipes/recipes-client.tsx
+index 391637e..a0ebaac 100644
+--- a/src/app/(company)/recipes/recipes-client.tsx
++++ b/src/app/(company)/recipes/recipes-client.tsx
+@@ -28,7 +28,8 @@ type CostingRow = {
+ 
+ type RecipeLineForm = { ingredientId: string; quantity: string };
+ 
+-const inputCls = "w-full rounded-md border border-line px-3 py-2 text-sm";
++const inputBase = "rounded-md border border-line px-3 py-2 text-sm";
++const inputCls = `w-full ${inputBase}`;
+ 
+ function fcColor(pct: number | null): string {
+   if (pct === null) return "text-muted";
+@@ -415,7 +416,7 @@ function RecipeModal({
+                 const ing = byId.get(l.ingredientId);
+                 return (
+                   <div key={idx} className="flex items-center gap-2">
+-                    <select value={l.ingredientId} onChange={(e) => update(idx, { ingredientId: e.target.value })} className={`${inputCls} flex-1`}>
++                    <select value={l.ingredientId} onChange={(e) => update(idx, { ingredientId: e.target.value })} className={`${inputBase} flex-1 min-w-0`}>
+                       <option value="">Elige un insumo...</option>
+                       {ingredients.map((i) => (
+                         <option key={i.id} value={i.id} disabled={usedIds.has(i.id) && i.id !== l.ingredientId}>
+@@ -429,7 +430,7 @@ function RecipeModal({
+                       step="0.001"
+                       value={l.quantity}
+                       onChange={(e) => update(idx, { quantity: e.target.value })}
+-                      className={`${inputCls} w-24`}
++                      className={`${inputBase} w-24 shrink-0`}
+                       placeholder="Cant."
+                     />
+                     <span className="text-xs text-muted w-8">{ing?.unit ?? ""}</span>
+-- 
+2.43.0
+
