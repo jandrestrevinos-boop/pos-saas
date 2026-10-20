@@ -21,11 +21,14 @@ type LoyaltyResult = {
 type Category = { id: string; name: string };
 type Product = { id: string; name: string; price: string; categoryId: string; imageUrl?: string | null; isMenu?: boolean };
 // Menús completos: grupos de opciones (guarnición, bebida...). extraPrice 0 = incluida en el precio fijo.
-type MenuChoiceOption = { id: string; name: string; extraPrice: number };
+// isExtra: viene de un grupo de extras o cobra aparte. Un extra sin costo también se marca como extra.
+type MenuChoiceOption = { id: string; name: string; extraPrice: number; isExtra?: boolean };
 type MenuConfig = {
   id: string; // = id del producto-menú
-  groups: { id: string; name: string; minSelect: number; maxSelect: number; options: MenuChoiceOption[] }[];
+  groups: { id: string; name: string; minSelect: number; maxSelect: number; isExtra?: boolean; options: MenuChoiceOption[] }[];
 };
+
+const isExtraChoice = (c: MenuChoiceOption) => !!c.isExtra || c.extraPrice > 0;
 // lineId: un producto normal se agrupa por producto; un menú, por producto + elecciones (dos comidas
 // con guarniciones distintas son renglones distintos). unitPrice ya incluye el cargo extra elegido.
 type CartLine = { lineId: string; product: Product; quantity: number; unitPrice: number; choices: MenuChoiceOption[] };
@@ -33,7 +36,7 @@ type CartLine = { lineId: string; product: Product; quantity: number; unitPrice:
 // Nombre del renglón para recibos/tickets: lo elegido va entre paréntesis y lo que cobra aparte se marca "extra".
 function lineLabel(l: CartLine): string {
   return l.choices.length > 0
-    ? `${l.product.name} (${l.choices.map((c) => (c.extraPrice > 0 ? `${c.name} - extra` : c.name)).join(", ")})`
+    ? `${l.product.name} (${l.choices.map((c) => (isExtraChoice(c) ? `${c.name} - extra` : c.name)).join(", ")})`
     : l.product.name;
 }
 type TableOption = { id: string; name: string; status: string };
@@ -342,14 +345,14 @@ function PosClientInner({
                   <li key={line.lineId} className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <p className="text-sm font-medium truncate">{line.product.name}</p>
-                      {line.choices.some((c) => c.extraPrice === 0) && (
+                      {line.choices.some((c) => !isExtraChoice(c)) && (
                         <p className="text-xs text-muted">
-                          Incluye: {line.choices.filter((c) => c.extraPrice === 0).map((c) => c.name).join(" · ")}
+                          Incluye: {line.choices.filter((c) => !isExtraChoice(c)).map((c) => c.name).join(" · ")}
                         </p>
                       )}
-                      {line.choices.filter((c) => c.extraPrice > 0).map((c) => (
+                      {line.choices.filter(isExtraChoice).map((c) => (
                         <p key={c.id} className="text-xs font-medium text-ember-dark">
-                          Extra: {c.name} +{formatMxn(c.extraPrice)}
+                          Extra: {c.name} {c.extraPrice > 0 ? `+${formatMxn(c.extraPrice)}` : "(sin costo)"}
                         </p>
                       ))}
                       <p className="text-xs text-muted font-mono">{formatMxn(line.unitPrice)} c/u</p>
@@ -535,7 +538,10 @@ function MenuPickerModal({
   }
 
   const choices: MenuChoiceOption[] = config.groups.flatMap((g) =>
-    (selected[g.id] ?? []).map((id) => g.options.find((o) => o.id === id)!).filter(Boolean)
+    (selected[g.id] ?? [])
+      .map((id) => g.options.find((o) => o.id === id)!)
+      .filter(Boolean)
+      .map((o) => ({ ...o, isExtra: !!g.isExtra || o.extraPrice > 0 }))
   );
   const missing = config.groups.find((g) => (selected[g.id]?.length ?? 0) < g.minSelect);
   const extra = choices.reduce((sum, c) => sum + c.extraPrice, 0);
@@ -555,7 +561,10 @@ function MenuPickerModal({
             return (
               <div key={g.id}>
                 <div className="flex items-baseline justify-between mb-2">
-                  <p className="text-sm font-medium">{g.name}</p>
+                  <p className="text-sm font-medium">
+                    {g.name}
+                    {g.isExtra && <span className="ml-2 text-xs bg-ember/15 text-ember-dark px-1.5 py-0.5 rounded font-normal">Extras</span>}
+                  </p>
                   <p className="text-xs text-muted">
                     {g.minSelect === g.maxSelect
                       ? `Elige ${g.maxSelect}`
@@ -578,7 +587,11 @@ function MenuPickerModal({
                         }`}
                       >
                         {o.name}
-                        {o.extraPrice > 0 && <span className="ml-1.5 font-mono text-xs opacity-80">+{formatMxn(o.extraPrice)}</span>}
+                        {o.extraPrice > 0 ? (
+                          <span className="ml-1.5 font-mono text-xs opacity-80">+{formatMxn(o.extraPrice)}</span>
+                        ) : (
+                          g.isExtra && <span className="ml-1.5 text-xs opacity-70">sin costo</span>
+                        )}
                       </button>
                     );
                   })}

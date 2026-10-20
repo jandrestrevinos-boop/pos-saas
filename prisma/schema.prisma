@@ -1207,6 +1207,9 @@ model MenuGroup {
   minSelect Int     @default(1)
   maxSelect Int     @default(1)
   sortOrder Int     @default(0)
+  // Grupo de "extras" opcionales (salsa, queso, tortillas...): todo lo que se elija aquí se marca como
+  // EXTRA en carrito, cocina y tickets, tenga costo o no (extraPrice 0 = extra sin costo).
+  isExtra   Boolean @default(false)
 
   options MenuOption[]
 
@@ -1237,6 +1240,8 @@ model OrderItemMenuChoice {
   orderItem       OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
   optionProductId String
   name            String
+  // true si era un extra (de un grupo de extras o con cargo): cocina lo marca aunque no haya costado.
+  isExtra         Boolean   @default(false)
   extraPriceAtSale Decimal  @default(0) @db.Decimal(10, 2)
   costAtSale       Decimal  @default(0) @db.Decimal(10, 2)
 

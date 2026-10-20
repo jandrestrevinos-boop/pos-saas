@@ -13,6 +13,8 @@ export interface WaMenuGroup {
   name: string;
   minSelect: number;
   maxSelect: number;
+  /** Grupo de extras opcionales: lo que se elija es "extra" aunque cueste $0. */
+  isExtra?: boolean;
   options: WaMenuOption[];
 }
 
@@ -30,14 +32,15 @@ function normalize(text: string): string {
     .trim();
 }
 
-export function optionLabel(o: WaMenuOption): string {
-  return o.extraPrice > 0 ? `${o.name} (+${formatWaPrice(o.extraPrice)} extra)` : o.name;
+export function optionLabel(o: WaMenuOption, groupIsExtra = false): string {
+  if (o.extraPrice > 0) return `${o.name} (+${formatWaPrice(o.extraPrice)} extra)`;
+  return groupIsExtra ? `${o.name} (extra sin costo)` : o.name;
 }
 
 /** "Guarnición (elige 1): Arroz, Puré de papa (+$45 extra)" — para mostrar el menú completo. */
 export function describeGroup(g: WaMenuGroup): string {
   const rule = g.minSelect === g.maxSelect ? `elige ${g.maxSelect}` : g.minSelect === 0 ? `hasta ${g.maxSelect}` : `elige de ${g.minSelect} a ${g.maxSelect}`;
-  return `${g.name} (${rule}): ${g.options.map(optionLabel).join(", ")}`;
+  return `${g.name} (${rule}): ${g.options.map((o) => optionLabel(o, g.isExtra)).join(", ")}`;
 }
 
 /** Pregunta del bot para un grupo, con las opciones numeradas. */
@@ -48,7 +51,7 @@ export function groupPrompt(g: WaMenuGroup, position: number, total: number): st
       : g.minSelect === 0
         ? `Elige hasta *${g.maxSelect}* (o escribe *ninguna*)`
         : `Elige de *${g.minSelect}* a *${g.maxSelect}*`;
-  const lines = g.options.map((o, i) => `${i + 1}. ${optionLabel(o)}`);
+  const lines = g.options.map((o, i) => `${i + 1}. ${optionLabel(o, g.isExtra)}`);
   return [
     `🍽️ *${g.name}* (${position} de ${total})`,
     rule,

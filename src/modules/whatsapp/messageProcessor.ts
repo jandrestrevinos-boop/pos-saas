@@ -69,8 +69,11 @@ async function buildCartSummary(cartId: string): Promise<string> {
 
   // Menús completos: se listan debajo lo que lleva y, aparte, lo que cobra extra.
   const choiceIds = ready.flatMap((i) => choicesOf(i.modifiers));
-  const options: { id: string; extraPrice: unknown; optionProduct: { name: string } }[] = choiceIds.length
-    ? await prisma.menuOption.findMany({ where: { id: { in: choiceIds } }, include: { optionProduct: { select: { name: true } } } })
+  const options: { id: string; extraPrice: unknown; group: { isExtra: boolean }; optionProduct: { name: string } }[] = choiceIds.length
+    ? await prisma.menuOption.findMany({
+        where: { id: { in: choiceIds } },
+        include: { group: { select: { isExtra: true } }, optionProduct: { select: { name: true } } },
+      })
     : [];
   const optionById = new Map(options.map((o) => [o.id, o]));
 
@@ -82,7 +85,8 @@ async function buildCartSummary(cartId: string): Promise<string> {
         .filter((o): o is NonNullable<typeof o> => !!o)
         .map((o) => {
           const extra = Number(o.extraPrice);
-          return `      ◦ ${capitalize(o.optionProduct.name)}${extra > 0 ? ` (+${formatPrice(extra)} extra)` : ""}`;
+          const tag = extra > 0 ? ` (+${formatPrice(extra)} extra)` : o.group.isExtra ? " (extra sin costo)" : "";
+          return `      ◦ ${capitalize(o.optionProduct.name)}${tag}`;
         });
       return [head, ...lines].join("\n");
     })

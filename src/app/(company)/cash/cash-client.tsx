@@ -60,12 +60,12 @@ type PendingOrderItem = {
   id: string;
   quantity: number;
   product: { name: string };
-  menuChoices?: { id: string; name: string; extraPriceAtSale?: string | number }[];
+  menuChoices?: { id: string; name: string; isExtra?: boolean; extraPriceAtSale?: string | number }[];
 };
 
 // Menús completos: "Comida (Arroz, Puré de papa - extra)" para que quien cobra vea qué lleva y qué cobra aparte.
 function itemLabel(i: PendingOrderItem): string {
-  const choices = (i.menuChoices ?? []).map((c) => (Number(c.extraPriceAtSale ?? 0) > 0 ? `${c.name} - extra` : c.name));
+  const choices = (i.menuChoices ?? []).map((c) => (c.isExtra || Number(c.extraPriceAtSale ?? 0) > 0 ? `${c.name} - extra` : c.name));
   return choices.length > 0 ? `${i.product.name} (${choices.join(", ")})` : i.product.name;
 }
 type PendingOrder = {

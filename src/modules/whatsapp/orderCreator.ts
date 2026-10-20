@@ -85,6 +85,7 @@ export const orderCreator = {
                         create: menu.choices.map((c) => ({
                           optionProductId: c.optionProductId,
                           name: c.name,
+                          isExtra: c.isExtra,
                           extraPriceAtSale: c.extraPriceAtSale,
                           costAtSale: c.costAtSale,
                         })),

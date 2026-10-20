@@ -16,6 +16,8 @@ export const menuGroupsSchema = z.object({
         name: z.string().trim().min(1, "Cada grupo necesita un nombre").max(60),
         minSelect: z.coerce.number().int().min(0).max(20),
         maxSelect: z.coerce.number().int().min(1).max(20),
+        // Grupo de extras opcionales: lo elegido se marca EXTRA aunque cueste $0.
+        isExtra: z.boolean().default(false),
         options: z
           .array(
             z.object({
@@ -34,6 +36,7 @@ export const menuGroupsSchema = z.object({
 export type ChosenOption = {
   optionProductId: string;
   name: string;
+  isExtra: boolean;
   extraPriceAtSale: number;
   costAtSale: number;
 };
@@ -44,7 +47,7 @@ type OptionRow = {
   optionProductId: string;
   optionProduct: { id: string; name: string; cost: unknown; isActive: boolean };
 };
-type GroupRow = { id: string; name: string; minSelect: number; maxSelect: number; sortOrder: number; options: OptionRow[] };
+type GroupRow = { id: string; name: string; minSelect: number; maxSelect: number; sortOrder: number; isExtra: boolean; options: OptionRow[] };
 
 const GROUP_INCLUDE = {
   options: { include: { optionProduct: { select: { id: true, name: true, cost: true, isActive: true } } } },
@@ -90,6 +93,7 @@ export const menusService = {
           name: g.name,
           minSelect: g.minSelect,
           maxSelect: g.maxSelect,
+          isExtra: g.isExtra,
           options: g.options.map((o) => ({
             id: o.id,
             optionProductId: o.optionProductId,
@@ -171,6 +175,7 @@ export const menusService = {
             name: g.name,
             minSelect: g.minSelect,
             maxSelect: g.maxSelect,
+            isExtra: g.isExtra,
             sortOrder: order++,
             options: { create: g.options.map((o) => ({ optionProductId: o.optionProductId, extraPrice: o.extraPrice })) },
           },
@@ -193,6 +198,7 @@ export const menusService = {
           name: g.name,
           minSelect: g.minSelect,
           maxSelect: g.maxSelect,
+          isExtra: g.isExtra,
           options: g.options.filter((o) => o.isActive).map((o) => ({ id: o.id, name: o.name, extraPrice: o.extraPrice })),
         })),
       }));
@@ -245,6 +251,8 @@ export const menusService = {
       choices.push({
         optionProductId: hit.option.optionProductId,
         name: hit.option.optionProduct.name,
+        // Extra = viene de un grupo de extras O cobra aparte; así un extra sin costo también se marca.
+        isExtra: hit.group.isExtra || price > 0,
         extraPriceAtSale: price,
         costAtSale: cost,
       });

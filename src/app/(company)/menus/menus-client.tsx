@@ -18,6 +18,7 @@ type Menu = {
     name: string;
     minSelect: number;
     maxSelect: number;
+    isExtra: boolean;
     options: { id: string; optionProductId: string; name: string; extraPrice: number; cost: number; isActive: boolean }[];
   }[];
 };
@@ -27,6 +28,7 @@ type GroupForm = {
   name: string;
   minSelect: string;
   maxSelect: string;
+  isExtra: boolean;
   options: { optionProductId: string; extraPrice: string }[];
 };
 
@@ -95,12 +97,13 @@ export function MenusClient({ categories, products }: { categories: Simple[]; pr
                     <span className="font-medium">{g.name}</span>
                     <span className="text-muted">
                       {" "}
-                      ({g.minSelect === g.maxSelect ? `elige ${g.maxSelect}` : `de ${g.minSelect} a ${g.maxSelect}`}):{" "}
+                      ({g.isExtra ? "extras opcionales, " : ""}
+                      {g.minSelect === g.maxSelect ? `elige ${g.maxSelect}` : `de ${g.minSelect} a ${g.maxSelect}`}):{" "}
                     </span>
                     {g.options.map((o, i) => (
                       <span key={o.id}>
                         {o.name}
-                        <span className="text-muted">{o.extraPrice > 0 ? ` +${formatMxn(o.extraPrice)}` : " (incluida)"}</span>
+                        <span className="text-muted">{o.extraPrice > 0 ? ` +${formatMxn(o.extraPrice)}` : g.isExtra ? " (extra sin costo)" : " (incluida)"}</span>
                         {i < g.options.length - 1 ? ", " : ""}
                       </span>
                     ))}
@@ -248,6 +251,7 @@ function GroupsModal({
       name: g.name,
       minSelect: String(g.minSelect),
       maxSelect: String(g.maxSelect),
+      isExtra: g.isExtra,
       options: g.options.map((o) => ({ optionProductId: o.optionProductId, extraPrice: String(o.extraPrice) })),
     }))
   );
@@ -279,6 +283,7 @@ function GroupsModal({
           name: g.name,
           minSelect: Number(g.minSelect),
           maxSelect: Number(g.maxSelect),
+          isExtra: g.isExtra,
           options: g.options.filter((o) => o.optionProductId).map((o) => ({ optionProductId: o.optionProductId, extraPrice: Number(o.extraPrice || 0) })),
         })),
       };
@@ -329,6 +334,25 @@ function GroupsModal({
                 </button>
               </div>
 
+              <label className="flex items-start gap-2 text-xs text-muted">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={g.isExtra}
+                  onChange={(e) =>
+                    updateGroup(gi, {
+                      isExtra: e.target.checked,
+                      // Los extras son opcionales: al marcarlo, el mínimo pasa a 0 (se puede cambiar).
+                      ...(e.target.checked && g.minSelect === "1" ? { minSelect: "0" } : {}),
+                    })
+                  }
+                />
+                <span>
+                  Grupo de extras opcionales: lo que se elija aquí se marca como <strong>EXTRA</strong> en el carrito y en Cocina, tenga costo o
+                  no (con extra $0 es un extra sin costo).
+                </span>
+              </label>
+
               {g.options.map((o, oi) => (
                 <div key={oi} className="flex items-center gap-2">
                   <select value={o.optionProductId} onChange={(e) => updateOption(gi, oi, { optionProductId: e.target.value })} className={`${inputBase} flex-1 min-w-0`}>
@@ -366,12 +390,20 @@ function GroupsModal({
             </div>
           ))}
 
-          <button
-            onClick={() => setGroups((prev) => [...prev, { name: "", minSelect: "1", maxSelect: "1", options: [{ optionProductId: "", extraPrice: "0" }] }])}
-            className="rounded-md border border-line px-4 py-2 text-sm"
-          >
-            + Nuevo grupo
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => setGroups((prev) => [...prev, { name: "", minSelect: "1", maxSelect: "1", isExtra: false, options: [{ optionProductId: "", extraPrice: "0" }] }])}
+              className="rounded-md border border-line px-4 py-2 text-sm"
+            >
+              + Nuevo grupo
+            </button>
+            <button
+              onClick={() => setGroups((prev) => [...prev, { name: "Extras", minSelect: "0", maxSelect: "3", isExtra: true, options: [{ optionProductId: "", extraPrice: "0" }] }])}
+              className="rounded-md border border-line px-4 py-2 text-sm"
+            >
+              + Grupo de extras
+            </button>
+          </div>
         </div>
 
         <div className="px-6 py-4 border-t border-line space-y-3">
