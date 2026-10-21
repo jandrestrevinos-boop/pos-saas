@@ -49,7 +49,9 @@ export function groupPrompt(g: WaMenuGroup, position: number, total: number): st
     g.minSelect === g.maxSelect
       ? `Elige *${g.maxSelect}*`
       : g.minSelect === 0
-        ? `Elige hasta *${g.maxSelect}* (o escribe *ninguna*)`
+        ? g.isExtra
+          ? `¿Quieres agregar algún extra? Elige hasta *${g.maxSelect}*, o escribe *ninguna* si no`
+          : `Elige hasta *${g.maxSelect}* (o escribe *ninguna*)`
         : `Elige de *${g.minSelect}* a *${g.maxSelect}*`;
   const lines = g.options.map((o, i) => `${i + 1}. ${optionLabel(o, g.isExtra)}`);
   return [

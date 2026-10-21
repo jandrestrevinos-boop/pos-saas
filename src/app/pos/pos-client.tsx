@@ -552,7 +552,11 @@ function MenuPickerModal({
       <div className="bg-paper-raised rounded-lg w-full max-w-md max-h-[90vh] flex flex-col">
         <div className="px-6 py-4 border-b border-line">
           <p className="font-display text-xl font-semibold">{product.name}</p>
-          <p className="text-xs text-muted">Elige lo que lleva el menú</p>
+          <p className="text-xs text-muted">
+            {config.groups.every((g) => g.minSelect === 0)
+              ? "Todo es opcional: agrega un extra solo si el cliente lo pide."
+              : "Elige lo que lleva el menú"}
+          </p>
         </div>
 
         <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
@@ -564,6 +568,7 @@ function MenuPickerModal({
                   <p className="text-sm font-medium">
                     {g.name}
                     {g.isExtra && <span className="ml-2 text-xs bg-ember/15 text-ember-dark px-1.5 py-0.5 rounded font-normal">Extras</span>}
+                    {g.minSelect === 0 && <span className="ml-2 text-xs bg-ink-100 text-muted px-1.5 py-0.5 rounded font-normal">Opcional</span>}
                   </p>
                   <p className="text-xs text-muted">
                     {g.minSelect === g.maxSelect
@@ -574,6 +579,11 @@ function MenuPickerModal({
                     · {count} elegida{count === 1 ? "" : "s"}
                   </p>
                 </div>
+                {g.minSelect === 0 && (
+                  <p className="text-xs text-muted mb-2">
+                    {g.isExtra ? "¿El cliente quiere agregar algún extra?" : "Opcional."} Si no, déjalo sin elegir y continúa.
+                  </p>
+                )}
                 <div className="flex flex-wrap gap-2">
                   {g.options.map((o) => {
                     const on = selected[g.id]?.includes(o.id) ?? false;
@@ -613,7 +623,7 @@ function MenuPickerModal({
               onClick={() => onConfirm(choices)}
               className="flex-1 rounded-md bg-ember text-white py-3 text-sm font-medium disabled:opacity-40"
             >
-              Agregar · {formatMxn(price)}
+              {choices.length === 0 && config.groups.every((g) => g.minSelect === 0) ? "Sin extras" : "Agregar"} · {formatMxn(price)}
             </button>
           </div>
         </div>
