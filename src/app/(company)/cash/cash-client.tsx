@@ -11,7 +11,7 @@ type Movement = { id: string; type: string; amount: string; reason: string | nul
 type OpenStatus = {
   open: true;
   register: { id: string; openedAt: string; openingCash: string; movements: Movement[] };
-  salesTotals: { cash: number; card: number; transfer: number; other: number };
+  salesTotals: { cash: number; card: number; transfer: number; other: number; cashTips?: number };
   expectedCash: number;
 };
 type ClosedStatus = { open: false; requireOpenCashDay?: boolean };
@@ -378,6 +378,11 @@ function OpenRegisterView({
         <Card className="p-5">
           <p className="text-xs font-medium uppercase tracking-wide text-muted">Efectivo esperado en caja</p>
           <p className="font-mono text-xl mt-1.5">{formatMxn(status.expectedCash)}</p>
+          {(status.salesTotals.cashTips ?? 0) > 0 && (
+            <p className="text-xs text-muted mt-1">
+              Incluye {formatMxn(status.salesTotals.cashTips ?? 0)} de propinas en efectivo
+            </p>
+          )}
         </Card>
       </div>
 

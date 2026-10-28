@@ -74,6 +74,12 @@ export function CutReportView({ report }: { report: CutReport }) {
         <Row label="Subtotal" value={money(report.sales.subtotal)} />
         <Row label="Descuentos" value={`-${money(report.sales.discounts)}`} />
         <Row label="Total vendido" value={money(report.sales.total)} bold />
+        {(report.sales.tips ?? 0) > 0 && (
+          <>
+            <Row label="Propinas" value={money(report.sales.tips ?? 0)} />
+            <Row label="Total cobrado (con propinas)" value={money(report.sales.totalCollected ?? report.sales.total)} bold />
+          </>
+        )}
       </Section>
 
       <Section title="Por método de pago">
@@ -83,6 +89,9 @@ export function CutReportView({ report }: { report: CutReport }) {
           report.byMethod.map((m) => (
             <Row key={m.method} label={`${m.label} (${m.count})`} value={money(m.amount)} />
           ))
+        )}
+        {(report.sales.tips ?? 0) > 0 && (
+          <p className="text-xs text-muted mt-1">Los montos por método no incluyen propinas.</p>
         )}
       </Section>
 
@@ -144,6 +153,7 @@ export function CutReportView({ report }: { report: CutReport }) {
       <Section title="Efectivo en caja">
         <Row label="Fondo inicial" value={money(report.cash.opening)} />
         <Row label="Ventas en efectivo" value={money(report.cash.sales)} />
+        {(report.cash.tips ?? 0) > 0 && <Row label="Propinas en efectivo" value={money(report.cash.tips ?? 0)} />}
         <Row label="Entradas" value={money(report.cash.cashIn)} />
         <Row label="Retiros y devoluciones" value={`-${money(report.cash.cashOut)}`} />
         <Row label="Efectivo esperado" value={money(report.cash.expected)} bold />

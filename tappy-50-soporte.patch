@@ -1,0 +1,125 @@
+From ebde3c855d79d22917b74939fbeddbd5fae16296 Mon Sep 17 00:00:00 2001
+From: Tappy <x@x>
+Date: Tue, 27 Oct 2026 00:49:06 +0000
+Subject: [PATCH] =?UTF-8?q?Soporte:=20opci=C3=B3n=20=C2=BFNecesitas=20apoy?=
+ =?UTF-8?q?o=3F=20en=20el=20men=C3=BA=20lateral=20+=20pantalla=20/soporte?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/app/(company)/layout.tsx       |  3 ++
+ src/app/(company)/soporte/page.tsx | 57 ++++++++++++++++++++++++++++++
+ src/lib/support-contact.ts         | 22 ++++++++++++
+ 3 files changed, 82 insertions(+)
+ create mode 100644 src/app/(company)/soporte/page.tsx
+ create mode 100644 src/lib/support-contact.ts
+
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index a41b2a2..f49a7cd 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -156,6 +156,9 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+   });
+   const vertical = getVertical(companyRow?.businessType);
+ 
++  // Soporte: visible para todos los roles, siempre al final del menú.
++  navItems = [...navItems, { href: "/soporte", label: "¿Necesitas apoyo?" }];
++
+   const visibleNavItems = navItems.filter(
+     (item) =>
+       !vertical.hiddenNavHrefs.includes(item.href) &&
+diff --git a/src/app/(company)/soporte/page.tsx b/src/app/(company)/soporte/page.tsx
+new file mode 100644
+index 0000000..9c404cd
+--- /dev/null
++++ b/src/app/(company)/soporte/page.tsx
+@@ -0,0 +1,57 @@
++import { redirect } from "next/navigation";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { Card } from "@/components/ui";
++import { getSupportContact } from "@/lib/support-contact";
++
++export default async function SupportPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++
++  const contact = getSupportContact();
++  const subject = encodeURIComponent("Necesito apoyo con Tappy");
++
++  return (
++    <div className="max-w-2xl">
++      <h1 className="font-display text-3xl font-semibold mb-1">¿Necesitas apoyo?</h1>
++      <p className="text-muted text-sm mb-8">
++        Contacta a nuestro personal de soporte. Cuéntanos qué pasó y, si puedes, en qué pantalla estabas.
++      </p>
++
++      <div className="grid gap-4">
++        {contact.whatsappHref && (
++          <Card className="p-5">
++            <p className="font-medium mb-1">WhatsApp</p>
++            <p className="text-muted text-sm mb-3">La forma más rápida de recibir ayuda.</p>
++            <a
++              href={contact.whatsappHref}
++              target="_blank"
++              rel="noopener noreferrer"
++              className="inline-block rounded-md bg-ember text-white px-4 py-2 text-sm font-medium"
++            >
++              Escribir por WhatsApp
++            </a>
++          </Card>
++        )}
++
++        {contact.phone && contact.phoneHref && (
++          <Card className="p-5">
++            <p className="font-medium mb-1">Teléfono</p>
++            <a href={contact.phoneHref} className="font-mono text-lg underline">
++              {contact.phone}
++            </a>
++          </Card>
++        )}
++
++        <Card className="p-5">
++          <p className="font-medium mb-1">Correo de soporte</p>
++          <a href={`mailto:${contact.email}?subject=${subject}`} className="underline">
++            {contact.email}
++          </a>
++        </Card>
++
++        {contact.hours && <p className="text-muted text-sm">Horario de atención: {contact.hours}</p>}
++      </div>
++    </div>
++  );
++}
+diff --git a/src/lib/support-contact.ts b/src/lib/support-contact.ts
+new file mode 100644
+index 0000000..0a54e31
+--- /dev/null
++++ b/src/lib/support-contact.ts
+@@ -0,0 +1,22 @@
++/**
++ * Datos de contacto del soporte de Tappy que ven los restaurantes.
++ * Se configuran con variables de entorno en Vercel (sin tocar código):
++ *   SUPPORT_EMAIL     correo de soporte (default: contacto@tappysoftware.com)
++ *   SUPPORT_PHONE     teléfono de soporte, ej. "+52 81 1234 5678"
++ *   SUPPORT_WHATSAPP  número de WhatsApp solo dígitos con lada, ej. "5218112345678"
++ *                     (si no se define, se usa SUPPORT_PHONE)
++ *   SUPPORT_HOURS     horario de atención (texto libre)
++ */
++export function getSupportContact() {
++  const email = process.env.SUPPORT_EMAIL?.trim() || "contacto@tappysoftware.com";
++  const phone = process.env.SUPPORT_PHONE?.trim() || null;
++  const whatsappDigits = (process.env.SUPPORT_WHATSAPP?.trim() || phone || "").replace(/\D/g, "");
++  const hours = process.env.SUPPORT_HOURS?.trim() || null;
++  return {
++    email,
++    phone,
++    phoneHref: phone ? `tel:${phone.replace(/[^\d+]/g, "")}` : null,
++    whatsappHref: whatsappDigits ? `https://wa.me/${whatsappDigits}` : null,
++    hours,
++  };
++}
+-- 
+2.43.0
+

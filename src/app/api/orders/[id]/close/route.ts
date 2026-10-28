@@ -42,7 +42,13 @@ export async function POST(req: Request, { params }: { params: { id: string } })
       if (!terminal) {
         return NextResponse.json({ error: "Esta sucursal no tiene una terminal vinculada" }, { status: 400 });
       }
-      pointOrder = await mercadoPagoService.createPointOrder(companyId, order.id, Number(order.total), terminal.terminalId);
+      // La terminal cobra total + propina.
+      pointOrder = await mercadoPagoService.createPointOrder(
+        companyId,
+        order.id,
+        Math.round((Number(order.total) + Number(order.tip)) * 100) / 100,
+        terminal.terminalId
+      );
     }
 
     return NextResponse.json({ order, mpCheckout, pointOrder });

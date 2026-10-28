@@ -32,7 +32,8 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
     const pointOrder = await mercadoPagoService.createPointOrder(
       companyId,
       order.id,
-      Number(order.total),
+      // La terminal cobra total + propina.
+      Math.round((Number(order.total) + Number(order.tip)) * 100) / 100,
       terminal.terminalId
     );
     return NextResponse.json({ pointOrder });

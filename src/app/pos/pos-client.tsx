@@ -8,6 +8,13 @@ import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
 import { evaluatePromotions, type PromotionRule } from "@/lib/promotions";
 import { PosLoyaltyPanel, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
 import { useBranding } from "@/components/branding-context";
+import {
+  PaymentMethodPicker,
+  TipPicker,
+  round2,
+  type CardProvider,
+  type CheckoutMethod,
+} from "@/components/checkout/checkout-options";
 
 type LoyaltyResult = {
   customerName: string;
@@ -41,11 +48,10 @@ function lineLabel(l: CartLine): string {
 }
 type TableOption = { id: string; name: string; status: string };
 
-const PAYMENT_METHODS: { value: "CASH" | "CARD" | "TRANSFER" | "OTHER"; label: string }[] = [
+const PAYMENT_METHODS: { value: "CASH" | "CARD" | "TRANSFER"; label: string }[] = [
   { value: "CASH", label: "Efectivo" },
   { value: "CARD", label: "Tarjeta" },
   { value: "TRANSFER", label: "Transferencia" },
-  { value: "OTHER", label: "Otro" },
 ];
 
 export function PosClient(props: {
@@ -657,9 +663,9 @@ function CheckoutModal({
   onClose: () => void;
   onDone: () => void;
 }) {
-  const [method, setMethod] = useState<
-    "CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO" | "MERCADOPAGO_TERMINAL"
-  >("CASH");
+  const [method, setMethod] = useState<CheckoutMethod>("CASH");
+  const [cardProvider, setCardProvider] = useState<CardProvider>(null);
+  const [tip, setTip] = useState(0);
   const [cashReceived, setCashReceived] = useState("");
   const [orderType, setOrderType] = useState<"COMER_AQUI" | "PARA_LLEVAR" | "DOMICILIO">("COMER_AQUI");
   const [notes, setNotes] = useState("");
@@ -676,6 +682,7 @@ function CheckoutModal({
     subtotal: number;
     discount: number;
     total: number;
+    tip: number;
     paymentMethod: string;
     cashReceived: number;
     change: number;
@@ -700,13 +707,15 @@ function CheckoutModal({
   const [checkingPointStatus, setCheckingPointStatus] = useState(false);
   const [pointStatusMessage, setPointStatusMessage] = useState("");
 
+  // Lo que realmente paga el cliente: total de la venta + propina.
+  const payable = round2(total + tip);
   const cashReceivedNum = parseFloat(cashReceived) || 0;
-  const change = cashReceivedNum - total;
+  const change = cashReceivedNum - payable;
 
   async function handleConfirm() {
     setError("");
 
-    if (method === "CASH" && cashReceivedNum < total) {
+    if (method === "CASH" && cashReceivedNum < payable) {
       setError("El efectivo recibido es menor al total.");
       return;
     }
@@ -728,6 +737,8 @@ function CheckoutModal({
           loyaltyCustomerId: loyalty?.customer.id,
           redeemLoyalty: !!loyalty?.redeem,
           paymentMethod: method,
+          cardProvider: method === "CARD" && cardProvider ? cardProvider : undefined,
+          tip,
           cashReceived: method === "CASH" ? cashReceivedNum : undefined,
           orderType,
           notes: notes.trim() || undefined,
@@ -787,6 +798,7 @@ function CheckoutModal({
         subtotal,
         discount,
         total,
+        tip,
         paymentMethod: method,
         cashReceived: cashReceivedNum,
         change: Math.max(change, 0),
@@ -819,8 +831,9 @@ function CheckoutModal({
           subtotal,
           discount,
           total,
+          tip,
           paymentMethod: "MERCADOPAGO",
-          cashReceived: total,
+          cashReceived: payable,
           change: 0,
           orderType,
           notes: notes.trim(),
@@ -856,8 +869,9 @@ function CheckoutModal({
           subtotal,
           discount,
           total,
+          tip,
           paymentMethod: "MERCADOPAGO_TERMINAL",
-          cashReceived: total,
+          cashReceived: payable,
           change: 0,
           orderType,
           notes: notes.trim(),
@@ -1134,6 +1148,22 @@ function CheckoutModal({
           </div>
 
           ${
+            completedOrder.tip > 0
+              ? `
+                <div class="row">
+                  <span>Propina</span>
+                  <span>$${completedOrder.tip.toFixed(2)}</span>
+                </div>
+
+                <div class="row total-row">
+                  <span>TOTAL PAGADO</span>
+                  <span>$${(completedOrder.total + completedOrder.tip).toFixed(2)}</span>
+                </div>
+              `
+              : ""
+          }
+
+          ${
             completedOrder.paymentMethod === "CASH" &&
             completedOrder.change > 0
               ? `
@@ -1199,9 +1229,12 @@ function CheckoutModal({
             </p>
           )}
 
-          <p className="font-mono text-xl mb-4">
-            {formatMxn(completedOrder.total)}
+          <p className={`font-mono text-xl ${completedOrder.tip > 0 ? "mb-1" : "mb-4"}`}>
+            {formatMxn(completedOrder.total + completedOrder.tip)}
           </p>
+          {completedOrder.tip > 0 && (
+            <p className="text-muted text-xs mb-4">Incluye propina de {formatMxn(completedOrder.tip)}</p>
+          )}
 
           {completedOrder.loyalty && (
             <div className="text-sm bg-sage-light text-sage rounded-md px-3 py-2 mb-4">
@@ -1266,6 +1299,15 @@ function CheckoutModal({
           <span className="font-mono font-semibold text-ink">
             {formatMxn(total)}
           </span>
+          {tip > 0 && (
+            <>
+              {" · "}Propina:{" "}
+              <span className="font-mono font-semibold text-ink">{formatMxn(tip)}</span>
+              <br />
+              A cobrar:{" "}
+              <span className="font-mono font-semibold text-ink">{formatMxn(payable)}</span>
+            </>
+          )}
         </p>
 
         <div className="mb-5">
@@ -1316,83 +1358,18 @@ function CheckoutModal({
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-2 mb-5">
-          <button
-            type="button"
-            onClick={() => setMethod("CASH")}
-            className={`rounded-md border py-3 text-sm font-medium ${
-              method === "CASH"
-                ? "bg-ember text-white border-ember"
-                : "border-line"
-            }`}
-          >
-            Efectivo
-          </button>
+        <PaymentMethodPicker
+          method={method}
+          cardProvider={cardProvider}
+          onChange={(m, provider) => {
+            setMethod(m);
+            setCardProvider(provider);
+          }}
+          mercadoPagoEnabled={mercadoPagoEnabled}
+          terminalLinked={terminalLinked}
+        />
 
-          <button
-            type="button"
-            onClick={() => setMethod("CARD")}
-            className={`rounded-md border py-3 text-sm font-medium ${
-              method === "CARD"
-                ? "bg-ember text-white border-ember"
-                : "border-line"
-            }`}
-          >
-            Tarjeta
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setMethod("TRANSFER")}
-            className={`rounded-md border py-3 text-sm font-medium ${
-              method === "TRANSFER"
-                ? "bg-ember text-white border-ember"
-                : "border-line"
-            }`}
-          >
-            Transferencia
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setMethod("OTHER")}
-            className={`rounded-md border py-3 text-sm font-medium ${
-              method === "OTHER"
-                ? "bg-ember text-white border-ember"
-                : "border-line"
-            }`}
-          >
-            Otro
-          </button>
-
-          {mercadoPagoEnabled && (
-            <button
-              type="button"
-              onClick={() => setMethod("MERCADOPAGO")}
-              className={`col-span-2 rounded-md border py-3 text-sm font-medium ${
-                method === "MERCADOPAGO"
-                  ? "bg-ember text-white border-ember"
-                  : "border-line"
-              }`}
-            >
-              Mercado Pago (link/QR)
-            </button>
-          )}
-
-          {terminalLinked && (
-            <button
-              type="button"
-              onClick={() => setMethod("MERCADOPAGO_TERMINAL")}
-              className={`col-span-2 rounded-md border py-3 text-sm font-medium ${
-                method === "MERCADOPAGO_TERMINAL"
-                  ? "bg-ember text-white border-ember"
-                  : "border-line"
-              }`}
-            >
-              Tarjeta (terminal física)
-            </button>
-          )}
-        </div>
+        <TipPicker base={total} onChange={setTip} />
 
         {method === "CASH" && (
           <div className="mb-5 space-y-2">

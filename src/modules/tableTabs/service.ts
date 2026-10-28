@@ -24,6 +24,10 @@ export const addRoundSchema = z.object({
 export const closeTabSchema = z.object({
   paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO", "MERCADOPAGO_TERMINAL"]),
   cashReceived: z.coerce.number().min(0).optional(),
+  // Propina (opcional) en pesos: va aparte del total de la cuenta; lo que se cobra es total + propina.
+  tip: z.coerce.number().min(0).max(100000).default(0),
+  // Solo aplica con paymentMethod = CARD: con qué terminal se cobró.
+  cardProvider: z.enum(["ZETTLE"]).optional(),
   discount: z.coerce.number().min(0).default(0),
   // Programa de clientes frecuentes (opcional): cliente identificado y si se canjea su descuento.
   loyaltyCustomerId: z.string().min(1).optional(),
@@ -251,13 +255,19 @@ export const tableTabsService = {
       const discount = Math.min(manualDiscount + (plan?.discount ?? 0) + promo.discount, subtotal);
       const total = subtotal - discount;
 
+      const tip = Math.round(input.tip * 100) / 100;
+      if (tip > total) {
+        throw new Error("La propina no puede ser mayor al total de la cuenta");
+      }
+      const payable = Math.round((total + tip) * 100) / 100; // lo que realmente paga el cliente
+
       if (input.paymentMethod === "CASH") {
-        if (input.cashReceived === undefined || input.cashReceived < total) {
+        if (input.cashReceived === undefined || input.cashReceived < payable) {
           throw new Error("El efectivo recibido no puede ser menor al total");
         }
       }
       const change =
-        input.paymentMethod === "CASH" && input.cashReceived !== undefined ? input.cashReceived - total : undefined;
+        input.paymentMethod === "CASH" && input.cashReceived !== undefined ? input.cashReceived - payable : undefined;
 
       const updated = await tx.order.update({
         where: { id: orderId },
@@ -265,10 +275,12 @@ export const tableTabsService = {
           isOpenTab: false,
           discount,
           total,
+          tip,
           ...(plan ? { customerId: plan.customerId } : {}),
           payments: {
             create: {
               method: input.paymentMethod,
+              cardProvider: input.paymentMethod === "CARD" ? input.cardProvider ?? null : null,
               status: paymentPending ? "PENDING" : "APPROVED",
               amount: total,
               cashReceived: input.cashReceived,

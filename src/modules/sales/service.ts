@@ -23,6 +23,10 @@ export const saleSchema = z
     discount: z.coerce.number().min(0).default(0),
     paymentMethod: z.enum(["CASH", "CARD", "TRANSFER", "OTHER", "MERCADOPAGO", "MERCADOPAGO_TERMINAL"]),
     cashReceived: z.coerce.number().min(0).optional(),
+    // Propina (opcional) en pesos: va aparte del total de la venta; lo que se cobra es total + propina.
+    tip: z.coerce.number().min(0).max(100000).default(0),
+    // Solo aplica con paymentMethod = CARD: con qué terminal se cobró.
+    cardProvider: z.enum(["ZETTLE"]).optional(),
     tableId: z.string().optional(),
     orderType: z.enum(["COMER_AQUI", "PARA_LLEVAR", "DOMICILIO"]).default("COMER_AQUI"),
     notes: z.string().max(500).optional(),
@@ -147,15 +151,21 @@ export const salesService = {
       const discount = Math.min(manualDiscount + (plan?.discount ?? 0) + promo.discount, subtotal); // el descuento nunca deja el total en negativo
       const total = subtotal - discount;
 
+      const tip = Math.round(input.tip * 100) / 100;
+      if (tip > total) {
+        throw new Error("La propina no puede ser mayor al total de la venta");
+      }
+      const payable = Math.round((total + tip) * 100) / 100; // lo que realmente paga el cliente
+
       if (input.paymentMethod === "CASH") {
-        if (input.cashReceived === undefined || input.cashReceived < total) {
+        if (input.cashReceived === undefined || input.cashReceived < payable) {
           throw new Error("El efectivo recibido no puede ser menor al total");
         }
       }
 
       const change =
         input.paymentMethod === "CASH" && input.cashReceived !== undefined
-          ? input.cashReceived - total
+          ? input.cashReceived - payable
           : undefined;
 
       const order = await tx.order.create({
@@ -174,10 +184,12 @@ export const salesService = {
           discount,
           tax: 0,
           total,
+          tip,
           items: { create: orderItemsData },
           payments: {
             create: {
               method: input.paymentMethod,
+              cardProvider: input.paymentMethod === "CARD" ? input.cardProvider ?? null : null,
               status: paymentPending ? "PENDING" : "APPROVED",
               amount: total,
               cashReceived: input.cashReceived,

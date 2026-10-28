@@ -6,13 +6,14 @@ import { ResponsiveTable, type ResponsiveColumn } from "@/components/ui/responsi
 import { ExportButton } from "@/components/export-button";
 
 type OrderItem = { id: string; quantity: number; lineTotal: string; product: { name: string } };
-type Payment = { id: string; method: string; status: string; amount: string };
+type Payment = { id: string; method: string; status: string; amount: string; cardProvider?: string | null };
 type OrderRow = {
   id: string;
   orderNumber: number;
   status: string;
   orderType: string;
   total: string;
+  tip?: string;
   createdAt: string;
   items: OrderItem[];
   payments: Payment[];
@@ -29,6 +30,11 @@ const PAYMENT_LABELS: Record<string, string> = {
   MERCADOPAGO: "Mercado Pago (link/QR)",
   MERCADOPAGO_TERMINAL: "Mercado Pago (terminal)",
 };
+
+function paymentLabel(p: Payment) {
+  if (p.method === "CARD" && p.cardProvider === "ZETTLE") return "Tarjeta · Zettle";
+  return PAYMENT_LABELS[p.method] ?? p.method;
+}
 
 const ORDER_TYPE_LABELS: Record<string, string> = {
   COMER_AQUI: "Comer aquí",
@@ -59,7 +65,7 @@ const COLUMNS: ResponsiveColumn<OrderRow>[] = [
   {
     key: "metodo",
     header: "Método",
-    render: (o) => o.payments.map((p) => PAYMENT_LABELS[p.method] ?? p.method).join(", ") || "—",
+    render: (o) => o.payments.map(paymentLabel).join(", ") || "—",
   },
   { key: "cajero", header: "Cajero", render: (o) => o.user?.name ?? "—" },
   {
@@ -184,6 +190,12 @@ export function SalesHistoryClient() {
                   </li>
                 ))}
               </ul>
+              {Number(order.tip ?? 0) > 0 && (
+                <p className="text-sm mt-2 flex justify-between gap-3">
+                  <span>Propina</span>
+                  <span className="font-mono shrink-0">{formatMxn(order.tip ?? 0)}</span>
+                </p>
+              )}
               {order.branch?.name && <p className="text-xs text-muted mt-2">Sucursal: {order.branch.name}</p>}
             </>
           )}

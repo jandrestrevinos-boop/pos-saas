@@ -5,6 +5,13 @@ import { useRouter } from "next/navigation";
 import { clsx } from "clsx";
 import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
 import { PosLoyaltyPanel, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
+import {
+  PaymentMethodPicker,
+  TipPicker,
+  round2,
+  type CardProvider,
+  type CheckoutMethod,
+} from "@/components/checkout/checkout-options";
 
 type TableStatus = "LIBRE" | "OCUPADA" | "CUENTA" | "LIMPIEZA";
 type TableRow = { id: string; name: string; capacity: number | null; status: TableStatus };
@@ -292,9 +299,9 @@ function CloseTabModal({
   onClose: () => void;
   onDone: () => void;
 }) {
-  const [method, setMethod] = useState<"CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO" | "MERCADOPAGO_TERMINAL">(
-    "CASH"
-  );
+  const [method, setMethod] = useState<CheckoutMethod>("CASH");
+  const [cardProvider, setCardProvider] = useState<CardProvider>(null);
+  const [tip, setTip] = useState(0);
   const [cashReceived, setCashReceived] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -345,11 +352,13 @@ function CloseTabModal({
     ? computeLoyaltyDiscount(loyalty.customer.discountType, loyalty.customer.discountValue, afterPromo)
     : 0;
   const total = afterPromo - loyaltyDiscount;
+  // Lo que realmente paga el cliente: total de la cuenta + propina.
+  const payable = round2(total + tip);
   const cashReceivedNum = parseFloat(cashReceived || "0");
-  const change = method === "CASH" ? cashReceivedNum - total : 0;
+  const change = method === "CASH" ? cashReceivedNum - payable : 0;
 
   async function confirm() {
-    if (method === "CASH" && cashReceivedNum < total) {
+    if (method === "CASH" && cashReceivedNum < payable) {
       setError("El efectivo recibido no puede ser menor al total");
       return;
     }
@@ -361,6 +370,8 @@ function CloseTabModal({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           paymentMethod: method,
+          cardProvider: method === "CARD" && cardProvider ? cardProvider : undefined,
+          tip,
           cashReceived: method === "CASH" ? cashReceivedNum : undefined,
           loyaltyCustomerId: loyalty?.customer.id,
           redeemLoyalty: !!loyalty?.redeem,
@@ -472,6 +483,11 @@ function CloseTabModal({
       <div className="bg-white rounded-lg p-6 max-w-sm w-full max-h-[90vh] overflow-y-auto">
         <p className="font-display text-xl font-semibold mb-1">Cobrar mesa</p>
         <p className="text-3xl font-display font-semibold mb-1">${total.toFixed(2)} MXN</p>
+        {tip > 0 && (
+          <p className="text-sm text-muted mb-1">
+            Propina ${tip.toFixed(2)} · A cobrar <span className="font-mono font-medium text-ink">${payable.toFixed(2)} MXN</span>
+          </p>
+        )}
         {loyalty?.redeem && (
           <p className="text-xs text-sage mb-4">Incluye descuento de cliente frecuente (-${loyaltyDiscount.toFixed(2)})</p>
         )}
@@ -523,36 +539,18 @@ function CloseTabModal({
         </div>
         <div className="mb-5">{loyaltyEnabled && <PosLoyaltyPanel value={loyalty} onChange={setLoyalty} />}</div>
 
-        <div className="grid grid-cols-2 gap-2 mb-4">
-          {(["CASH", "CARD", "TRANSFER", "OTHER"] as const).map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => setMethod(m)}
-              className={`rounded-md border py-3 text-sm font-medium ${method === m ? "bg-ember text-white border-ember" : "border-line"}`}
-            >
-              {m === "CASH" ? "Efectivo" : m === "CARD" ? "Tarjeta" : m === "TRANSFER" ? "Transferencia" : "Otro"}
-            </button>
-          ))}
-          {mercadoPagoEnabled && (
-            <button
-              type="button"
-              onClick={() => setMethod("MERCADOPAGO")}
-              className={`col-span-2 rounded-md border py-3 text-sm font-medium ${method === "MERCADOPAGO" ? "bg-ember text-white border-ember" : "border-line"}`}
-            >
-              Mercado Pago (link/QR)
-            </button>
-          )}
-          {terminalLinked && (
-            <button
-              type="button"
-              onClick={() => setMethod("MERCADOPAGO_TERMINAL")}
-              className={`col-span-2 rounded-md border py-3 text-sm font-medium ${method === "MERCADOPAGO_TERMINAL" ? "bg-ember text-white border-ember" : "border-line"}`}
-            >
-              Tarjeta (terminal física)
-            </button>
-          )}
-        </div>
+        <PaymentMethodPicker
+          method={method}
+          cardProvider={cardProvider}
+          onChange={(m, provider) => {
+            setMethod(m);
+            setCardProvider(provider);
+          }}
+          mercadoPagoEnabled={mercadoPagoEnabled}
+          terminalLinked={terminalLinked}
+        />
+
+        <TipPicker base={total} onChange={setTip} />
 
         {method === "CASH" && (
           <div className="mb-4">
@@ -563,7 +561,7 @@ function CloseTabModal({
               value={cashReceived}
               onChange={(e) => setCashReceived(e.target.value)}
             />
-            {cashReceivedNum >= total && cashReceivedNum > 0 && (
+            {cashReceivedNum >= payable && cashReceivedNum > 0 && (
               <p className="text-xs text-muted mt-1">Cambio: ${change.toFixed(2)}</p>
             )}
           </div>

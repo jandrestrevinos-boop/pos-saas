@@ -17,7 +17,8 @@ export const closeRegisterSchema = z.object({
   countedCash: z.coerce.number().min(0),
 });
 
-type PaymentTotals = { cash: number; card: number; transfer: number; other: number };
+// cashTips: propinas cobradas en efectivo (van aparte de las ventas, pero están físicamente en la caja).
+type PaymentTotals = { cash: number; card: number; transfer: number; other: number; cashTips: number };
 
 export const cashService = {
   async getOpenRegister(branchId: string) {
@@ -99,12 +100,18 @@ export const cashService = {
         createdAt: { gte: since },
         order: { branchId, status: { not: "CANCELED" } },
       },
-      select: { method: true, amount: true },
+      select: { method: true, amount: true, orderId: true, order: { select: { tip: true } } },
     });
 
-    const totals: PaymentTotals = { cash: 0, card: 0, transfer: 0, other: 0 };
+    const totals: PaymentTotals = { cash: 0, card: 0, transfer: 0, other: 0, cashTips: 0 };
+    const seenOrders = new Set<string>();
     for (const payment of payments) {
       const amount = Number(payment.amount);
+      // La propina es de la orden (una sola vez aunque tuviera más de un pago).
+      if (!seenOrders.has(payment.orderId)) {
+        seenOrders.add(payment.orderId);
+        if (payment.method === "CASH") totals.cashTips += Number(payment.order.tip ?? 0);
+      }
       if (payment.method === "CASH") totals.cash += amount;
       else if (payment.method === "CARD") totals.card += amount;
       else if (payment.method === "TRANSFER") totals.transfer += amount;
@@ -125,7 +132,7 @@ export const cashService = {
       .filter((m) => m.type === "CASH_OUT" || m.type === "REFUND")
       .reduce((s, m) => s + Number(m.amount), 0);
 
-    const expectedCash = Number(register.openingCash) + salesTotals.cash + cashIn - cashOut;
+    const expectedCash = Number(register.openingCash) + salesTotals.cash + salesTotals.cashTips + cashIn - cashOut;
 
     return { open: true as const, register, salesTotals, expectedCash };
   },

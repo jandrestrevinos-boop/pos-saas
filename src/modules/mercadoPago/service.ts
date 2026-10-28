@@ -137,6 +137,7 @@ export const mercadoPagoService = {
   async createPreferenceForOrder(companyId: string, order: {
     id: string;
     items: { product: { name: string }; quantity: number; unitPriceAtSale: unknown }[];
+    tip?: unknown;
   }) {
     const accessToken = await this.getValidAccessToken(companyId);
     const baseUrl = requireEnv("MERCADOPAGO_REDIRECT_URI").replace("/api/mercadopago/oauth/callback", "");
@@ -147,12 +148,18 @@ export const mercadoPagoService = {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
       body: JSON.stringify({
-        items: order.items.map((item) => ({
-          title: item.product.name,
-          quantity: item.quantity,
-          unit_price: Number(item.unitPriceAtSale),
-          currency_id: "MXN",
-        })),
+        items: [
+          ...order.items.map((item) => ({
+            title: item.product.name,
+            quantity: item.quantity,
+            unit_price: Number(item.unitPriceAtSale),
+            currency_id: "MXN",
+          })),
+          // La propina viaja como un renglón más para que el cliente pague total + propina.
+          ...(Number(order.tip ?? 0) > 0
+            ? [{ title: "Propina", quantity: 1, unit_price: Number(order.tip), currency_id: "MXN" }]
+            : []),
+        ],
         external_reference: externalReference,
         notification_url: `${baseUrl}/api/mercadopago/webhook?companyId=${companyId}`,
         back_urls: {
@@ -375,6 +382,7 @@ export function buildTerminalReceiptContent(order: {
   subtotal: unknown;
   discount: unknown;
   total: unknown;
+  tip?: unknown;
   items: { quantity: number; unitPriceAtSale: unknown; product: { name: string } }[];
 }): string {
   const lines: string[] = [];
@@ -417,6 +425,10 @@ export function buildTerminalReceiptContent(order: {
     lines.push(`Descuento: -$${Number(order.discount).toFixed(2)}`);
   }
   lines.push(`{b}TOTAL: $${Number(order.total).toFixed(2)}{/b}`);
+  if (Number(order.tip ?? 0) > 0) {
+    lines.push(`Propina: $${Number(order.tip).toFixed(2)}`);
+    lines.push(`{b}TOTAL PAGADO: $${(Number(order.total) + Number(order.tip)).toFixed(2)}{/b}`);
+  }
   lines.push("{br}");
   lines.push("{center}¡Gracias por tu compra!{/center}");
 

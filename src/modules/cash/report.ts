@@ -16,6 +16,7 @@ import { prisma } from "@/lib/prisma";
 export const METHOD_LABELS: Record<string, string> = {
   CASH: "Efectivo",
   CARD: "Tarjeta",
+  "CARD:ZETTLE": "Tarjeta · Zettle",
   TRANSFER: "Transferencia",
   MERCADOPAGO: "Mercado Pago",
   MERCADOPAGO_TERMINAL: "Terminal Mercado Pago",
@@ -48,7 +49,17 @@ export type CutReport = {
   openedBy: string | null;
   generatedBy: string | null;
   autoOpened: boolean;
-  sales: { tickets: number; subtotal: number; discounts: number; total: number; averageTicket: number };
+  // tips / totalCollected son opcionales porque los cortes Z viejos guardados no los traen.
+  // "total" = ventas SIN propina; totalCollected = ventas + propinas (lo que entró en total).
+  sales: {
+    tickets: number;
+    subtotal: number;
+    discounts: number;
+    total: number;
+    averageTicket: number;
+    tips?: number;
+    totalCollected?: number;
+  };
   byMethod: { method: string; label: string; count: number; amount: number }[];
   byOrderType: { type: string; label: string; count: number; amount: number }[];
   byCashier: { name: string; tickets: number; amount: number }[];
@@ -65,6 +76,7 @@ export type CutReport = {
     sales: number;
     cashIn: number;
     cashOut: number;
+    tips?: number; // propinas cobradas en efectivo: están en la caja y entran al efectivo esperado
     expected: number;
     counted: number | null;
     difference: number | null;
@@ -86,11 +98,13 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 
 type PaymentRow = {
   method: string;
+  cardProvider?: string | null;
   amount: unknown;
   orderId: string;
   order: {
     subtotal: unknown;
     discount: unknown;
+    tip?: unknown;
     orderType: string;
     user: { name: string } | null;
     promotions: { name: string; amount: unknown }[];
@@ -138,6 +152,7 @@ export const cashReportService = {
           select: {
             subtotal: true,
             discount: true,
+            tip: true,
             orderType: true,
             user: { select: { name: true } },
             promotions: { select: { name: true, amount: true } },
@@ -154,15 +169,19 @@ export const cashReportService = {
     let subtotal = 0;
     let discounts = 0;
     let total = 0;
+    let tips = 0; // propinas de todos los métodos (van aparte de las ventas)
+    let cashTips = 0; // las que se cobraron en efectivo (están físicamente en la caja)
 
     for (const p of payments) {
       const amount = Number(p.amount);
       total += amount;
 
-      const m = methodMap.get(p.method) ?? { count: 0, amount: 0 };
+      // Tarjeta con Zettle se separa de las demás tarjetas; el resto agrupa por método.
+      const methodKey = p.method === "CARD" && p.cardProvider ? `CARD:${p.cardProvider}` : p.method;
+      const m = methodMap.get(methodKey) ?? { count: 0, amount: 0 };
       m.count += 1;
       m.amount += amount;
-      methodMap.set(p.method, m);
+      methodMap.set(methodKey, m);
 
       const t = typeMap.get(p.order.orderType) ?? { count: 0, amount: 0 };
       t.amount += amount;
@@ -179,6 +198,9 @@ export const cashReportService = {
         seenOrders.add(p.orderId);
         subtotal += Number(p.order.subtotal);
         discounts += Number(p.order.discount);
+        const orderTip = Number(p.order.tip ?? 0);
+        tips += orderTip;
+        if (p.method === "CASH") cashTips += orderTip;
         t.count += 1;
         for (const promo of p.order.promotions) {
           const pr = promoMap.get(promo.name) ?? { count: 0, amount: 0 };
@@ -236,7 +258,7 @@ export const cashReportService = {
       .reduce((s, m) => s + Number(m.amount), 0);
     const cashSales = methodMap.get("CASH")?.amount ?? 0;
     const opening = Number(register.openingCash);
-    const expected = opening + cashSales + cashIn - cashOut;
+    const expected = opening + cashSales + cashTips + cashIn - cashOut;
     const counted = opts.counted ?? null;
 
     // ---- Pendientes ----
@@ -284,6 +306,8 @@ export const cashReportService = {
         discounts: round2(discounts),
         total: round2(total),
         averageTicket: tickets > 0 ? round2(total / tickets) : 0,
+        tips: round2(tips),
+        totalCollected: round2(total + tips),
       },
       byMethod: [...methodMap.entries()]
         .map(([method, v]) => ({ method, label: METHOD_LABELS[method] ?? method, count: v.count, amount: round2(v.amount) }))
@@ -313,6 +337,7 @@ export const cashReportService = {
       cash: {
         opening: round2(opening),
         sales: round2(cashSales),
+        tips: round2(cashTips),
         cashIn: round2(cashIn),
         cashOut: round2(cashOut),
         expected: round2(expected),
