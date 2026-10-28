@@ -156,6 +156,9 @@ export default async function CompanyLayout({ children }: { children: React.Reac
   });
   const vertical = getVertical(companyRow?.businessType);
 
+  // Soporte: visible para todos los roles, siempre al final del menú.
+  navItems = [...navItems, { href: "/soporte", label: "¿Necesitas apoyo?" }];
+
   const visibleNavItems = navItems.filter(
     (item) =>
       !vertical.hiddenNavHrefs.includes(item.href) &&
