@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
+import { userLimitPerBranch } from "@/lib/user-seats";
 import bcrypt from "bcryptjs";
 
 export const createUserSchema = z.object({
@@ -27,20 +28,6 @@ export const usersService = {
       throw new Error("Ya existe un usuario con ese correo");
     }
 
-    // Respeta el límite de usuarios del plan contratado por la empresa.
-    const subscription = await prisma.subscription.findUnique({
-      where: { companyId },
-      include: { license: true },
-    });
-    if (subscription?.license) {
-      const currentUserCount = await prisma.user.count({ where: { companyId } });
-      if (currentUserCount >= subscription.license.allowedUsers) {
-        throw new Error(
-          `Esta empresa ya alcanzó el límite de ${subscription.license.allowedUsers} usuarios de su plan. Sube de plan para agregar más.`
-        );
-      }
-    }
-
     // Si no se especifica sucursal, se asigna la primera de la empresa.
     let branchId = input.branchId;
     if (branchId) {
@@ -50,6 +37,21 @@ export const usersService = {
     } else {
       const firstBranch = await prisma.branch.findFirst({ where: { companyId, isActive: true } });
       branchId = firstBranch?.id;
+    }
+
+    // Límite de usuarios POR SUCURSAL: plan contratado + asientos extra pactados.
+    const subscription = await prisma.subscription.findUnique({
+      where: { companyId },
+      include: { license: true },
+    });
+    if (subscription?.license && branchId) {
+      const limit = userLimitPerBranch(subscription.license.allowedUsers, subscription.extraUsersPerBranch);
+      const inBranch = await prisma.user.count({ where: { companyId, branchId } });
+      if (inBranch >= limit) {
+        throw new Error(
+          `Esta sucursal ya alcanzó el límite de ${limit} usuarios. Contrata usuarios extra o sube de plan para agregar más.`
+        );
+      }
     }
 
     const passwordHash = await bcrypt.hash(input.password, 10);

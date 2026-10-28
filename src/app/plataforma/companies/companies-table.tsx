@@ -11,7 +11,7 @@ import { BUSINESS_TYPES, VERTICALS, getVertical, verticalOptionLabel } from "@/l
 // FEATURE_CATALOG ahora es [{ key, label, status }] — customFeatures y
 // plan.features guardan `key`, la UI muestra `label`.
 
-type Plan = { id: string; name: string; priceMxn: string; features: string[] | null };
+type Plan = { id: string; name: string; priceMxn: string; features: string[] | null; maxUsers?: number };
 type Role = { id: string; name: string };
 type Company = {
   id: string;
@@ -26,6 +26,7 @@ type Company = {
     useCustomPlan?: boolean;
     customPriceMxn?: string | null;
     customFeatures?: string[];
+    extraUsersPerBranch?: number;
     status?: "TRIALING" | "ACTIVE" | "PAST_DUE" | "CANCELED";
     trialEndsAt?: string | null;
     renewalDate?: string | null;
@@ -371,10 +372,12 @@ export function CompaniesTable({
           company={planCompany}
           plans={plans}
           onClose={() => setPlanCompany(null)}
-          onChanged={(planName) => {
+          onChanged={(planName, extraUsersPerBranch) => {
             setCompanies((prev) =>
               prev.map((c) =>
-                c.id === planCompany.id ? { ...c, subscription: { ...(c.subscription ?? {}), plan: { name: planName } } } : c
+                c.id === planCompany.id
+                  ? { ...c, subscription: { ...(c.subscription ?? {}), plan: { name: planName }, extraUsersPerBranch } }
+                  : c
               )
             );
             setPlanCompany(null);
@@ -449,7 +452,7 @@ function ChangePlanModal({
   company: Company;
   plans: Plan[];
   onClose: () => void;
-  onChanged: (planName: string) => void;
+  onChanged: (planName: string, extraUsersPerBranch: number) => void;
 }) {
   const currentPlanName = company.subscription?.plan.name;
   const [planId, setPlanId] = useState(plans.find((p) => p.name === currentPlanName)?.id ?? plans[0]?.id ?? "");
@@ -467,6 +470,8 @@ function ChangePlanModal({
         : (plans.find((p) => p.id === planId)?.features ?? [])
     )
   );
+
+  const [extraUsers, setExtraUsers] = useState<number>(company.subscription?.extraUsersPerBranch ?? 0);
 
   type FinancingSummary = { code: string; remainingBalance: number; nextPaymentAmount: number | null };
   const [activeFinancings, setActiveFinancings] = useState<FinancingSummary[] | null>(null);
@@ -515,6 +520,7 @@ function ChangePlanModal({
         useCustomPlan,
         customPriceMxn: useCustomPlan ? parseFloat(String(customPrice)) || 0 : null,
         customFeatures: useCustomPlan ? Array.from(customFeatures) : [],
+        extraUsersPerBranch: useCustomPlan ? extraUsers : 0,
       }),
     });
     const data = await res.json();
@@ -524,7 +530,7 @@ function ChangePlanModal({
       return;
     }
     const newPlan = plans.find((p) => p.id === planId);
-    onChanged(newPlan?.name ?? "");
+    onChanged(newPlan?.name ?? "", useCustomPlan ? extraUsers : 0);
   }
 
   const selectedPlan = plans.find((p) => p.id === planId);
@@ -593,6 +599,50 @@ function ChangePlanModal({
                 value={customPrice}
                 onChange={(e) => setCustomPrice(e.target.value)}
               />
+            </Field>
+
+            <Field label="Usuarios por sucursal (+ / − asientos)">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  className="w-9 h-9 rounded-md border border-line text-lg leading-none hover:bg-ink-100"
+                  onClick={() => setExtraUsers((n) => Math.max(-100, n - 1))}
+                  aria-label="Quitar un usuario por sucursal"
+                >
+                  −
+                </button>
+                <input
+                  type="number"
+                  step="1"
+                  className={`${inputClass} w-24 text-center`}
+                  value={extraUsers}
+                  onChange={(e) => setExtraUsers(parseInt(e.target.value, 10) || 0)}
+                />
+                <button
+                  type="button"
+                  className="w-9 h-9 rounded-md border border-line text-lg leading-none hover:bg-ink-100"
+                  onClick={() => setExtraUsers((n) => Math.min(1000, n + 1))}
+                  aria-label="Agregar un usuario por sucursal"
+                >
+                  +
+                </button>
+              </div>
+              {(() => {
+                const base = selectedPlan?.maxUsers ?? 0;
+                const total = Math.max(1, base + extraUsers);
+                return (
+                  <p className="text-xs text-muted mt-1.5">
+                    {selectedPlan?.name ?? "Plan"} incluye {base} usuario{base === 1 ? "" : "s"} por sucursal. Con{" "}
+                    {extraUsers >= 0 ? "+" : ""}
+                    {extraUsers} →{" "}
+                    <span className="font-medium text-ink">
+                      {total} usuario{total === 1 ? "" : "s"} por sucursal
+                    </span>
+                    {company.branches.length > 1 ? ` (${company.branches.length} sucursales)` : ""}. Ajusta el precio mensual de
+                    arriba según los asientos que vendas.
+                  </p>
+                );
+              })()}
             </Field>
 
             <Field label="Features personalizadas para esta empresa">

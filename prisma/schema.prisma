@@ -232,6 +232,9 @@ model Subscription {
   useCustomPlan Boolean @default(false) 
   customPriceMxn Decimal? @db.Decimal(10, 2) 
   customFeatures String[] @default([])
+  // Asientos extra (+) o menos (-) de usuarios POR SUCURSAL sobre el plan base.
+  // Límite por sucursal = plan.maxUsers + extraUsersPerBranch.
+  extraUsersPerBranch Int @default(0)
 
   // Cobro mensual. renewalDate = "pagado hasta" (fin del periodo pagado).
   trialEndsAt     DateTime? // fin del demo (solo aplica mientras status = TRIALING)

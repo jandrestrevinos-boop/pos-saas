@@ -5,6 +5,7 @@ import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
 import { usersService } from "@/modules/users/service";
 import { prisma } from "@/lib/prisma";
 import { UsersTable } from "./users-table";
+import { userLimitPerBranch } from "@/lib/user-seats";
 
 export default async function UsersPage() {
   const session = await getServerSession(authOptions);
@@ -23,7 +24,9 @@ export default async function UsersPage() {
     prisma.branch.findMany({ where: { companyId, isActive: true }, select: { id: true, name: true }, orderBy: { createdAt: "asc" } }),
   ]);
 
-  const userLimit = subscription?.license?.allowedUsers ?? null;
+  const userLimit = subscription?.license
+    ? userLimitPerBranch(subscription.license.allowedUsers, subscription.extraUsersPerBranch)
+    : null;
 
   return (
     <div>
@@ -32,7 +35,7 @@ export default async function UsersPage() {
         Tu equipo dentro de la plataforma.
         {userLimit !== null && (
           <span className="ml-2 text-xs font-medium">
-            ({users.length} de {userLimit} usuarios de tu plan {subscription?.plan.name})
+            ({users.length} usuarios · límite de {userLimit} por sucursal en tu plan {subscription?.plan.name})
           </span>
         )}
       </p>

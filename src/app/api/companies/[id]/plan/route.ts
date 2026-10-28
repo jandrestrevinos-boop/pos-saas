@@ -9,6 +9,7 @@ const changePlanSchema = z.object({
   useCustomPlan: z.boolean().optional(),
   customPriceMxn: z.coerce.number().min(0).nullable().optional(),
   customFeatures: z.array(z.string()).optional(),
+  extraUsersPerBranch: z.coerce.number().int().min(-100).max(1000).optional(),
 });
 
 export async function PATCH(req: Request, { params }: { params: { id: string } }) {
@@ -28,6 +29,7 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
       useCustomPlan: parsed.data.useCustomPlan ?? false,
       customPriceMxn: parsed.data.customPriceMxn ?? null,
       customFeatures: parsed.data.customFeatures ?? [],
+      extraUsersPerBranch: parsed.data.extraUsersPerBranch ?? 0,
     });
 
     await prisma.auditLog.create({

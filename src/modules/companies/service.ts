@@ -1,3 +1,4 @@
+import { userLimitPerBranch } from "@/lib/user-seats";
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
 import { hardwareFinancingService } from "@/modules/hardwareFinancing/service";
@@ -129,7 +130,12 @@ export const companiesService = {
   async changePlan(
     companyId: string,
     planId: string,
-    customization?: { useCustomPlan: boolean; customPriceMxn?: number | null; customFeatures?: string[] }
+    customization?: {
+      useCustomPlan: boolean;
+      customPriceMxn?: number | null;
+      customFeatures?: string[];
+      extraUsersPerBranch?: number;
+    }
   ) {
     const plan = await prisma.plan.findUnique({ where: { id: planId } });
     if (!plan) throw new Error("El plan seleccionado no existe");
@@ -142,14 +148,24 @@ export const companiesService = {
     // un estado ambiguo si ya rebasan el nuevo límite. Los límites de
     // capacidad (sucursales/usuarios/cajas) siempre vienen del plan base,
     // incluso si la empresa tiene precio/features personalizados.
-    const currentUserCount = await prisma.user.count({ where: { companyId } });
-    if (currentUserCount > plan.maxUsers) {
+    const useCustomPlan = customization?.useCustomPlan ?? false;
+    const extraUsersPerBranch = useCustomPlan ? customization?.extraUsersPerBranch ?? 0 : 0;
+
+    const newLimit = userLimitPerBranch(plan.maxUsers, extraUsersPerBranch);
+    const perBranch = await prisma.user.groupBy({
+      by: ["branchId"],
+      where: { companyId, branchId: { not: null } },
+      _count: { _all: true },
+    });
+    const fullest = perBranch.reduce(
+      (max: number, row: { _count: { _all: number } }) => Math.max(max, row._count._all),
+      0
+    );
+    if (fullest > newLimit) {
       throw new Error(
-        `Esta empresa ya tiene ${currentUserCount} usuarios, más de los ${plan.maxUsers} permitidos en ${plan.name}. Desactiva usuarios antes de bajar de plan.`
+        `Una sucursal de esta empresa ya tiene ${fullest} usuarios, más de los ${newLimit} permitidos por sucursal con este plan (${plan.name}${extraUsersPerBranch !== 0 ? `, ${extraUsersPerBranch > 0 ? "+" : ""}${extraUsersPerBranch} extra` : ""}). Desactiva o reasigna usuarios antes de bajar.`
       );
     }
-
-    const useCustomPlan = customization?.useCustomPlan ?? false;
 
     await prisma.subscription.update({
       where: { companyId },
@@ -158,6 +174,7 @@ export const companiesService = {
         useCustomPlan,
         customPriceMxn: useCustomPlan ? customization?.customPriceMxn ?? null : null,
         customFeatures: useCustomPlan ? customization?.customFeatures ?? [] : [],
+        extraUsersPerBranch,
       },
     });
 
@@ -172,6 +189,7 @@ export const companiesService = {
             basePlanId: planId,
             customPriceMxn: customization?.customPriceMxn ?? null,
             customFeatures: customization?.customFeatures ?? [],
+            extraUsersPerBranch,
           },
         },
       });
