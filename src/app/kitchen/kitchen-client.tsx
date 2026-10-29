@@ -35,7 +35,7 @@ function minutesAgo(dateStr: string) {
   return Math.max(0, Math.floor(diffMs / 60000));
 }
 
-export function KitchenClient() {
+export function KitchenClient({ title = "Cocina" }: { title?: string }) {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -70,7 +70,7 @@ export function KitchenClient() {
           <Link href="/dashboard" className="text-sm text-white/50 hover:text-white">
             ← Salir
           </Link>
-          <p className="font-display text-lg font-semibold text-white">Cocina</p>
+          <p className="font-display text-lg font-semibold text-white">{title}</p>
         </div>
         <p className="text-xs text-white/40 font-mono">Se actualiza sola cada 5s</p>
       </header>

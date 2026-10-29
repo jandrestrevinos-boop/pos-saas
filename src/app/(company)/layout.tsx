@@ -159,11 +159,14 @@ export default async function CompanyLayout({ children }: { children: React.Reac
   // Soporte: visible para todos los roles, siempre al final del menú.
   navItems = [...navItems, { href: "/soporte", label: "¿Necesitas apoyo?" }];
 
-  const visibleNavItems = navItems.filter(
-    (item) =>
-      !vertical.hiddenNavHrefs.includes(item.href) &&
-      (!item.permission || hasPermission(session.user.permissions, item.permission))
-  );
+  const visibleNavItems = navItems
+    .filter(
+      (item) =>
+        !vertical.hiddenNavHrefs.includes(item.href) &&
+        (!item.permission || hasPermission(session.user.permissions, item.permission))
+    )
+    // La pantalla de comandas se llama distinto según el negocio (Cocina / Barra).
+    .map((item) => (item.href === "/kitchen" ? { ...item, label: vertical.kitchenLabel } : item));
 
   return (
     <BrandingProvider showProductImages={branding.showProductImages}>

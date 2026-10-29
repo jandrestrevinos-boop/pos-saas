@@ -1,0 +1,382 @@
+From 3b55c8fb2c11797802e08f25ff6a86511ee717b6 Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Thu, 29 Oct 2026 19:09:27 +0000
+Subject: [PATCH] Plantillas por tipo de negocio: tipologia de usuarios
+ (Barista en Cafeteria) + validacion de rol en servidor
+
+---
+ src/app/(company)/layout.tsx                  | 13 +++--
+ src/app/(company)/users/page.tsx              |  8 ++-
+ src/app/(company)/users/users-table.tsx       | 15 ++----
+ src/app/kitchen/kitchen-client.tsx            |  4 +-
+ src/app/kitchen/page.tsx                      |  8 ++-
+ .../plataforma/companies/companies-table.tsx  | 16 ++----
+ src/lib/verticals.ts                          | 54 ++++++++++++++++++-
+ src/modules/users/service.ts                  | 12 +++++
+ 8 files changed, 98 insertions(+), 32 deletions(-)
+
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index f49a7cd..b7d7900 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -159,11 +159,14 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+   // Soporte: visible para todos los roles, siempre al final del menú.
+   navItems = [...navItems, { href: "/soporte", label: "¿Necesitas apoyo?" }];
+ 
+-  const visibleNavItems = navItems.filter(
+-    (item) =>
+-      !vertical.hiddenNavHrefs.includes(item.href) &&
+-      (!item.permission || hasPermission(session.user.permissions, item.permission))
+-  );
++  const visibleNavItems = navItems
++    .filter(
++      (item) =>
++        !vertical.hiddenNavHrefs.includes(item.href) &&
++        (!item.permission || hasPermission(session.user.permissions, item.permission))
++    )
++    // La pantalla de comandas se llama distinto según el negocio (Cocina / Barra).
++    .map((item) => (item.href === "/kitchen" ? { ...item, label: vertical.kitchenLabel } : item));
+ 
+   return (
+     <BrandingProvider showProductImages={branding.showProductImages}>
+diff --git a/src/app/(company)/users/page.tsx b/src/app/(company)/users/page.tsx
+index 66b5532..e9d469c 100644
+--- a/src/app/(company)/users/page.tsx
++++ b/src/app/(company)/users/page.tsx
+@@ -6,6 +6,7 @@ import { usersService } from "@/modules/users/service";
+ import { prisma } from "@/lib/prisma";
+ import { UsersTable } from "./users-table";
+ import { userLimitPerBranch } from "@/lib/user-seats";
++import { getAllowedRoleNames } from "@/lib/verticals";
+ 
+ export default async function UsersPage() {
+   const session = await getServerSession(authOptions);
+@@ -17,9 +18,13 @@ export default async function UsersPage() {
+ 
+   const companyId = session.user.companyId;
+ 
++  const companyRow = await prisma.company.findUnique({ where: { id: companyId }, select: { businessType: true } });
++  const businessType = companyRow?.businessType ?? "RESTAURANTE";
++
+   const [users, roles, subscription, branches] = await Promise.all([
+     usersService.list(companyId),
+-    prisma.role.findMany({ where: { name: { not: "SUPER_ADMIN" } }, orderBy: { name: "asc" } }),
++    // Solo los roles que permite el tipo de negocio de esta empresa (nunca SUPER_ADMIN).
++    prisma.role.findMany({ where: { name: { in: getAllowedRoleNames(businessType) } }, orderBy: { name: "asc" } }),
+     prisma.subscription.findUnique({ where: { companyId }, include: { license: true, plan: true } }),
+     prisma.branch.findMany({ where: { companyId, isActive: true }, select: { id: true, name: true }, orderBy: { createdAt: "asc" } }),
+   ]);
+@@ -43,6 +48,7 @@ export default async function UsersPage() {
+         initialUsers={JSON.parse(JSON.stringify(users))}
+         roles={JSON.parse(JSON.stringify(roles))}
+         branches={branches}
++        businessType={businessType}
+       />
+     </div>
+   );
+diff --git a/src/app/(company)/users/users-table.tsx b/src/app/(company)/users/users-table.tsx
+index d15385e..516f7ad 100644
+--- a/src/app/(company)/users/users-table.tsx
++++ b/src/app/(company)/users/users-table.tsx
+@@ -3,6 +3,7 @@
+ import { useState } from "react";
+ import { Button, Card, StatusBadge } from "@/components/ui";
+ import { Modal, Field, inputClass } from "@/components/ui/modal";
++import { getRoleLabel } from "@/lib/verticals";
+ 
+ type Role = { id: string; name: string };
+ type UserRow = {
+@@ -14,22 +15,16 @@ type UserRow = {
+   branch: { name: string } | null;
+ };
+ 
+-const ROLE_LABELS: Record<string, string> = {
+-  ADMIN_EMPRESA: "Administrador",
+-  GERENTE: "Gerente",
+-  CAJERO: "Cajero",
+-  MESERO: "Mesero",
+-  COCINERO: "Cocinero",
+-};
+-
+ export function UsersTable({
+   initialUsers,
+   roles,
+   branches,
++  businessType,
+ }: {
+   initialUsers: UserRow[];
+   roles: Role[];
+   branches: { id: string; name: string }[];
++  businessType: string;
+ }) {
+   const [users, setUsers] = useState(initialUsers);
+   const [modalOpen, setModalOpen] = useState(false);
+@@ -94,7 +89,7 @@ export function UsersTable({
+               <tr key={u.id} className="border-b border-line last:border-0">
+                 <td className="px-5 py-3 font-medium">{u.name}</td>
+                 <td className="px-5 py-3 text-muted font-mono text-xs">{u.email}</td>
+-                <td className="px-5 py-3 text-xs">{ROLE_LABELS[u.role.name] ?? u.role.name}</td>
++                <td className="px-5 py-3 text-xs">{getRoleLabel(businessType, u.role.name)}</td>
+                 <td className="px-5 py-3 text-muted">{u.branch?.name ?? "—"}</td>
+                 <td className="px-5 py-3">
+                   <StatusBadge status={u.isActive ? "active" : "inactive"} label={u.isActive ? "Activo" : "Inactivo"} />
+@@ -150,7 +145,7 @@ export function UsersTable({
+             >
+               {roles.map((r) => (
+                 <option key={r.id} value={r.id}>
+-                  {ROLE_LABELS[r.name] ?? r.name}
++                  {getRoleLabel(businessType, r.name)}
+                 </option>
+               ))}
+             </select>
+diff --git a/src/app/kitchen/kitchen-client.tsx b/src/app/kitchen/kitchen-client.tsx
+index 7c125bb..6ed87b4 100644
+--- a/src/app/kitchen/kitchen-client.tsx
++++ b/src/app/kitchen/kitchen-client.tsx
+@@ -35,7 +35,7 @@ function minutesAgo(dateStr: string) {
+   return Math.max(0, Math.floor(diffMs / 60000));
+ }
+ 
+-export function KitchenClient() {
++export function KitchenClient({ title = "Cocina" }: { title?: string }) {
+   const [tickets, setTickets] = useState<Ticket[]>([]);
+   const [loading, setLoading] = useState(true);
+ 
+@@ -70,7 +70,7 @@ export function KitchenClient() {
+           <Link href="/dashboard" className="text-sm text-white/50 hover:text-white">
+             ← Salir
+           </Link>
+-          <p className="font-display text-lg font-semibold text-white">Cocina</p>
++          <p className="font-display text-lg font-semibold text-white">{title}</p>
+         </div>
+         <p className="text-xs text-white/40 font-mono">Se actualiza sola cada 5s</p>
+       </header>
+diff --git a/src/app/kitchen/page.tsx b/src/app/kitchen/page.tsx
+index d610824..cfb9392 100644
+--- a/src/app/kitchen/page.tsx
++++ b/src/app/kitchen/page.tsx
+@@ -6,6 +6,8 @@ import { kitchenService } from "@/modules/kitchen/service";
+ import { requireBillingAccess } from "@/lib/billing-gate";
+ import { requirePosAccess } from "@/lib/feature-gating";
+ import { KitchenClient } from "./kitchen-client";
++import { prisma } from "@/lib/prisma";
++import { getVertical } from "@/lib/verticals";
+ import Link from "next/link";
+ 
+ export default async function KitchenPage() {
+@@ -38,5 +40,9 @@ export default async function KitchenPage() {
+     );
+   }
+ 
+-  return <KitchenClient />;
++  const companyRow = await prisma.company.findUnique({
++    where: { id: session.user.companyId },
++    select: { businessType: true },
++  });
++  return <KitchenClient title={getVertical(companyRow?.businessType).kitchenLabel} />;
+ }
+diff --git a/src/app/plataforma/companies/companies-table.tsx b/src/app/plataforma/companies/companies-table.tsx
+index 6bb558b..9429b14 100644
+--- a/src/app/plataforma/companies/companies-table.tsx
++++ b/src/app/plataforma/companies/companies-table.tsx
+@@ -7,7 +7,7 @@ import { ResponsiveTable, type ResponsiveColumn } from "@/components/ui/responsi
+ import { formatMxn } from "@/lib/format";
+ import { FEATURE_CATALOG } from "@/lib/plan-features";
+ import { computeBillingAccess } from "@/lib/billing";
+-import { BUSINESS_TYPES, VERTICALS, getVertical, verticalOptionLabel } from "@/lib/verticals";
++import { BUSINESS_TYPES, VERTICALS, getVertical, verticalOptionLabel, getRoleLabel, getAllowedRoleNames } from "@/lib/verticals";
+ // FEATURE_CATALOG ahora es [{ key, label, status }] — customFeatures y
+ // plan.features guardan `key`, la UI muestra `label`.
+ 
+@@ -33,14 +33,6 @@ type Company = {
+   } | null;
+ };
+ 
+-const ROLE_LABELS: Record<string, string> = {
+-  ADMIN_EMPRESA: "Administrador",
+-  GERENTE: "Gerente",
+-  CAJERO: "Cajero",
+-  MESERO: "Mesero",
+-  COCINERO: "Cocinero",
+-};
+-
+ function fmtShort(iso: string | null | undefined) {
+   if (!iso) return "";
+   return new Date(iso).toLocaleDateString("es-MX", { day: "numeric", month: "short", year: "numeric" });
+@@ -801,7 +793,7 @@ function CompanyUsersModal({
+                     <p className="text-muted font-mono text-xs">{u.email}</p>
+                   </div>
+                   <div className="flex items-center gap-2 shrink-0">
+-                    <span className="text-xs text-muted">{ROLE_LABELS[u.role.name] ?? u.role.name}</span>
++                    <span className="text-xs text-muted">{getRoleLabel(company.businessType, u.role.name)}</span>
+                     <button
+                       onClick={() => handleDeleteUser(u)}
+                       className="text-xs text-ember-dark hover:underline"
+@@ -831,9 +823,9 @@ function CompanyUsersModal({
+               </Field>
+               <Field label="Rol">
+                 <select className={inputClass} value={form.roleId} onChange={(e) => setForm({ ...form, roleId: e.target.value })}>
+-                  {roles.map((r) => (
++                  {roles.filter((r) => (getAllowedRoleNames(company.businessType) as string[]).includes(r.name)).map((r) => (
+                     <option key={r.id} value={r.id}>
+-                      {ROLE_LABELS[r.name] ?? r.name}
++                      {getRoleLabel(company.businessType, r.name)}
+                     </option>
+                   ))}
+                 </select>
+diff --git a/src/lib/verticals.ts b/src/lib/verticals.ts
+index 241f964..dddf3c4 100644
+--- a/src/lib/verticals.ts
++++ b/src/lib/verticals.ts
+@@ -7,9 +7,25 @@
+  *
+  * NOTA: los roles (Administrador, Gerente, Cajero, etc.) son globales en Tappy, no por
+  * empresa, así que aquí no se siembran roles. Lo que sí define cada vertical es su
+- * nombre comercial, qué links del menú no aplican y las categorías iniciales.
++ * nombre comercial, qué links del menú no aplican, las categorías iniciales y su
++ * TIPOLOGÍA DE USUARIOS: qué roles se ofrecen y cómo se llaman en ese tipo de negocio
++ * (ej. en Cafetería el rol COCINERO se muestra como "Barista"). Los permisos NO cambian
++ * por vertical: siguen viviendo en src/lib/permissions.ts.
+  */
+ 
++/** Roles de empresa (los que un negocio puede asignar a su equipo). */
++export const COMPANY_ROLE_NAMES = ["ADMIN_EMPRESA", "GERENTE", "CAJERO", "MESERO", "COCINERO"] as const;
++export type CompanyRoleName = (typeof COMPANY_ROLE_NAMES)[number];
++
++/** Nombre por defecto de cada rol, cuando la vertical no lo renombra. */
++export const BASE_ROLE_LABELS: Record<CompanyRoleName, string> = {
++  ADMIN_EMPRESA: "Administrador",
++  GERENTE: "Gerente",
++  CAJERO: "Cajero",
++  MESERO: "Mesero",
++  COCINERO: "Cocinero",
++};
++
+ export const BUSINESS_TYPES = ["RESTAURANTE", "CAFETERIA", "ESCUELA", "DISTRIBUIDOR", "LABORATORIO", "BARBERIA_ESTETICA"] as const;
+ export type BusinessTypeKey = (typeof BUSINESS_TYPES)[number];
+ 
+@@ -27,6 +43,12 @@ export interface VerticalDef {
+   hiddenNavHrefs: string[];
+   /** Categorías iniciales al crear la empresa (vacío = no se siembra nada). */
+   defaultCategories: string[];
++  /** Tipología de usuarios: roles que este tipo de negocio puede asignar a su equipo. */
++  userTypes: CompanyRoleName[];
++  /** Renombres de rol propios de la vertical (el resto usa BASE_ROLE_LABELS). */
++  roleLabels: Partial<Record<CompanyRoleName, string>>;
++  /** Cómo se llama la pantalla de comandas (menú y encabezado). */
++  kitchenLabel: string;
+ }
+ 
+ export const VERTICALS: Record<BusinessTypeKey, VerticalDef> = {
+@@ -38,6 +60,9 @@ export const VERTICALS: Record<BusinessTypeKey, VerticalDef> = {
+     status: "live",
+     hiddenNavHrefs: [],
+     defaultCategories: [],
++    userTypes: [...COMPANY_ROLE_NAMES],
++    roleLabels: {},
++    kitchenLabel: "Cocina",
+   },
+   CAFETERIA: {
+     key: "CAFETERIA",
+@@ -47,6 +72,10 @@ export const VERTICALS: Record<BusinessTypeKey, VerticalDef> = {
+     status: "live",
+     hiddenNavHrefs: [],
+     defaultCategories: ["Bebidas calientes", "Bebidas frías", "Alimentos", "Postres"],
++    userTypes: [...COMPANY_ROLE_NAMES],
++    // En una cafetería quien prepara las órdenes es el barista, no un cocinero.
++    roleLabels: { COCINERO: "Barista" },
++    kitchenLabel: "Barra",
+   },
+   ESCUELA: {
+     key: "ESCUELA",
+@@ -56,6 +85,9 @@ export const VERTICALS: Record<BusinessTypeKey, VerticalDef> = {
+     status: "planned",
+     hiddenNavHrefs: [],
+     defaultCategories: ["Desayunos", "Comidas", "Snacks", "Bebidas"],
++    userTypes: [...COMPANY_ROLE_NAMES],
++    roleLabels: {},
++    kitchenLabel: "Cocina",
+   },
+   DISTRIBUIDOR: {
+     key: "DISTRIBUIDOR",
+@@ -65,6 +97,9 @@ export const VERTICALS: Record<BusinessTypeKey, VerticalDef> = {
+     status: "planned",
+     hiddenNavHrefs: ["/kitchen", "/tables"],
+     defaultCategories: [],
++    userTypes: [...COMPANY_ROLE_NAMES],
++    roleLabels: {},
++    kitchenLabel: "Cocina",
+   },
+   LABORATORIO: {
+     key: "LABORATORIO",
+@@ -74,6 +109,9 @@ export const VERTICALS: Record<BusinessTypeKey, VerticalDef> = {
+     status: "planned",
+     hiddenNavHrefs: ["/kitchen", "/tables"],
+     defaultCategories: [],
++    userTypes: [...COMPANY_ROLE_NAMES],
++    roleLabels: {},
++    kitchenLabel: "Cocina",
+   },
+   BARBERIA_ESTETICA: {
+     key: "BARBERIA_ESTETICA",
+@@ -84,6 +122,9 @@ export const VERTICALS: Record<BusinessTypeKey, VerticalDef> = {
+     hiddenNavHrefs: ["/kitchen", "/tables"],
+     // Los servicios se cobran como productos en el POS.
+     defaultCategories: ["Cortes", "Barba", "Color y tintes", "Tratamientos", "Productos"],
++    userTypes: [...COMPANY_ROLE_NAMES],
++    roleLabels: {},
++    kitchenLabel: "Cocina",
+   },
+ };
+ 
+@@ -91,6 +132,17 @@ export function getVertical(type: string | null | undefined): VerticalDef {
+   return VERTICALS[(type as BusinessTypeKey) ?? "RESTAURANTE"] ?? VERTICALS.RESTAURANTE;
+ }
+ 
++/** Nombre del rol tal como lo ve este tipo de negocio (ej. COCINERO -> "Barista" en Cafetería). */
++export function getRoleLabel(type: string | null | undefined, roleName: string): string {
++  const v = getVertical(type);
++  return v.roleLabels[roleName as CompanyRoleName] ?? BASE_ROLE_LABELS[roleName as CompanyRoleName] ?? roleName;
++}
++
++/** Roles que este tipo de negocio puede asignar. Nunca incluye SUPER_ADMIN. */
++export function getAllowedRoleNames(type: string | null | undefined): CompanyRoleName[] {
++  return getVertical(type).userTypes;
++}
++
+ /** Texto para el selector de Super Admin, ej. "Escuela (en desarrollo)". */
+ export function verticalOptionLabel(v: VerticalDef): string {
+   return v.status === "planned" ? `${v.label} (en desarrollo)` : v.label;
+diff --git a/src/modules/users/service.ts b/src/modules/users/service.ts
+index 3225f49..02cf41a 100644
+--- a/src/modules/users/service.ts
++++ b/src/modules/users/service.ts
+@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
+ import { z } from "zod";
+ import { userLimitPerBranch } from "@/lib/user-seats";
+ import bcrypt from "bcryptjs";
++import { getAllowedRoleNames } from "@/lib/verticals";
+ 
+ export const createUserSchema = z.object({
+   name: z.string().min(2, "El nombre es obligatorio"),
+@@ -28,6 +29,17 @@ export const usersService = {
+       throw new Error("Ya existe un usuario con ese correo");
+     }
+ 
++    // El rol viene del navegador: debe existir y ser uno de los que permite el tipo de negocio
++    // de ESTA empresa (la tipología de usuarios). Esto además impide asignar SUPER_ADMIN.
++    const [company, role] = await Promise.all([
++      prisma.company.findUnique({ where: { id: companyId }, select: { businessType: true } }),
++      prisma.role.findUnique({ where: { id: input.roleId }, select: { name: true } }),
++    ]);
++    if (!company) throw new Error("Empresa no encontrada");
++    if (!role || !(getAllowedRoleNames(company.businessType) as string[]).includes(role.name)) {
++      throw new Error("El rol seleccionado no es válido para este tipo de negocio");
++    }
++
+     // Si no se especifica sucursal, se asigna la primera de la empresa.
+     let branchId = input.branchId;
+     if (branchId) {
+-- 
+2.43.0
+

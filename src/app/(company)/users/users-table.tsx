@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Button, Card, StatusBadge } from "@/components/ui";
 import { Modal, Field, inputClass } from "@/components/ui/modal";
+import { getRoleLabel } from "@/lib/verticals";
 
 type Role = { id: string; name: string };
 type UserRow = {
@@ -14,22 +15,16 @@ type UserRow = {
   branch: { name: string } | null;
 };
 
-const ROLE_LABELS: Record<string, string> = {
-  ADMIN_EMPRESA: "Administrador",
-  GERENTE: "Gerente",
-  CAJERO: "Cajero",
-  MESERO: "Mesero",
-  COCINERO: "Cocinero",
-};
-
 export function UsersTable({
   initialUsers,
   roles,
   branches,
+  businessType,
 }: {
   initialUsers: UserRow[];
   roles: Role[];
   branches: { id: string; name: string }[];
+  businessType: string;
 }) {
   const [users, setUsers] = useState(initialUsers);
   const [modalOpen, setModalOpen] = useState(false);
@@ -94,7 +89,7 @@ export function UsersTable({
               <tr key={u.id} className="border-b border-line last:border-0">
                 <td className="px-5 py-3 font-medium">{u.name}</td>
                 <td className="px-5 py-3 text-muted font-mono text-xs">{u.email}</td>
-                <td className="px-5 py-3 text-xs">{ROLE_LABELS[u.role.name] ?? u.role.name}</td>
+                <td className="px-5 py-3 text-xs">{getRoleLabel(businessType, u.role.name)}</td>
                 <td className="px-5 py-3 text-muted">{u.branch?.name ?? "—"}</td>
                 <td className="px-5 py-3">
                   <StatusBadge status={u.isActive ? "active" : "inactive"} label={u.isActive ? "Activo" : "Inactivo"} />
@@ -150,7 +145,7 @@ export function UsersTable({
             >
               {roles.map((r) => (
                 <option key={r.id} value={r.id}>
-                  {ROLE_LABELS[r.name] ?? r.name}
+                  {getRoleLabel(businessType, r.name)}
                 </option>
               ))}
             </select>

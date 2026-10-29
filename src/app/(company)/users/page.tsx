@@ -6,6 +6,7 @@ import { usersService } from "@/modules/users/service";
 import { prisma } from "@/lib/prisma";
 import { UsersTable } from "./users-table";
 import { userLimitPerBranch } from "@/lib/user-seats";
+import { getAllowedRoleNames } from "@/lib/verticals";
 
 export default async function UsersPage() {
   const session = await getServerSession(authOptions);
@@ -17,9 +18,13 @@ export default async function UsersPage() {
 
   const companyId = session.user.companyId;
 
+  const companyRow = await prisma.company.findUnique({ where: { id: companyId }, select: { businessType: true } });
+  const businessType = companyRow?.businessType ?? "RESTAURANTE";
+
   const [users, roles, subscription, branches] = await Promise.all([
     usersService.list(companyId),
-    prisma.role.findMany({ where: { name: { not: "SUPER_ADMIN" } }, orderBy: { name: "asc" } }),
+    // Solo los roles que permite el tipo de negocio de esta empresa (nunca SUPER_ADMIN).
+    prisma.role.findMany({ where: { name: { in: getAllowedRoleNames(businessType) } }, orderBy: { name: "asc" } }),
     prisma.subscription.findUnique({ where: { companyId }, include: { license: true, plan: true } }),
     prisma.branch.findMany({ where: { companyId, isActive: true }, select: { id: true, name: true }, orderBy: { createdAt: "asc" } }),
   ]);
@@ -43,6 +48,7 @@ export default async function UsersPage() {
         initialUsers={JSON.parse(JSON.stringify(users))}
         roles={JSON.parse(JSON.stringify(roles))}
         branches={branches}
+        businessType={businessType}
       />
     </div>
   );

@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { z } from "zod";
 import { userLimitPerBranch } from "@/lib/user-seats";
 import bcrypt from "bcryptjs";
+import { getAllowedRoleNames } from "@/lib/verticals";
 
 export const createUserSchema = z.object({
   name: z.string().min(2, "El nombre es obligatorio"),
@@ -26,6 +27,17 @@ export const usersService = {
     const existing = await prisma.user.findUnique({ where: { email: input.email } });
     if (existing) {
       throw new Error("Ya existe un usuario con ese correo");
+    }
+
+    // El rol viene del navegador: debe existir y ser uno de los que permite el tipo de negocio
+    // de ESTA empresa (la tipología de usuarios). Esto además impide asignar SUPER_ADMIN.
+    const [company, role] = await Promise.all([
+      prisma.company.findUnique({ where: { id: companyId }, select: { businessType: true } }),
+      prisma.role.findUnique({ where: { id: input.roleId }, select: { name: true } }),
+    ]);
+    if (!company) throw new Error("Empresa no encontrada");
+    if (!role || !(getAllowedRoleNames(company.businessType) as string[]).includes(role.name)) {
+      throw new Error("El rol seleccionado no es válido para este tipo de negocio");
     }
 
     // Si no se especifica sucursal, se asigna la primera de la empresa.

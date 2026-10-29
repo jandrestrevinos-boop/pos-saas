@@ -6,6 +6,8 @@ import { kitchenService } from "@/modules/kitchen/service";
 import { requireBillingAccess } from "@/lib/billing-gate";
 import { requirePosAccess } from "@/lib/feature-gating";
 import { KitchenClient } from "./kitchen-client";
+import { prisma } from "@/lib/prisma";
+import { getVertical } from "@/lib/verticals";
 import Link from "next/link";
 
 export default async function KitchenPage() {
@@ -38,5 +40,9 @@ export default async function KitchenPage() {
     );
   }
 
-  return <KitchenClient />;
+  const companyRow = await prisma.company.findUnique({
+    where: { id: session.user.companyId },
+    select: { businessType: true },
+  });
+  return <KitchenClient title={getVertical(companyRow?.businessType).kitchenLabel} />;
 }

@@ -7,7 +7,7 @@ import { ResponsiveTable, type ResponsiveColumn } from "@/components/ui/responsi
 import { formatMxn } from "@/lib/format";
 import { FEATURE_CATALOG } from "@/lib/plan-features";
 import { computeBillingAccess } from "@/lib/billing";
-import { BUSINESS_TYPES, VERTICALS, getVertical, verticalOptionLabel } from "@/lib/verticals";
+import { BUSINESS_TYPES, VERTICALS, getVertical, verticalOptionLabel, getRoleLabel, getAllowedRoleNames } from "@/lib/verticals";
 // FEATURE_CATALOG ahora es [{ key, label, status }] — customFeatures y
 // plan.features guardan `key`, la UI muestra `label`.
 
@@ -31,14 +31,6 @@ type Company = {
     trialEndsAt?: string | null;
     renewalDate?: string | null;
   } | null;
-};
-
-const ROLE_LABELS: Record<string, string> = {
-  ADMIN_EMPRESA: "Administrador",
-  GERENTE: "Gerente",
-  CAJERO: "Cajero",
-  MESERO: "Mesero",
-  COCINERO: "Cocinero",
 };
 
 function fmtShort(iso: string | null | undefined) {
@@ -801,7 +793,7 @@ function CompanyUsersModal({
                     <p className="text-muted font-mono text-xs">{u.email}</p>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    <span className="text-xs text-muted">{ROLE_LABELS[u.role.name] ?? u.role.name}</span>
+                    <span className="text-xs text-muted">{getRoleLabel(company.businessType, u.role.name)}</span>
                     <button
                       onClick={() => handleDeleteUser(u)}
                       className="text-xs text-ember-dark hover:underline"
@@ -831,9 +823,9 @@ function CompanyUsersModal({
               </Field>
               <Field label="Rol">
                 <select className={inputClass} value={form.roleId} onChange={(e) => setForm({ ...form, roleId: e.target.value })}>
-                  {roles.map((r) => (
+                  {roles.filter((r) => (getAllowedRoleNames(company.businessType) as string[]).includes(r.name)).map((r) => (
                     <option key={r.id} value={r.id}>
-                      {ROLE_LABELS[r.name] ?? r.name}
+                      {getRoleLabel(company.businessType, r.name)}
                     </option>
                   ))}
                 </select>
