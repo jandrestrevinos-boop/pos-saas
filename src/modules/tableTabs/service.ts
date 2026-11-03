@@ -32,6 +32,8 @@ export const closeTabSchema = z.object({
   // Programa de clientes frecuentes (opcional): cliente identificado y si se canjea su descuento.
   loyaltyCustomerId: z.string().min(1).optional(),
   redeemLoyalty: z.boolean().default(false),
+  // Si la recompensa es un producto de regalo: cuál de los disponibles se entrega.
+  loyaltyGiftId: z.string().min(1).optional(),
   // Cupón de promoción (opcional) escrito por el cajero.
   couponCode: z.string().trim().max(20).optional(),
 });
@@ -246,12 +248,13 @@ export const tableTabsService = {
 
     const { updated, total, loyalty } = await prisma.$transaction(async (tx) => {
       const plan = input.loyaltyCustomerId
-        ? await loyaltyService.prepareForSale(tx, companyId, input.loyaltyCustomerId, input.redeemLoyalty, subtotal - promo.discount)
+        ? await loyaltyService.prepareForSale(tx, companyId, input.loyaltyCustomerId, input.redeemLoyalty, subtotal - promo.discount, input.loyaltyGiftId)
         : null;
 
       // Si canjea su descuento de cliente frecuente, ese descuento (calculado en el servidor)
       // reemplaza al descuento manual.
-      const manualDiscount = plan?.redeem ? 0 : input.discount;
+      // (Si la recompensa es un producto de regalo no hay descuento: el manual se respeta.)
+      const manualDiscount = plan?.redeem && !plan.gift ? 0 : input.discount;
       const discount = Math.min(manualDiscount + (plan?.discount ?? 0) + promo.discount, subtotal);
       const total = subtotal - discount;
 
@@ -269,6 +272,14 @@ export const tableTabsService = {
       const change =
         input.paymentMethod === "CASH" && input.cashReceived !== undefined ? input.cashReceived - payable : undefined;
 
+      // Producto de regalo: si está vinculado al POS entra a la cuenta en $0 como una ronda nueva
+      // (cocina lo ve como un ticket aparte); si es un regalo escrito a mano, queda anotado.
+      const nextRound = Math.max(0, ...order.items.map((i) => i.roundNumber)) + 1;
+      const giftItem = plan?.gift?.productId
+        ? { productId: plan.gift.productId, quantity: 1, unitPriceAtSale: 0, lineTotal: 0, roundNumber: nextRound }
+        : null;
+      const giftNote = plan?.gift && !plan.gift.productId ? `Regalo cliente frecuente: ${plan.gift.name}` : null;
+
       const updated = await tx.order.update({
         where: { id: orderId },
         data: {
@@ -277,6 +288,8 @@ export const tableTabsService = {
           total,
           tip,
           ...(plan ? { customerId: plan.customerId } : {}),
+          ...(giftItem ? { items: { create: giftItem } } : {}),
+          ...(giftNote ? { notes: [order.notes, giftNote].filter(Boolean).join(" · ") } : {}),
           payments: {
             create: {
               method: input.paymentMethod,
@@ -305,6 +318,20 @@ export const tableTabsService = {
 
       return { updated, total, loyalty };
     });
+
+    // El producto de regalo también sale del inventario (el resto de la cuenta ya se descontó por ronda).
+    if (loyalty?.giftProductId) {
+      try {
+        const { inventoryService } = await import("@/modules/inventory/service");
+        await inventoryService.deductForSale(
+          order.branchId,
+          userId,
+          expandMenuInventory([{ productId: loyalty.giftProductId, quantity: 1, menuChoices: [] }])
+        );
+      } catch {
+        // El inventario es informativo; no debe bloquear el cobro de la cuenta.
+      }
+    }
 
     await prisma.auditLog.create({
       data: {

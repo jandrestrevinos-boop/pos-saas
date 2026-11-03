@@ -4,11 +4,12 @@ import { useState } from "react";
 import { Button, Card, StatCard } from "@/components/ui";
 import { Modal, Field, inputClass } from "@/components/ui/modal";
 import { QrImage, downloadQrPng } from "@/components/loyalty/qr-image";
+import { LoyaltyGiftsManager, type Gift } from "./loyalty-gifts-manager";
 
 type Program = {
   isActive: boolean;
   visitsRequired: number;
-  discountType: "PERCENT" | "FIXED";
+  discountType: "PERCENT" | "FIXED" | "GIFT";
   discountValue: number;
   oneVisitPerDay: boolean;
   signupToken: string;
@@ -29,10 +30,14 @@ export function LoyaltyAdminClient({
   initialProgram,
   initialStats,
   initialCustomers,
+  initialGifts,
+  posAvailable,
 }: {
   initialProgram: Program;
   initialStats: Stats;
   initialCustomers: CustomerRow[];
+  initialGifts: Gift[];
+  posAvailable: boolean;
 }) {
   const [program, setProgram] = useState(initialProgram);
   const [stats] = useState(initialStats);
@@ -144,28 +149,31 @@ export function LoyaltyAdminClient({
               />
             </Field>
 
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Tipo de descuento">
+            <div className={`grid gap-3 ${discountType === "GIFT" ? "grid-cols-1" : "grid-cols-2"}`}>
+              <Field label="Tipo de recompensa">
                 <select
                   className={inputClass}
                   value={discountType}
-                  onChange={(e) => setDiscountType(e.target.value as "PERCENT" | "FIXED")}
+                  onChange={(e) => setDiscountType(e.target.value as "PERCENT" | "FIXED" | "GIFT")}
                 >
                   <option value="PERCENT">Porcentaje (%)</option>
                   <option value="FIXED">Monto fijo (MXN)</option>
+                  <option value="GIFT">Producto de regalo</option>
                 </select>
               </Field>
-              <Field label={discountType === "PERCENT" ? "Porcentaje" : "Monto (MXN)"}>
-                <input
-                  className={inputClass}
-                  type="number"
-                  min={1}
-                  max={discountType === "PERCENT" ? 100 : undefined}
-                  step="any"
-                  value={discountValue}
-                  onChange={(e) => setDiscountValue(e.target.value)}
-                />
-              </Field>
+              {discountType !== "GIFT" && (
+                <Field label={discountType === "PERCENT" ? "Porcentaje" : "Monto (MXN)"}>
+                  <input
+                    className={inputClass}
+                    type="number"
+                    min={1}
+                    max={discountType === "PERCENT" ? 100 : undefined}
+                    step="any"
+                    value={discountValue}
+                    onChange={(e) => setDiscountValue(e.target.value)}
+                  />
+                </Field>
+              )}
             </div>
 
             <Field label="Nombre en la tarjeta (opcional)">
@@ -222,6 +230,8 @@ export function LoyaltyAdminClient({
           </div>
         </Card>
       </div>
+
+      {discountType === "GIFT" && <LoyaltyGiftsManager initialGifts={initialGifts} posAvailable={posAvailable} />}
 
       <div>
         <div className="flex items-center justify-between gap-3 mb-3">

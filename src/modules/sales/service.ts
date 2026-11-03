@@ -34,6 +34,8 @@ export const saleSchema = z
     // Programa de clientes frecuentes (opcional): cliente identificado y si se canjea su descuento.
     loyaltyCustomerId: z.string().min(1).optional(),
     redeemLoyalty: z.boolean().default(false),
+    // Si la recompensa es un producto de regalo: cuál de los disponibles se entrega.
+    loyaltyGiftId: z.string().min(1).optional(),
     // Cupón de promoción (opcional) escrito por el cajero.
     couponCode: z.string().trim().max(20).optional(),
   })
@@ -142,12 +144,13 @@ export const salesService = {
     //    clientes frecuentes, si el cliente fue identificado).
     const { order, loyalty } = await prisma.$transaction(async (tx) => {
       const plan = input.loyaltyCustomerId
-        ? await loyaltyService.prepareForSale(tx, companyId, input.loyaltyCustomerId, input.redeemLoyalty, subtotal - promo.discount)
+        ? await loyaltyService.prepareForSale(tx, companyId, input.loyaltyCustomerId, input.redeemLoyalty, subtotal - promo.discount, input.loyaltyGiftId)
         : null;
 
       // Si canjea su descuento de cliente frecuente, ese descuento (calculado en el servidor)
       // reemplaza al descuento manual del cajero.
-      const manualDiscount = plan?.redeem ? 0 : input.discount;
+      // (Si la recompensa es un producto de regalo no hay descuento: el manual se respeta.)
+      const manualDiscount = plan?.redeem && !plan.gift ? 0 : input.discount;
       const discount = Math.min(manualDiscount + (plan?.discount ?? 0) + promo.discount, subtotal); // el descuento nunca deja el total en negativo
       const total = subtotal - discount;
 
@@ -168,6 +171,16 @@ export const salesService = {
           ? input.cashReceived - payable
           : undefined;
 
+      // Producto de regalo: si está vinculado a un producto del POS entra a la venta en $0 (aparece en
+      // cocina y descuenta inventario); si es un regalo escrito a mano, queda anotado en la orden.
+      const giftItem = plan?.gift?.productId
+        ? { productId: plan.gift.productId, quantity: 1, unitPriceAtSale: 0, lineTotal: 0, extraCostAtSale: 0 }
+        : null;
+      const orderNotes =
+        [input.notes?.trim(), plan?.gift && !plan.gift.productId ? `Regalo cliente frecuente: ${plan.gift.name}` : null]
+          .filter(Boolean)
+          .join(" · ") || null;
+
       const order = await tx.order.create({
         data: {
           localId: crypto.randomUUID(),
@@ -178,14 +191,14 @@ export const salesService = {
           tableId: input.tableId ?? null,
           status: "PENDING",
           orderType: input.orderType,
-          notes: input.notes?.trim() || null,
+          notes: orderNotes,
           deliveryAddress: input.orderType === "DOMICILIO" ? input.deliveryAddress?.trim() : null,
           subtotal,
           discount,
           tax: 0,
           total,
           tip,
-          items: { create: orderItemsData },
+          items: { create: giftItem ? [...orderItemsData, giftItem] : orderItemsData },
           payments: {
             create: {
               method: input.paymentMethod,
@@ -231,11 +244,10 @@ export const salesService = {
     if (input.paymentMethod !== "MERCADOPAGO" && input.paymentMethod !== "MERCADOPAGO_TERMINAL") {
       const { inventoryService } = await import("@/modules/inventory/service");
       try {
-        await inventoryService.deductForSale(
-          branchId,
-          userId,
-          expandMenuInventory(input.items.map((i, idx) => ({ productId: i.productId, quantity: i.quantity, menuChoices: resolved[idx].choices })))
-        );
+        const inventoryItems = input.items.map((i, idx) => ({ productId: i.productId, quantity: i.quantity, menuChoices: resolved[idx].choices }));
+        // El producto de regalo también sale del inventario.
+        if (loyalty?.giftProductId) inventoryItems.push({ productId: loyalty.giftProductId, quantity: 1, menuChoices: [] });
+        await inventoryService.deductForSale(branchId, userId, expandMenuInventory(inventoryItems));
       } catch {
         // El inventario es informativo respecto a la venta; un fallo aquí
         // no debe revertir un cobro ya realizado al cliente.

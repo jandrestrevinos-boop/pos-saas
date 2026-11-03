@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { clsx } from "clsx";
 import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
-import { PosLoyaltyPanel, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
+import { PosLoyaltyPanel, selectedGift, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
 import {
   PaymentMethodPicker,
   TipPicker,
@@ -339,6 +339,7 @@ function CloseTabModal({
   const [loyaltyDone, setLoyaltyDone] = useState<{
     customerName: string;
     redeemed: boolean;
+    giftName?: string | null;
     visitRegistered: boolean;
     visitPending: boolean;
     visits: number;
@@ -348,6 +349,7 @@ function CloseTabModal({
   // Si canjea su descuento de cliente frecuente, el total se calcula sobre el subtotal de la cuenta.
   const subtotalNum = Number(order.subtotal);
   const afterPromo = subtotalNum - promo.discount;
+  const loyaltyGift = selectedGift(loyalty);
   const loyaltyDiscount = loyalty?.redeem
     ? computeLoyaltyDiscount(loyalty.customer.discountType, loyalty.customer.discountValue, afterPromo)
     : 0;
@@ -375,6 +377,7 @@ function CloseTabModal({
           cashReceived: method === "CASH" ? cashReceivedNum : undefined,
           loyaltyCustomerId: loyalty?.customer.id,
           redeemLoyalty: !!loyalty?.redeem,
+          loyaltyGiftId: selectedGift(loyalty)?.id,
           couponCode: coupon ?? undefined,
         }),
       });
@@ -461,7 +464,11 @@ function CloseTabModal({
           <p className="font-display text-xl font-semibold mb-3">Cobro registrado</p>
           <div className="text-sm bg-sage/10 text-sage rounded-md px-3 py-2 mb-5">
             <p className="font-medium">{loyaltyDone.customerName}</p>
-            {loyaltyDone.redeemed && <p>Descuento de cliente frecuente aplicado.</p>}
+            {loyaltyDone.giftName ? (
+              <p>🎁 Entrega de regalo: {loyaltyDone.giftName}</p>
+            ) : (
+              loyaltyDone.redeemed && <p>Descuento de cliente frecuente aplicado.</p>
+            )}
             <p>
               {loyaltyDone.visitRegistered
                 ? `Visita sumada: ${loyaltyDone.visits}/${loyaltyDone.required}.`
@@ -488,8 +495,12 @@ function CloseTabModal({
             Propina ${tip.toFixed(2)} · A cobrar <span className="font-mono font-medium text-ink">${payable.toFixed(2)} MXN</span>
           </p>
         )}
-        {loyalty?.redeem && (
-          <p className="text-xs text-sage mb-4">Incluye descuento de cliente frecuente (-${loyaltyDiscount.toFixed(2)})</p>
+        {loyaltyGift ? (
+          <p className="text-xs text-sage mb-4">🎁 Regalo de cliente frecuente: {loyaltyGift.name}</p>
+        ) : (
+          loyalty?.redeem && (
+            <p className="text-xs text-sage mb-4">Incluye descuento de cliente frecuente (-${loyaltyDiscount.toFixed(2)})</p>
+          )
         )}
         <div className="mb-4 space-y-1">
           {promo.applied.map((a) => (

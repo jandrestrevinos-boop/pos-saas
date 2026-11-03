@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import type { RewardType } from "@/lib/loyalty-discount";
 import { QrScanner } from "./qr-scanner";
 
 export type LoyaltyCustomer = {
@@ -14,12 +15,20 @@ export type LoyaltyCustomer = {
   visitedToday: boolean;
   programActive: boolean;
   discountText: string;
-  discountType: "PERCENT" | "FIXED";
+  discountType: RewardType;
   discountValue: number;
+  /** Productos de regalo disponibles (solo cuando la recompensa es un regalo). */
+  gifts: { id: string; name: string; description: string | null; productId: string | null }[];
 };
 
 /** Cliente identificado en Caja y si se canjea su descuento en esta venta. */
-export type LoyaltySelection = { customer: LoyaltyCustomer; redeem: boolean };
+export type LoyaltySelection = { customer: LoyaltyCustomer; redeem: boolean; giftId?: string };
+
+/** Regalo que se entregará en esta venta (null si no canjea un regalo). */
+export function selectedGift(sel: LoyaltySelection | null) {
+  if (!sel?.redeem || sel.customer.discountType !== "GIFT") return null;
+  return sel.customer.gifts.find((g) => g.id === sel.giftId) ?? sel.customer.gifts[0] ?? null;
+}
 
 /**
  * Bloque "Cliente frecuente" para Caja (Mostrador y Mesa): escanea la tarjeta (o teclea el
@@ -78,15 +87,33 @@ export function PosLoyaltyPanel({
           <p className="text-xs text-muted mt-2">El programa está pausado: no se sumará visita.</p>
         ) : (
           <>
-            {c.rewardAvailable && (
-              <label className="flex items-center gap-2 mt-2 text-sm font-medium text-sage">
-                <input
-                  type="checkbox"
-                  checked={value.redeem}
-                  onChange={(e) => onChange({ ...value, redeem: e.target.checked })}
-                />
-                Canjear {c.discountText}
-              </label>
+            {c.rewardAvailable && c.discountType === "GIFT" && c.gifts.length === 0 && (
+              <p className="text-xs text-muted mt-2">Tiene un regalo disponible, pero no hay productos de regalo activos.</p>
+            )}
+            {c.rewardAvailable && (c.discountType !== "GIFT" || c.gifts.length > 0) && (
+              <>
+                <label className="flex items-center gap-2 mt-2 text-sm font-medium text-sage">
+                  <input
+                    type="checkbox"
+                    checked={value.redeem}
+                    onChange={(e) => onChange({ ...value, redeem: e.target.checked, giftId: value.giftId ?? c.gifts[0]?.id })}
+                  />
+                  Canjear {c.discountText}
+                </label>
+                {value.redeem && c.discountType === "GIFT" && c.gifts.length > 1 && (
+                  <select
+                    className="mt-2 w-full rounded-md border border-line px-2 py-1.5 text-sm"
+                    value={value.giftId ?? c.gifts[0].id}
+                    onChange={(e) => onChange({ ...value, giftId: e.target.value })}
+                  >
+                    {c.gifts.map((g) => (
+                      <option key={g.id} value={g.id}>
+                        {g.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </>
             )}
             <p className="text-[11px] text-muted mt-1">
               {c.visitedToday

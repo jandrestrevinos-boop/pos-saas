@@ -5,7 +5,7 @@ import { resolveBranchId } from "@/lib/tenant-context";
 import { loyaltyService } from "@/modules/loyalty/service";
 import { loyaltyGuard, errorResponse } from "@/modules/loyalty/guard";
 
-const schema = z.object({ customerId: z.string().min(1) });
+const schema = z.object({ customerId: z.string().min(1), giftId: z.string().min(1).optional() });
 
 export async function POST(req: Request) {
   const g = await loyaltyGuard(PERMISSIONS.LOYALTY_SCAN);
@@ -15,7 +15,7 @@ export async function POST(req: Request) {
   if (!parsed.success) return NextResponse.json({ error: "Cliente inválido" }, { status: 400 });
   try {
     const branchId = await resolveBranchId(g.ctx, g.companyId);
-    const customer = await loyaltyService.redeem(g.companyId, g.ctx.userId, branchId, parsed.data.customerId);
+    const customer = await loyaltyService.redeem(g.companyId, g.ctx.userId, branchId, parsed.data.customerId, parsed.data.giftId);
     return NextResponse.json({ customer });
   } catch (err) {
     return errorResponse(err, "No se pudo canjear el descuento");

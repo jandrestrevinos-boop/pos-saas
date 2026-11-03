@@ -6,7 +6,7 @@ import Link from "next/link";
 import { formatMxn } from "@/lib/format";
 import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
 import { evaluatePromotions, type PromotionRule } from "@/lib/promotions";
-import { PosLoyaltyPanel, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
+import { PosLoyaltyPanel, selectedGift, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
 import { useBranding } from "@/components/branding-context";
 import {
   PaymentMethodPicker,
@@ -19,6 +19,7 @@ import {
 type LoyaltyResult = {
   customerName: string;
   redeemed: boolean;
+  giftName?: string | null;
   visitRegistered: boolean;
   visitPending: boolean;
   visits: number;
@@ -211,11 +212,14 @@ function PosClientInner({
   );
   const afterPromo = subtotal - promo.discount;
   // Si canjea su descuento de cliente frecuente, ese descuento reemplaza al descuento manual.
-  const loyaltyDiscount = loyalty?.redeem
-    ? computeLoyaltyDiscount(loyalty.customer.discountType, loyalty.customer.discountValue, afterPromo)
+  // Si la recompensa es un producto de regalo no hay descuento: el manual se respeta y el regalo entra aparte.
+  const discountRedeem = !!loyalty?.redeem && loyalty.customer.discountType !== "GIFT";
+  const loyaltyGift = selectedGift(loyalty);
+  const loyaltyDiscount = discountRedeem
+    ? computeLoyaltyDiscount(loyalty!.customer.discountType, loyalty!.customer.discountValue, afterPromo)
     : 0;
-  const manualDiscount = loyalty?.redeem ? 0 : Math.min(discount, afterPromo);
-  const safeDiscount = promo.discount + (loyalty?.redeem ? loyaltyDiscount : manualDiscount);
+  const manualDiscount = discountRedeem ? 0 : Math.min(discount, afterPromo);
+  const safeDiscount = promo.discount + (discountRedeem ? loyaltyDiscount : manualDiscount);
   const total = subtotal - safeDiscount;
 
   function addLine(product: Product, choices: MenuChoiceOption[]) {
@@ -425,7 +429,13 @@ function PosClientInner({
               </div>
             )}
             {loyaltyEnabled && !tableInfo && <PosLoyaltyPanel value={loyalty} onChange={setLoyalty} />}
-            {loyalty?.redeem ? (
+            {loyaltyGift && (
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-muted">Regalo cliente frecuente</span>
+                <span className="font-medium">🎁 {loyaltyGift.name}</span>
+              </div>
+            )}
+            {discountRedeem ? (
               <div className="flex items-center justify-between text-sm">
                 <span className="text-muted">Descuento cliente frecuente</span>
                 <span className="font-mono">-{formatMxn(loyaltyDiscount)}</span>
@@ -736,6 +746,7 @@ function CheckoutModal({
           couponCode: couponCode || undefined,
           loyaltyCustomerId: loyalty?.customer.id,
           redeemLoyalty: !!loyalty?.redeem,
+          loyaltyGiftId: selectedGift(loyalty)?.id,
           paymentMethod: method,
           cardProvider: method === "CARD" && cardProvider ? cardProvider : undefined,
           tip,
@@ -790,11 +801,17 @@ function CheckoutModal({
       setCompletedOrder({
         orderId: data.order.id,
         orderNumber: data.order.orderNumber,
-        items: cart.map((l) => ({
-          quantity: l.quantity,
-          name: lineLabel(l),
-          unitPrice: l.unitPrice,
-        })),
+        items: [
+          ...cart.map((l) => ({
+            quantity: l.quantity,
+            name: lineLabel(l),
+            unitPrice: l.unitPrice,
+          })),
+          // El producto de regalo aparece en el ticket en $0.
+          ...(data.order.loyalty?.giftName
+            ? [{ quantity: 1, name: `Regalo: ${data.order.loyalty.giftName}`, unitPrice: 0 }]
+            : []),
+        ],
         subtotal,
         discount,
         total,
@@ -1239,7 +1256,11 @@ function CheckoutModal({
           {completedOrder.loyalty && (
             <div className="text-sm bg-sage-light text-sage rounded-md px-3 py-2 mb-4">
               <p className="font-medium">{completedOrder.loyalty.customerName}</p>
-              {completedOrder.loyalty.redeemed && <p>Descuento de cliente frecuente aplicado.</p>}
+              {completedOrder.loyalty.giftName ? (
+                <p>🎁 Entrega de regalo: {completedOrder.loyalty.giftName}</p>
+              ) : (
+                completedOrder.loyalty.redeemed && <p>Descuento de cliente frecuente aplicado.</p>
+              )}
               <p>
                 {completedOrder.loyalty.visitRegistered
                   ? `Visita sumada: ${completedOrder.loyalty.visits}/${completedOrder.loyalty.required}.`

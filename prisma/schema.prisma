@@ -53,6 +53,7 @@ model Company {
   stockTransfers  StockTransfer[]
 
   loyaltyProgram     LoyaltyProgram?
+  loyaltyGifts       LoyaltyGift[]
   loyaltyVisits      LoyaltyVisit[]
   loyaltyRedemptions LoyaltyRedemption[]
   promotions         Promotion[]
@@ -422,6 +423,7 @@ model Product {
   orderItems         OrderItem[]
   inventoryMovements InventoryMovement[]
   hardwareFinancingItems HardwareFinancingItem[]
+  loyaltyGifts           LoyaltyGift[]
 
   @@index([companyId])
   branchStocks    BranchStock[]
@@ -734,6 +736,7 @@ model Customer {
 enum LoyaltyDiscountType {
   PERCENT
   FIXED
+  GIFT // recompensa: un producto de regalo (catálogo LoyaltyGift)
 }
 
 /// Configuración del programa de cada empresa (una por empresa). El
@@ -754,6 +757,26 @@ model LoyaltyProgram {
   updatedAt      DateTime @updatedAt
 
   @@map("loyalty_programs")
+}
+
+/// Catálogo de productos de regalo del programa. Puede vincularse a un producto del POS
+/// (productId: al canjear en Caja se agrega a la venta en $0 y descuenta inventario) o ser un
+/// producto escrito a mano (empresas sin POS: el cajero solo ve "Entregar: X").
+model LoyaltyGift {
+  id          String   @id @default(uuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  productId   String?
+  product     Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([companyId, productId])
+  @@index([companyId])
+  @@map("loyalty_gifts")
 }
 
 /// Una visita (compra verificada por el personal) de un cliente.
@@ -786,6 +809,9 @@ model LoyaltyRedemption {
   discountType  LoyaltyDiscountType
   discountValue Decimal  @db.Decimal(10, 2)
   visitsUsed    Int
+  // Solo recompensas de tipo GIFT: producto entregado (nombre congelado al momento del canje).
+  giftId        String?
+  giftName      String?
   createdAt     DateTime @default(now())
 
   @@index([companyId, createdAt])

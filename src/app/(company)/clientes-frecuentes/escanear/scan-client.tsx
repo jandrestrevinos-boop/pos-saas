@@ -17,6 +17,8 @@ type CustomerSummary = {
   visitedToday: boolean;
   programActive: boolean;
   discountText: string;
+  discountType: "PERCENT" | "FIXED" | "GIFT";
+  gifts: { id: string; name: string; description: string | null; productId: string | null }[];
   redeemed?: string;
 };
 
@@ -35,6 +37,7 @@ export function ScanClient() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [manualCode, setManualCode] = useState("");
+  const [giftId, setGiftId] = useState("");
   const [showEnroll, setShowEnroll] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPhone, setNewPhone] = useState("");
@@ -119,6 +122,9 @@ export function ScanClient() {
     lockedRef.current = false;
   }
 
+  // Regalo elegido (por defecto, el primero disponible).
+  const giftChoice = customer?.gifts?.some((g) => g.id === giftId) ? giftId : (customer?.gifts?.[0]?.id ?? "");
+
   async function act(kind: "visit" | "redeem") {
     if (!customer) return;
     setBusy(true);
@@ -127,7 +133,10 @@ export function ScanClient() {
     const res = await fetch(`/api/loyalty/${kind}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ customerId: customer.id }),
+      body: JSON.stringify({
+        customerId: customer.id,
+        ...(kind === "redeem" && customer.discountType === "GIFT" ? { giftId: giftChoice } : {}),
+      }),
     });
     const data = await res.json().catch(() => ({}));
     setBusy(false);
@@ -136,7 +145,13 @@ export function ScanClient() {
       return;
     }
     setCustomer(data.customer);
-    setMessage(kind === "visit" ? "Visita registrada" : `Descuento canjeado: ${data.customer.redeemed}`);
+    setMessage(
+      kind === "visit"
+        ? "Visita registrada"
+        : customer.discountType === "GIFT"
+          ? `${data.customer.redeemed}. Entrégalo al cliente.`
+          : `Descuento canjeado: ${data.customer.redeemed}`
+    );
     navigator.vibrate?.(100);
   }
 
@@ -224,7 +239,32 @@ export function ScanClient() {
           )}
 
           <div className="flex flex-col gap-2">
-            {customer.rewardAvailable && (
+            {customer.rewardAvailable && customer.discountType === "GIFT" && (
+              <>
+                {customer.gifts.length > 1 && (
+                  <select
+                    className={inputClass}
+                    value={giftChoice}
+                    onChange={(e) => setGiftId(e.target.value)}
+                  >
+                    {customer.gifts.map((g) => (
+                      <option key={g.id} value={g.id}>
+                        {g.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <Button
+                  onClick={() => act("redeem")}
+                  disabled={busy || !customer.programActive || customer.gifts.length === 0}
+                >
+                  {customer.gifts.length === 0
+                    ? "No hay productos de regalo activos"
+                    : `Entregar regalo${customer.gifts.length === 1 ? `: ${customer.gifts[0].name}` : ""}`}
+                </Button>
+              </>
+            )}
+            {customer.rewardAvailable && customer.discountType !== "GIFT" && (
               <Button onClick={() => act("redeem")} disabled={busy || !customer.programActive}>
                 Canjear descuento ({customer.discountText})
               </Button>

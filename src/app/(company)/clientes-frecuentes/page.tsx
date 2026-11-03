@@ -30,22 +30,26 @@ export default async function ClientesFrecuentesPage() {
     );
   }
 
-  const [program, stats, customers] = await Promise.all([
+  const [program, stats, customers, gifts, loyaltyOnly] = await Promise.all([
     loyaltyService.getProgram(companyId),
     loyaltyService.stats(companyId),
     loyaltyService.listCustomers(companyId),
+    loyaltyService.listGifts(companyId),
+    isLoyaltyOnly(companyId),
   ]);
 
   return (
     <div>
       <h1 className="font-display text-3xl font-semibold mb-1">Clientes frecuentes</h1>
       <p className="text-muted text-sm mb-8">
-        Premia a quien te visita seguido: tarjeta digital con QR, visitas y descuento automático.
+        Premia a quien te visita seguido: tarjeta digital con QR, visitas y un descuento o un producto de regalo.
       </p>
       <LoyaltyAdminClient
         initialProgram={JSON.parse(JSON.stringify(program))}
         initialStats={stats}
         initialCustomers={JSON.parse(JSON.stringify(customers))}
+        initialGifts={gifts}
+        posAvailable={!loyaltyOnly}
       />
     </div>
   );

@@ -3,7 +3,8 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { hasFeature } from "@/lib/feature-gating";
 import { FEATURE_KEYS } from "@/lib/plan-features";
-import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
+import { Prisma } from "@prisma/client";
+import { computeLoyaltyDiscount, type RewardType } from "@/lib/loyalty-discount";
 
 /**
  * Programa de clientes frecuentes.
@@ -44,7 +45,8 @@ export function normalizePhone(raw: string): string {
   return digits;
 }
 
-export function describeDiscount(type: "PERCENT" | "FIXED", value: number): string {
+export function describeDiscount(type: RewardType, value: number): string {
+  if (type === "GIFT") return "un producto de regalo";
   return type === "PERCENT" ? `${value}% de descuento` : `$${value} MXN de descuento`;
 }
 
@@ -52,7 +54,7 @@ export const programSchema = z
   .object({
     isActive: z.boolean().optional(),
     visitsRequired: z.coerce.number().int("Debe ser un número entero").min(2, "Mínimo 2 visitas").max(50, "Máximo 50 visitas").optional(),
-    discountType: z.enum(["PERCENT", "FIXED"]).optional(),
+    discountType: z.enum(["PERCENT", "FIXED", "GIFT"]).optional(),
     discountValue: z.coerce.number().positive("El descuento debe ser mayor a 0").max(100000).optional(),
     oneVisitPerDay: z.boolean().optional(),
     displayName: z.string().trim().max(60).nullable().optional(),
@@ -73,7 +75,7 @@ function serializeProgram(p: ProgramRow) {
     id: p.id,
     isActive: p.isActive,
     visitsRequired: p.visitsRequired,
-    discountType: p.discountType as "PERCENT" | "FIXED",
+    discountType: p.discountType as RewardType,
     discountValue: Number(p.discountValue),
     oneVisitPerDay: p.oneVisitPerDay,
     signupToken: p.signupToken,
@@ -90,7 +92,58 @@ type CustomerRow = {
   lastVisitAt: Date | null;
 };
 
-function summarize(customer: CustomerRow, program: ProgramRow) {
+/** Producto de regalo que el cajero puede entregar (nombre efectivo: el del POS si está vinculado). */
+export type GiftOption = { id: string; name: string; description: string | null; productId: string | null };
+
+const giftSelect = {
+  id: true,
+  name: true,
+  description: true,
+  productId: true,
+  isActive: true,
+  product: { select: { name: true, isActive: true } },
+} as const;
+
+function toGiftOption(g: {
+  id: string;
+  name: string;
+  description: string | null;
+  productId: string | null;
+  product: { name: string } | null;
+}): GiftOption {
+  return { id: g.id, name: g.product?.name ?? g.name, description: g.description, productId: g.productId };
+}
+
+type DbWithGifts = Pick<Tx, "loyaltyGift">;
+
+/** Regalos que se pueden entregar hoy: activos y, si están ligados al POS, con el producto activo. */
+async function loadGifts(db: DbWithGifts, companyId: string): Promise<GiftOption[]> {
+  const rows = await db.loyaltyGift.findMany({
+    where: { companyId, isActive: true, OR: [{ productId: null }, { product: { isActive: true } }] },
+    select: giftSelect,
+    orderBy: { name: "asc" },
+  });
+  return rows.map(toGiftOption);
+}
+
+async function giftsFor(db: DbWithGifts, companyId: string, program: ProgramRow): Promise<GiftOption[]> {
+  return program.discountType === "GIFT" ? loadGifts(db, companyId) : [];
+}
+
+/** Valida el regalo elegido (o toma el único disponible). Siempre se resuelve en el servidor. */
+async function resolveGift(db: DbWithGifts, companyId: string, giftId?: string | null): Promise<GiftOption> {
+  const gifts = await loadGifts(db, companyId);
+  if (gifts.length === 0) throw new Error("No hay productos de regalo disponibles. Agrégalos en Clientes frecuentes.");
+  if (giftId) {
+    const gift = gifts.find((g) => g.id === giftId);
+    if (!gift) throw new Error("Ese producto de regalo ya no está disponible");
+    return gift;
+  }
+  if (gifts.length === 1) return gifts[0];
+  throw new Error("Elige el producto de regalo");
+}
+
+function summarize(customer: CustomerRow, program: ProgramRow, gifts: GiftOption[] = []) {
   const required = program.visitsRequired;
   const visitedToday =
     program.oneVisitPerDay && !!customer.lastVisitAt && dayKey(customer.lastVisitAt) === dayKey(new Date());
@@ -105,9 +158,10 @@ function summarize(customer: CustomerRow, program: ProgramRow) {
     visitedToday,
     lastVisitAt: customer.lastVisitAt,
     programActive: program.isActive,
-    discountText: describeDiscount(program.discountType as "PERCENT" | "FIXED", Number(program.discountValue)),
-    discountType: program.discountType as "PERCENT" | "FIXED",
+    discountText: describeDiscount(program.discountType as RewardType, Number(program.discountValue)),
+    discountType: program.discountType as RewardType,
     discountValue: Number(program.discountValue),
+    gifts,
   };
 }
 
@@ -206,6 +260,8 @@ export type LoyaltySalePlan = {
   customerName: string;
   redeem: boolean;
   discount: number;
+  /** Regalo que se entrega con esta venta (solo recompensas de tipo GIFT). */
+  gift: GiftOption | null;
   program: ProgramRow;
   visits: number;
   lastVisitAt: Date | null;
@@ -222,6 +278,10 @@ export const loyaltyService = {
     const type = input.discountType ?? before.discountType;
     const value = input.discountValue ?? Number(before.discountValue);
     if (type === "PERCENT" && value > 100) throw new Error("Un descuento en porcentaje no puede pasar de 100");
+    if (type === "GIFT" && (input.isActive ?? before.isActive)) {
+      const active = await prisma.loyaltyGift.count({ where: { companyId, isActive: true } });
+      if (active === 0) throw new Error("Agrega al menos un producto de regalo antes de usar esta recompensa");
+    }
 
     const updated = await prisma.loyaltyProgram.update({
       where: { companyId },
@@ -305,6 +365,153 @@ export const loyaltyService = {
     });
   },
 
+  // ───────────── Catálogo de regalos (LOYALTY_MANAGE) ─────────────
+  async listGifts(companyId: string) {
+    const rows = await prisma.loyaltyGift.findMany({
+      where: { companyId },
+      select: giftSelect,
+      orderBy: [{ isActive: "desc" }, { name: "asc" }],
+    });
+    return rows.map((g) => ({
+      ...toGiftOption(g),
+      isActive: g.isActive,
+      linked: !!g.productId,
+      productActive: g.product ? g.product.isActive : true,
+    }));
+  },
+
+  /** Productos del POS que se pueden vincular como regalo (vacío si la empresa no tiene productos). */
+  async listPosProducts(companyId: string, q?: string) {
+    const term = q?.trim();
+    const [products, used] = await Promise.all([
+      prisma.product.findMany({
+        where: { companyId, isActive: true, ...(term ? { name: { contains: term, mode: "insensitive" as const } } : {}) },
+        select: { id: true, name: true, price: true, category: { select: { name: true } } },
+        orderBy: { name: "asc" },
+        take: 60,
+      }),
+      prisma.loyaltyGift.findMany({ where: { companyId, productId: { not: null } }, select: { productId: true } }),
+    ]);
+    const usedSet = new Set(used.map((u) => u.productId));
+    return products.map((p) => ({
+      id: p.id,
+      name: p.name,
+      price: Number(p.price),
+      category: p.category?.name ?? null,
+      alreadyGift: usedSet.has(p.id),
+    }));
+  },
+
+  /** Agrega un regalo: vinculado a un producto del POS (productId) o escrito a mano (name). */
+  async createGift(
+    companyId: string,
+    userId: string,
+    input: { name?: string; description?: string | null; productId?: string | null }
+  ) {
+    let name = input.name?.trim() ?? "";
+    let productId: string | null = null;
+
+    if (input.productId) {
+      const product = await prisma.product.findFirst({
+        where: { id: input.productId, companyId, isActive: true },
+        select: { id: true, name: true },
+      });
+      if (!product) throw new Error("Ese producto no existe en tu POS");
+      productId = product.id;
+      name = product.name;
+    }
+    if (name.length < 2) throw new Error("Escribe el nombre del producto de regalo");
+    if (name.length > 80) throw new Error("El nombre es muy largo (máximo 80 caracteres)");
+
+    try {
+      const gift = await prisma.loyaltyGift.create({
+        data: { companyId, name, description: input.description?.trim().slice(0, 200) || null, productId },
+        select: giftSelect,
+      });
+      await prisma.auditLog.create({
+        data: { companyId, userId, action: "LOYALTY_GIFT_CREATE", entity: "LoyaltyGift", entityId: gift.id, newData: { name, productId } },
+      });
+      return { ...toGiftOption(gift), isActive: gift.isActive, linked: !!gift.productId, productActive: true };
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        throw new Error("Ese producto ya está en tu lista de regalos");
+      }
+      throw err;
+    }
+  },
+
+  /** Alta masiva (lista pegada o archivo): un producto por línea. Omite repetidos y nombres muy cortos. */
+  async createGiftsBulk(companyId: string, userId: string, names: string[]) {
+    const existing = await prisma.loyaltyGift.findMany({ where: { companyId }, select: { name: true } });
+    const seen = new Set(existing.map((g) => g.name.trim().toLowerCase()));
+    const toCreate: string[] = [];
+    for (const raw of names) {
+      const name = raw.trim().replace(/\s+/g, " ");
+      const key = name.toLowerCase();
+      if (name.length < 2 || name.length > 80 || seen.has(key)) continue;
+      seen.add(key);
+      toCreate.push(name);
+      if (toCreate.length >= 200) break;
+    }
+    if (toCreate.length > 0) {
+      await prisma.loyaltyGift.createMany({ data: toCreate.map((name) => ({ companyId, name })) });
+      await prisma.auditLog.create({
+        data: { companyId, userId, action: "LOYALTY_GIFT_BULK", entity: "LoyaltyGift", newData: { created: toCreate.length } },
+      });
+    }
+    return { created: toCreate.length, skipped: names.length - toCreate.length };
+  },
+
+  /** Evita dejar al programa de regalos sin ningún regalo activo (nadie podría canjear). */
+  async assertCanRemoveGift(companyId: string, giftId: string) {
+    const program = await prisma.loyaltyProgram.findUnique({ where: { companyId } });
+    if (!program?.isActive || program.discountType !== "GIFT") return;
+    const others = await prisma.loyaltyGift.count({ where: { companyId, isActive: true, id: { not: giftId } } });
+    if (others === 0) {
+      throw new Error("Tu programa entrega regalos: deja al menos un regalo activo o cambia primero el tipo de recompensa");
+    }
+  },
+
+  async updateGift(
+    companyId: string,
+    userId: string,
+    giftId: string,
+    input: { name?: string; description?: string | null; isActive?: boolean }
+  ) {
+    const gift = await prisma.loyaltyGift.findFirst({ where: { id: giftId, companyId } });
+    if (!gift) throw new Error("Regalo no encontrado");
+    if (input.isActive === false && gift.isActive) await this.assertCanRemoveGift(companyId, giftId);
+
+    const name = input.name?.trim();
+    if (name !== undefined && !gift.productId && (name.length < 2 || name.length > 80)) {
+      throw new Error("El nombre debe tener entre 2 y 80 caracteres");
+    }
+    const updated = await prisma.loyaltyGift.update({
+      where: { id: giftId },
+      data: {
+        // Si está vinculado al POS, el nombre sale del producto.
+        ...(name !== undefined && !gift.productId ? { name } : {}),
+        ...(input.description !== undefined ? { description: input.description?.trim().slice(0, 200) || null } : {}),
+        ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
+      },
+      select: giftSelect,
+    });
+    await prisma.auditLog.create({
+      data: { companyId, userId, action: "LOYALTY_GIFT_UPDATE", entity: "LoyaltyGift", entityId: giftId, newData: { isActive: updated.isActive } },
+    });
+    return { ...toGiftOption(updated), isActive: updated.isActive, linked: !!updated.productId, productActive: updated.product ? updated.product.isActive : true };
+  },
+
+  async deleteGift(companyId: string, userId: string, giftId: string) {
+    const gift = await prisma.loyaltyGift.findFirst({ where: { id: giftId, companyId } });
+    if (!gift) throw new Error("Regalo no encontrado");
+    if (gift.isActive) await this.assertCanRemoveGift(companyId, giftId);
+    await prisma.loyaltyGift.delete({ where: { id: giftId } });
+    await prisma.auditLog.create({
+      data: { companyId, userId, action: "LOYALTY_GIFT_DELETE", entity: "LoyaltyGift", entityId: giftId, previousData: { name: gift.name } },
+    });
+  },
+
   // ───────────── Operación del personal (LOYALTY_SCAN) ─────────────
   /** Acepta el contenido del QR (URL de la tarjeta), el token solo, o el código corto de 6 caracteres. */
   async lookup(companyId: string, rawCode: string) {
@@ -321,13 +528,14 @@ export const loyaltyService = {
         });
     if (!customer) throw new Error("No encontramos esa tarjeta en este restaurante");
 
-    return summarize(customer, await getProgramRow(companyId));
+    const program = await getProgramRow(companyId);
+    return summarize(customer, program, await giftsFor(prisma, companyId, program));
   },
 
   async enrollByStaff(companyId: string, userId: string, input: z.infer<typeof enrollSchema>) {
     const { customer, created } = await enroll(companyId, input, { userId });
     const program = await getProgramRow(companyId);
-    return { customer: summarize(customer, program), cardToken: customer.cardToken as string, created };
+    return { customer: summarize(customer, program, await giftsFor(prisma, companyId, program)), cardToken: customer.cardToken as string, created };
   },
 
   async registerVisit(companyId: string, userId: string, branchId: string | null, customerId: string) {
@@ -347,11 +555,11 @@ export const loyaltyService = {
         where: { id: customerId },
         data: { visitsInCycle: { increment: 1 }, lastVisitAt: now },
       });
-      return summarize(updated, program);
+      return summarize(updated, program, await giftsFor(tx, companyId, program));
     });
   },
 
-  async redeem(companyId: string, userId: string, branchId: string | null, customerId: string) {
+  async redeem(companyId: string, userId: string, branchId: string | null, customerId: string, giftId?: string | null) {
     return prisma.$transaction(async (tx) => {
       await lockCustomer(tx, companyId, customerId);
       const customer = await tx.customer.findFirstOrThrow({ where: { id: customerId, companyId } });
@@ -360,6 +568,9 @@ export const loyaltyService = {
       if (customer.visitsInCycle < program.visitsRequired) {
         throw new Error(`Aún no llega a ${program.visitsRequired} visitas`);
       }
+
+      // Recompensa de tipo regalo: el servidor valida cuál se entrega.
+      const gift = program.discountType === "GIFT" ? await resolveGift(tx, companyId, giftId) : null;
 
       const redemption = await tx.loyaltyRedemption.create({
         data: {
@@ -370,6 +581,8 @@ export const loyaltyService = {
           discountType: program.discountType,
           discountValue: program.discountValue,
           visitsUsed: program.visitsRequired,
+          giftId: gift?.id ?? null,
+          giftName: gift?.name ?? null,
         },
       });
       // Se descuentan solo las visitas del ciclo: si el cliente ya llevaba de más, el excedente se conserva.
@@ -389,10 +602,14 @@ export const loyaltyService = {
             discountType: program.discountType,
             discountValue: Number(program.discountValue),
             visitsUsed: program.visitsRequired,
+            giftName: gift?.name ?? null,
           },
         },
       });
-      return { ...summarize(updated, program), redeemed: describeDiscount(program.discountType as "PERCENT" | "FIXED", Number(program.discountValue)) };
+      return {
+        ...summarize(updated, program, await giftsFor(tx, companyId, program)),
+        redeemed: gift ? `Regalo: ${gift.name}` : describeDiscount(program.discountType as RewardType, Number(program.discountValue)),
+      };
     });
   },
 
@@ -408,7 +625,7 @@ export const loyaltyService = {
     return {
       restaurantName: program.displayName || program.company.name,
       visitsRequired: program.visitsRequired,
-      discountText: describeDiscount(program.discountType as "PERCENT" | "FIXED", Number(program.discountValue)),
+      discountText: describeDiscount(program.discountType as RewardType, Number(program.discountValue)),
     };
   },
 
@@ -444,7 +661,14 @@ export const loyaltyService = {
    * SERVIDOR (lo que mande el navegador no se usa). Devuelve null si el programa está pausado y
    * no se pidió canje: la venta sigue normal, solo sin visita.
    */
-  async prepareForSale(tx: Tx, companyId: string, customerId: string, wantsRedeem: boolean, subtotal: number) {
+  async prepareForSale(
+    tx: Tx,
+    companyId: string,
+    customerId: string,
+    wantsRedeem: boolean,
+    subtotal: number,
+    giftId?: string | null
+  ) {
     await lockCustomer(tx, companyId, customerId);
     const customer = await tx.customer.findFirst({ where: { id: customerId, companyId, cardToken: { not: null } } });
     if (!customer) throw new Error("Ese cliente no está en el programa de clientes frecuentes");
@@ -458,13 +682,16 @@ export const loyaltyService = {
       throw new Error("Este cliente aún no tiene descuento disponible");
     }
 
+    const gift = wantsRedeem && program.discountType === "GIFT" ? await resolveGift(tx, companyId, giftId) : null;
+
     const plan: LoyaltySalePlan = {
       customerId,
       customerName: customer.name,
       redeem: wantsRedeem,
       discount: wantsRedeem
-        ? computeLoyaltyDiscount(program.discountType as "PERCENT" | "FIXED", Number(program.discountValue), subtotal)
+        ? computeLoyaltyDiscount(program.discountType as RewardType, Number(program.discountValue), subtotal)
         : 0,
+      gift,
       program,
       visits: customer.visitsInCycle,
       lastVisitAt: customer.lastVisitAt,
@@ -497,6 +724,8 @@ export const loyaltyService = {
           discountType: program.discountType,
           discountValue: program.discountValue,
           visitsUsed: program.visitsRequired,
+          giftId: plan.gift?.id ?? null,
+          giftName: plan.gift?.name ?? null,
         },
       });
       visits -= program.visitsRequired;
@@ -513,6 +742,7 @@ export const loyaltyService = {
             discountType: program.discountType,
             discountValue: Number(program.discountValue),
             discountApplied: plan.discount,
+            giftName: plan.gift?.name ?? null,
           },
         },
       });
@@ -534,6 +764,8 @@ export const loyaltyService = {
       customerName: plan.customerName,
       redeemed: plan.redeem,
       discountApplied: plan.discount,
+      giftName: plan.gift?.name ?? null,
+      giftProductId: plan.gift?.productId ?? null,
       visitRegistered,
       visitPending: !ctx.paymentApproved,
       visits,
