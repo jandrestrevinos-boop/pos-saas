@@ -9,8 +9,6 @@ import { formatMxn } from "@/lib/format";
  */
 
 export type CheckoutMethod = "CASH" | "CARD" | "TRANSFER" | "OTHER" | "MERCADOPAGO" | "MERCADOPAGO_TERMINAL";
-// Solo cuando method = CARD: con qué terminal se cobró. null = otra terminal (banco, Clip, etc.).
-export type CardProvider = "ZETTLE" | null;
 
 export const round2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -22,14 +20,12 @@ const subBtn = (active: boolean) =>
 
 export function PaymentMethodPicker({
   method,
-  cardProvider,
   onChange,
   mercadoPagoEnabled,
   terminalLinked,
 }: {
   method: CheckoutMethod;
-  cardProvider: CardProvider;
-  onChange: (method: CheckoutMethod, cardProvider: CardProvider) => void;
+  onChange: (method: CheckoutMethod) => void;
   mercadoPagoEnabled: boolean;
   terminalLinked: boolean;
 }) {
@@ -37,57 +33,39 @@ export function PaymentMethodPicker({
 
   return (
     <div className="grid grid-cols-2 gap-2 mb-5">
-      <button type="button" onClick={() => onChange("CASH", null)} className={btn(method === "CASH")}>
+      <button type="button" onClick={() => onChange("CASH")} className={btn(method === "CASH")}>
         Efectivo
       </button>
 
       <button
         type="button"
         onClick={() => {
-          // Si ya estaba dentro de Tarjeta no se cambia la sub-opción; si no, entra con la terminal de Mercado Pago (si hay) o con "Otra terminal".
-          if (!cardGroup) onChange(terminalLinked ? "MERCADOPAGO_TERMINAL" : "CARD", null);
+          // Si ya estaba dentro de Tarjeta no se cambia la sub-opción; si no, entra con la terminal de Mercado Pago (si hay una vinculada) o con terminal libre.
+          if (!cardGroup) onChange(terminalLinked ? "MERCADOPAGO_TERMINAL" : "CARD");
         }}
         className={btn(cardGroup)}
       >
         Tarjeta
       </button>
 
-      {cardGroup && (
+      {cardGroup && terminalLinked && (
         <div className="col-span-2 rounded-md border border-line p-2 flex flex-col gap-2">
-          {terminalLinked && (
-            <button
-              type="button"
-              onClick={() => onChange("MERCADOPAGO_TERMINAL", null)}
-              className={subBtn(method === "MERCADOPAGO_TERMINAL")}
-            >
-              Terminal Mercado Pago
-            </button>
-          )}
           <button
             type="button"
-            onClick={() => onChange("CARD", "ZETTLE")}
-            className={subBtn(method === "CARD" && cardProvider === "ZETTLE")}
+            onClick={() => onChange("MERCADOPAGO_TERMINAL")}
+            className={subBtn(method === "MERCADOPAGO_TERMINAL")}
           >
-            Terminal Zettle (PayPal)
+            Terminal Mercado Pago
           </button>
-          <button
-            type="button"
-            onClick={() => onChange("CARD", null)}
-            className={subBtn(method === "CARD" && cardProvider === null)}
-          >
+          <button type="button" onClick={() => onChange("CARD")} className={subBtn(method === "CARD")}>
             Otra terminal
           </button>
-          {method === "CARD" && cardProvider === "ZETTLE" && (
-            <p className="text-xs text-muted">
-              Cobra el monto en tu terminal Zettle y después presiona Confirmar para registrar la venta.
-            </p>
-          )}
         </div>
       )}
 
       <button
         type="button"
-        onClick={() => onChange("TRANSFER", null)}
+        onClick={() => onChange("TRANSFER")}
         className={btn(method === "TRANSFER", mercadoPagoEnabled ? "" : "col-span-2")}
       >
         Transferencia
@@ -96,12 +74,54 @@ export function PaymentMethodPicker({
       {mercadoPagoEnabled && (
         <button
           type="button"
-          onClick={() => onChange("MERCADOPAGO", null)}
+          onClick={() => onChange("MERCADOPAGO")}
           className={btn(method === "MERCADOPAGO", "px-2 leading-tight")}
         >
           Mercado Pago (link/QR)
         </button>
       )}
+    </div>
+  );
+}
+
+/** Tarjeta (terminal libre) y transferencia: Tappy no puede verificar el cobro por su cuenta, así que el cajero captura una referencia que se pueda comprobar después. */
+export function needsReference(method: CheckoutMethod) {
+  return method === "CARD" || method === "TRANSFER";
+}
+
+export const MIN_REFERENCE_LENGTH = 4;
+
+export function ReferenceInput({
+  method,
+  value,
+  onChange,
+}: {
+  method: CheckoutMethod;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  if (!needsReference(method)) return null;
+  const isCard = method === "CARD";
+
+  return (
+    <div className="mb-5">
+      <label className="block text-xs text-muted mb-1">
+        {isCard ? "Número de autorización (voucher de la terminal)" : "Clave de rastreo o folio de la transferencia"} *
+      </label>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        maxLength={60}
+        autoComplete="off"
+        placeholder={isCard ? "Ej. 123456" : "Ej. clave de rastreo del SPEI"}
+        className="w-full rounded-md border border-line px-3 py-2 text-sm font-mono"
+      />
+      <p className="text-xs text-muted mt-1">
+        {isCard
+          ? "Confirma en la terminal que el cobro fue aprobado y captura el número que sale en el voucher."
+          : "Confirma en tu banco que el dinero ya llegó antes de capturar la clave."}
+      </p>
     </div>
   );
 }

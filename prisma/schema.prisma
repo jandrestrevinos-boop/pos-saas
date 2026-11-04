@@ -596,6 +596,8 @@ model Payment {
   mpPointOrderId String? @unique // id de la orden en la API de Point (Mercado Pago), para consultar/cancelar
   // Solo method = CARD: con qué terminal se cobró (hoy "ZETTLE"). null = otra terminal o no aplica.
   cardProvider String?
+  // Referencia del cobro que captura el cajero: número de autorización del voucher (tarjeta, terminal libre) o clave de rastreo/folio (transferencia).
+  reference String?
   createdAt  DateTime @default(now())
 
   @@map("payments")

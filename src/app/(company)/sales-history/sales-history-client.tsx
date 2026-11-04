@@ -6,7 +6,7 @@ import { ResponsiveTable, type ResponsiveColumn } from "@/components/ui/responsi
 import { ExportButton } from "@/components/export-button";
 
 type OrderItem = { id: string; quantity: number; lineTotal: string; product: { name: string } };
-type Payment = { id: string; method: string; status: string; amount: string; cardProvider?: string | null };
+type Payment = { id: string; method: string; status: string; amount: string; cardProvider?: string | null; reference?: string | null };
 type OrderRow = {
   id: string;
   orderNumber: number;
@@ -190,6 +190,17 @@ export function SalesHistoryClient() {
                   </li>
                 ))}
               </ul>
+              {order.payments.some((p) => p.reference) && (
+                <div className="text-xs text-muted mt-2 space-y-0.5">
+                  {order.payments
+                    .filter((p) => p.reference)
+                    .map((p) => (
+                      <p key={p.id}>
+                        Referencia ({paymentLabel(p)}): <span className="font-mono text-ink">{p.reference}</span>
+                      </p>
+                    ))}
+                </div>
+              )}
               {Number(order.tip ?? 0) > 0 && (
                 <p className="text-sm mt-2 flex justify-between gap-3">
                   <span>Propina</span>

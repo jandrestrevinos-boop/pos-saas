@@ -6,10 +6,12 @@ import { clsx } from "clsx";
 import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
 import { PosLoyaltyPanel, selectedGift, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
 import {
+  MIN_REFERENCE_LENGTH,
   PaymentMethodPicker,
+  ReferenceInput,
   TipPicker,
+  needsReference,
   round2,
-  type CardProvider,
   type CheckoutMethod,
 } from "@/components/checkout/checkout-options";
 
@@ -300,8 +302,8 @@ function CloseTabModal({
   onDone: () => void;
 }) {
   const [method, setMethod] = useState<CheckoutMethod>("CASH");
-  const [cardProvider, setCardProvider] = useState<CardProvider>(null);
   const [tip, setTip] = useState(0);
+  const [reference, setReference] = useState("");
   const [cashReceived, setCashReceived] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -364,6 +366,10 @@ function CloseTabModal({
       setError("El efectivo recibido no puede ser menor al total");
       return;
     }
+    if (needsReference(method) && reference.trim().length < MIN_REFERENCE_LENGTH) {
+      setError("Captura la referencia del cobro (mínimo 4 caracteres).");
+      return;
+    }
     setSaving(true);
     setError("");
     try {
@@ -372,8 +378,8 @@ function CloseTabModal({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           paymentMethod: method,
-          cardProvider: method === "CARD" && cardProvider ? cardProvider : undefined,
           tip,
+          reference: needsReference(method) ? reference.trim() : undefined,
           cashReceived: method === "CASH" ? cashReceivedNum : undefined,
           loyaltyCustomerId: loyalty?.customer.id,
           redeemLoyalty: !!loyalty?.redeem,
@@ -552,14 +558,12 @@ function CloseTabModal({
 
         <PaymentMethodPicker
           method={method}
-          cardProvider={cardProvider}
-          onChange={(m, provider) => {
-            setMethod(m);
-            setCardProvider(provider);
-          }}
+          onChange={setMethod}
           mercadoPagoEnabled={mercadoPagoEnabled}
           terminalLinked={terminalLinked}
         />
+
+        <ReferenceInput method={method} value={reference} onChange={setReference} />
 
         <TipPicker base={total} onChange={setTip} />
 
