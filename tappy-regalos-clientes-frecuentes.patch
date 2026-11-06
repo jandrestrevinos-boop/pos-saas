@@ -1,0 +1,1572 @@
+diff --git a/prisma/migrations/20261031120000_regalos_clientes_frecuentes/migration.sql b/prisma/migrations/20261031120000_regalos_clientes_frecuentes/migration.sql
+new file mode 100644
+index 0000000..59debe1
+--- /dev/null
++++ b/prisma/migrations/20261031120000_regalos_clientes_frecuentes/migration.sql
+@@ -0,0 +1,32 @@
++-- AlterEnum
++ALTER TYPE "LoyaltyDiscountType" ADD VALUE 'GIFT';
++
++-- AlterTable
++ALTER TABLE "loyalty_redemptions" ADD COLUMN     "giftId" TEXT,
++ADD COLUMN     "giftName" TEXT;
++
++-- CreateTable
++CREATE TABLE "loyalty_gifts" (
++    "id" TEXT NOT NULL,
++    "companyId" TEXT NOT NULL,
++    "name" TEXT NOT NULL,
++    "description" TEXT,
++    "productId" TEXT,
++    "isActive" BOOLEAN NOT NULL DEFAULT true,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++
++    CONSTRAINT "loyalty_gifts_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateIndex
++CREATE INDEX "loyalty_gifts_companyId_idx" ON "loyalty_gifts"("companyId");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "loyalty_gifts_companyId_productId_key" ON "loyalty_gifts"("companyId", "productId");
++
++-- AddForeignKey
++ALTER TABLE "loyalty_gifts" ADD CONSTRAINT "loyalty_gifts_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "loyalty_gifts" ADD CONSTRAINT "loyalty_gifts_productId_fkey" FOREIGN KEY ("productId") REFERENCES "products"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 3289f8d..bbe3333 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -53,6 +53,7 @@ model Company {
+   stockTransfers  StockTransfer[]
+ 
+   loyaltyProgram     LoyaltyProgram?
++  loyaltyGifts       LoyaltyGift[]
+   loyaltyVisits      LoyaltyVisit[]
+   loyaltyRedemptions LoyaltyRedemption[]
+   promotions         Promotion[]
+@@ -422,6 +423,7 @@ model Product {
+   orderItems         OrderItem[]
+   inventoryMovements InventoryMovement[]
+   hardwareFinancingItems HardwareFinancingItem[]
++  loyaltyGifts           LoyaltyGift[]
+ 
+   @@index([companyId])
+   branchStocks    BranchStock[]
+@@ -734,6 +736,7 @@ model Customer {
+ enum LoyaltyDiscountType {
+   PERCENT
+   FIXED
++  GIFT // recompensa: un producto de regalo (catálogo LoyaltyGift)
+ }
+ 
+ /// Configuración del programa de cada empresa (una por empresa). El
+@@ -756,6 +759,26 @@ model LoyaltyProgram {
+   @@map("loyalty_programs")
+ }
+ 
++/// Catálogo de productos de regalo del programa. Puede vincularse a un producto del POS
++/// (productId: al canjear en Caja se agrega a la venta en $0 y descuenta inventario) o ser un
++/// producto escrito a mano (empresas sin POS: el cajero solo ve "Entregar: X").
++model LoyaltyGift {
++  id          String   @id @default(uuid())
++  companyId   String
++  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
++  name        String
++  description String?
++  productId   String?
++  product     Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
++  isActive    Boolean  @default(true)
++  createdAt   DateTime @default(now())
++  updatedAt   DateTime @updatedAt
++
++  @@unique([companyId, productId])
++  @@index([companyId])
++  @@map("loyalty_gifts")
++}
++
+ /// Una visita (compra verificada por el personal) de un cliente.
+ model LoyaltyVisit {
+   id         String   @id @default(uuid())
+@@ -786,6 +809,9 @@ model LoyaltyRedemption {
+   discountType  LoyaltyDiscountType
+   discountValue Decimal  @db.Decimal(10, 2)
+   visitsUsed    Int
++  // Solo recompensas de tipo GIFT: producto entregado (nombre congelado al momento del canje).
++  giftId        String?
++  giftName      String?
+   createdAt     DateTime @default(now())
+ 
+   @@index([companyId, createdAt])
+diff --git a/src/app/(company)/clientes-frecuentes/escanear/scan-client.tsx b/src/app/(company)/clientes-frecuentes/escanear/scan-client.tsx
+index 4bbbeb6..c3eec95 100644
+--- a/src/app/(company)/clientes-frecuentes/escanear/scan-client.tsx
++++ b/src/app/(company)/clientes-frecuentes/escanear/scan-client.tsx
+@@ -17,6 +17,8 @@ type CustomerSummary = {
+   visitedToday: boolean;
+   programActive: boolean;
+   discountText: string;
++  discountType: "PERCENT" | "FIXED" | "GIFT";
++  gifts: { id: string; name: string; description: string | null; productId: string | null }[];
+   redeemed?: string;
+ };
+ 
+@@ -35,6 +37,7 @@ export function ScanClient() {
+   const [error, setError] = useState("");
+   const [message, setMessage] = useState("");
+   const [manualCode, setManualCode] = useState("");
++  const [giftId, setGiftId] = useState("");
+   const [showEnroll, setShowEnroll] = useState(false);
+   const [newName, setNewName] = useState("");
+   const [newPhone, setNewPhone] = useState("");
+@@ -119,6 +122,9 @@ export function ScanClient() {
+     lockedRef.current = false;
+   }
+ 
++  // Regalo elegido (por defecto, el primero disponible).
++  const giftChoice = customer?.gifts?.some((g) => g.id === giftId) ? giftId : (customer?.gifts?.[0]?.id ?? "");
++
+   async function act(kind: "visit" | "redeem") {
+     if (!customer) return;
+     setBusy(true);
+@@ -127,7 +133,10 @@ export function ScanClient() {
+     const res = await fetch(`/api/loyalty/${kind}`, {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({ customerId: customer.id }),
++      body: JSON.stringify({
++        customerId: customer.id,
++        ...(kind === "redeem" && customer.discountType === "GIFT" ? { giftId: giftChoice } : {}),
++      }),
+     });
+     const data = await res.json().catch(() => ({}));
+     setBusy(false);
+@@ -136,7 +145,13 @@ export function ScanClient() {
+       return;
+     }
+     setCustomer(data.customer);
+-    setMessage(kind === "visit" ? "Visita registrada" : `Descuento canjeado: ${data.customer.redeemed}`);
++    setMessage(
++      kind === "visit"
++        ? "Visita registrada"
++        : customer.discountType === "GIFT"
++          ? `${data.customer.redeemed}. Entrégalo al cliente.`
++          : `Descuento canjeado: ${data.customer.redeemed}`
++    );
+     navigator.vibrate?.(100);
+   }
+ 
+@@ -224,7 +239,32 @@ export function ScanClient() {
+           )}
+ 
+           <div className="flex flex-col gap-2">
+-            {customer.rewardAvailable && (
++            {customer.rewardAvailable && customer.discountType === "GIFT" && (
++              <>
++                {customer.gifts.length > 1 && (
++                  <select
++                    className={inputClass}
++                    value={giftChoice}
++                    onChange={(e) => setGiftId(e.target.value)}
++                  >
++                    {customer.gifts.map((g) => (
++                      <option key={g.id} value={g.id}>
++                        {g.name}
++                      </option>
++                    ))}
++                  </select>
++                )}
++                <Button
++                  onClick={() => act("redeem")}
++                  disabled={busy || !customer.programActive || customer.gifts.length === 0}
++                >
++                  {customer.gifts.length === 0
++                    ? "No hay productos de regalo activos"
++                    : `Entregar regalo${customer.gifts.length === 1 ? `: ${customer.gifts[0].name}` : ""}`}
++                </Button>
++              </>
++            )}
++            {customer.rewardAvailable && customer.discountType !== "GIFT" && (
+               <Button onClick={() => act("redeem")} disabled={busy || !customer.programActive}>
+                 Canjear descuento ({customer.discountText})
+               </Button>
+diff --git a/src/app/(company)/clientes-frecuentes/loyalty-admin-client.tsx b/src/app/(company)/clientes-frecuentes/loyalty-admin-client.tsx
+index cf2049a..6eb2fc1 100644
+--- a/src/app/(company)/clientes-frecuentes/loyalty-admin-client.tsx
++++ b/src/app/(company)/clientes-frecuentes/loyalty-admin-client.tsx
+@@ -4,11 +4,12 @@ import { useState } from "react";
+ import { Button, Card, StatCard } from "@/components/ui";
+ import { Modal, Field, inputClass } from "@/components/ui/modal";
+ import { QrImage, downloadQrPng } from "@/components/loyalty/qr-image";
++import { LoyaltyGiftsManager, type Gift } from "./loyalty-gifts-manager";
+ 
+ type Program = {
+   isActive: boolean;
+   visitsRequired: number;
+-  discountType: "PERCENT" | "FIXED";
++  discountType: "PERCENT" | "FIXED" | "GIFT";
+   discountValue: number;
+   oneVisitPerDay: boolean;
+   signupToken: string;
+@@ -29,10 +30,14 @@ export function LoyaltyAdminClient({
+   initialProgram,
+   initialStats,
+   initialCustomers,
++  initialGifts,
++  posAvailable,
+ }: {
+   initialProgram: Program;
+   initialStats: Stats;
+   initialCustomers: CustomerRow[];
++  initialGifts: Gift[];
++  posAvailable: boolean;
+ }) {
+   const [program, setProgram] = useState(initialProgram);
+   const [stats] = useState(initialStats);
+@@ -144,28 +149,31 @@ export function LoyaltyAdminClient({
+               />
+             </Field>
+ 
+-            <div className="grid grid-cols-2 gap-3">
+-              <Field label="Tipo de descuento">
++            <div className={`grid gap-3 ${discountType === "GIFT" ? "grid-cols-1" : "grid-cols-2"}`}>
++              <Field label="Tipo de recompensa">
+                 <select
+                   className={inputClass}
+                   value={discountType}
+-                  onChange={(e) => setDiscountType(e.target.value as "PERCENT" | "FIXED")}
++                  onChange={(e) => setDiscountType(e.target.value as "PERCENT" | "FIXED" | "GIFT")}
+                 >
+                   <option value="PERCENT">Porcentaje (%)</option>
+                   <option value="FIXED">Monto fijo (MXN)</option>
++                  <option value="GIFT">Producto de regalo</option>
+                 </select>
+               </Field>
+-              <Field label={discountType === "PERCENT" ? "Porcentaje" : "Monto (MXN)"}>
+-                <input
+-                  className={inputClass}
+-                  type="number"
+-                  min={1}
+-                  max={discountType === "PERCENT" ? 100 : undefined}
+-                  step="any"
+-                  value={discountValue}
+-                  onChange={(e) => setDiscountValue(e.target.value)}
+-                />
+-              </Field>
++              {discountType !== "GIFT" && (
++                <Field label={discountType === "PERCENT" ? "Porcentaje" : "Monto (MXN)"}>
++                  <input
++                    className={inputClass}
++                    type="number"
++                    min={1}
++                    max={discountType === "PERCENT" ? 100 : undefined}
++                    step="any"
++                    value={discountValue}
++                    onChange={(e) => setDiscountValue(e.target.value)}
++                  />
++                </Field>
++              )}
+             </div>
+ 
+             <Field label="Nombre en la tarjeta (opcional)">
+@@ -223,6 +231,8 @@ export function LoyaltyAdminClient({
+         </Card>
+       </div>
+ 
++      {discountType === "GIFT" && <LoyaltyGiftsManager initialGifts={initialGifts} posAvailable={posAvailable} />}
++
+       <div>
+         <div className="flex items-center justify-between gap-3 mb-3">
+           <h2 className="font-display text-xl font-semibold">Clientes</h2>
+diff --git a/src/app/(company)/clientes-frecuentes/loyalty-gifts-manager.tsx b/src/app/(company)/clientes-frecuentes/loyalty-gifts-manager.tsx
+new file mode 100644
+index 0000000..e92b349
+--- /dev/null
++++ b/src/app/(company)/clientes-frecuentes/loyalty-gifts-manager.tsx
+@@ -0,0 +1,272 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import { Button, Card } from "@/components/ui";
++import { inputClass } from "@/components/ui/modal";
++
++export type Gift = {
++  id: string;
++  name: string;
++  description: string | null;
++  productId: string | null;
++  isActive: boolean;
++  linked: boolean;
++  productActive: boolean;
++};
++
++type PosProduct = { id: string; name: string; price: number; category: string | null; alreadyGift: boolean };
++type Tab = "pos" | "manual" | "lista";
++
++/**
++ * Catálogo de productos de regalo del programa de clientes frecuentes.
++ * - Con POS: se vinculan productos ya dados de alta (al canjear en Caja entran a la venta en $0).
++ * - Sin POS (o para regalos que no se venden): se escriben a mano, uno por uno o pegando una lista.
++ */
++export function LoyaltyGiftsManager({ initialGifts, posAvailable }: { initialGifts: Gift[]; posAvailable: boolean }) {
++  const [gifts, setGifts] = useState(initialGifts);
++  const [tab, setTab] = useState<Tab>(posAvailable ? "pos" : "manual");
++  const [q, setQ] = useState("");
++  const [products, setProducts] = useState<PosProduct[]>([]);
++  const [loadingProducts, setLoadingProducts] = useState(false);
++  const [name, setName] = useState("");
++  const [description, setDescription] = useState("");
++  const [bulk, setBulk] = useState("");
++  const [busy, setBusy] = useState(false);
++  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
++
++  async function reloadGifts() {
++    const res = await fetch("/api/loyalty/gifts");
++    if (res.ok) setGifts((await res.json()).gifts);
++  }
++
++  async function loadProducts(term: string) {
++    setLoadingProducts(true);
++    const res = await fetch(`/api/loyalty/pos-products?q=${encodeURIComponent(term)}`);
++    setLoadingProducts(false);
++    if (res.ok) setProducts((await res.json()).products);
++  }
++
++  // Buscador de productos del POS (con una pequeña espera para no consultar en cada tecla).
++  useEffect(() => {
++    if (!posAvailable || tab !== "pos") return;
++    const t = setTimeout(() => loadProducts(q), 250);
++    return () => clearTimeout(t);
++  }, [q, tab, posAvailable]);
++
++  async function post(body: unknown, okText: string) {
++    setBusy(true);
++    setMessage(null);
++    const res = await fetch("/api/loyalty/gifts", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify(body),
++    });
++    const data = await res.json().catch(() => ({}));
++    setBusy(false);
++    if (!res.ok) {
++      setMessage({ ok: false, text: data.error ?? "No se pudo agregar" });
++      return false;
++    }
++    setMessage({ ok: true, text: data.created !== undefined ? `${data.created} regalo(s) agregado(s)${data.skipped ? `, ${data.skipped} omitido(s) por repetidos o inválidos` : ""}` : okText });
++    await reloadGifts();
++    return true;
++  }
++
++  async function addFromPos(p: PosProduct) {
++    if (await post({ productId: p.id }, `"${p.name}" agregado a los regalos`)) {
++      setProducts((prev) => prev.map((x) => (x.id === p.id ? { ...x, alreadyGift: true } : x)));
++    }
++  }
++
++  async function addManual(e: React.FormEvent) {
++    e.preventDefault();
++    if (await post({ name, description: description || null }, `"${name}" agregado a los regalos`)) {
++      setName("");
++      setDescription("");
++    }
++  }
++
++  async function addBulk(e: React.FormEvent) {
++    e.preventDefault();
++    // Un producto por línea; si viene de un CSV se toma la primera columna.
++    const names = bulk
++      .split(/\r?\n/)
++      .map((line) => line.split(/[,;\t]/)[0].replace(/^"|"$/g, "").trim())
++      .filter(Boolean);
++    if (names.length === 0) {
++      setMessage({ ok: false, text: "Pega al menos un producto (uno por línea)" });
++      return;
++    }
++    if (await post({ names }, "")) setBulk("");
++  }
++
++  async function loadFile(file: File | undefined) {
++    if (!file) return;
++    setBulk(await file.text());
++  }
++
++  async function patch(g: Gift, body: Partial<Pick<Gift, "isActive">>) {
++    setMessage(null);
++    const res = await fetch(`/api/loyalty/gifts/${g.id}`, {
++      method: "PATCH",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify(body),
++    });
++    const data = await res.json().catch(() => ({}));
++    if (!res.ok) {
++      setMessage({ ok: false, text: data.error ?? "No se pudo actualizar" });
++      return;
++    }
++    setGifts((prev) => prev.map((x) => (x.id === g.id ? data.gift : x)));
++  }
++
++  async function remove(g: Gift) {
++    if (!window.confirm(`¿Quitar "${g.name}" de los regalos? Los canjes anteriores conservan su registro.`)) return;
++    setMessage(null);
++    const res = await fetch(`/api/loyalty/gifts/${g.id}`, { method: "DELETE" });
++    const data = await res.json().catch(() => ({}));
++    if (!res.ok) {
++      setMessage({ ok: false, text: data.error ?? "No se pudo eliminar" });
++      return;
++    }
++    setGifts((prev) => prev.filter((x) => x.id !== g.id));
++    if (posAvailable && tab === "pos") loadProducts(q);
++  }
++
++  const tabs: { id: Tab; label: string }[] = [
++    ...(posAvailable ? [{ id: "pos" as Tab, label: "Productos de mi POS" }] : []),
++    { id: "manual", label: "Escribir uno" },
++    { id: "lista", label: "Pegar lista / archivo" },
++  ];
++
++  return (
++    <Card className="p-6">
++      <h2 className="font-display text-xl font-semibold mb-1">Productos de regalo</h2>
++      <p className="text-sm text-muted mb-5">
++        Estos son los productos que tu cliente puede ganar. Si hay más de uno, el cajero elige cuál entregar al canjear.
++        {posAvailable
++          ? " Los que vincules con tu POS se agregan a la venta en $0 y descuentan inventario."
++          : " Escríbelos o súbelos en lista; no necesitas tener POS."}
++      </p>
++
++      <div className="grid lg:grid-cols-2 gap-6">
++        {/* Catálogo actual */}
++        <div>
++          <p className="text-xs uppercase tracking-wide text-muted mb-2">En tu lista ({gifts.length})</p>
++          {gifts.length === 0 ? (
++            <p className="text-sm text-muted border border-dashed border-line rounded-lg px-4 py-6 text-center">
++              Aún no hay productos de regalo. Agrega al menos uno para activar esta recompensa.
++            </p>
++          ) : (
++            <ul className="space-y-2 max-h-96 overflow-y-auto pr-1">
++              {gifts.map((g) => (
++                <li key={g.id} className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-2.5">
++                  <div className="min-w-0">
++                    <p className={`text-sm font-medium truncate ${g.isActive ? "" : "text-muted line-through"}`}>{g.name}</p>
++                    <p className="text-[11px] text-muted">
++                      {g.linked ? (g.productActive ? "Vinculado a tu POS" : "Vinculado a tu POS (producto inactivo)") : "Escrito a mano"}
++                      {g.description ? ` · ${g.description}` : ""}
++                    </p>
++                  </div>
++                  <div className="flex items-center gap-1 shrink-0">
++                    <Button variant="ghost" onClick={() => patch(g, { isActive: !g.isActive })}>
++                      {g.isActive ? "Pausar" : "Activar"}
++                    </Button>
++                    <Button variant="ghost" onClick={() => remove(g)}>
++                      Quitar
++                    </Button>
++                  </div>
++                </li>
++              ))}
++            </ul>
++          )}
++        </div>
++
++        {/* Agregar */}
++        <div>
++          <div className="flex gap-1 mb-3 border-b border-line">
++            {tabs.map((t) => (
++              <button
++                key={t.id}
++                type="button"
++                onClick={() => {
++                  setTab(t.id);
++                  setMessage(null);
++                }}
++                className={`px-3 py-2 text-sm -mb-px border-b-2 ${
++                  tab === t.id ? "border-ember font-medium text-ink" : "border-transparent text-muted"
++                }`}
++              >
++                {t.label}
++              </button>
++            ))}
++          </div>
++
++          {tab === "pos" && (
++            <div>
++              <input className={`${inputClass} mb-3`} placeholder="Buscar en tus productos" value={q} onChange={(e) => setQ(e.target.value)} />
++              <ul className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
++                {products.map((p) => (
++                  <li key={p.id} className="flex items-center justify-between gap-3 text-sm px-1">
++                    <span className="truncate">
++                      {p.name}
++                      <span className="text-muted text-xs">
++                        {p.category ? ` · ${p.category}` : ""} · ${p.price.toFixed(2)}
++                      </span>
++                    </span>
++                    {p.alreadyGift ? (
++                      <span className="text-xs text-sage shrink-0">Ya es regalo</span>
++                    ) : (
++                      <Button variant="secondary" onClick={() => addFromPos(p)} disabled={busy}>
++                        Agregar
++                      </Button>
++                    )}
++                  </li>
++                ))}
++                {!loadingProducts && products.length === 0 && (
++                  <li className="text-sm text-muted">No encontramos productos. Da de alta productos en tu POS o escríbelos a mano.</li>
++                )}
++              </ul>
++            </div>
++          )}
++
++          {tab === "manual" && (
++            <form onSubmit={addManual} className="space-y-3">
++              <input className={inputClass} placeholder="Nombre (ej. Café americano)" value={name} onChange={(e) => setName(e.target.value)} required />
++              <input className={inputClass} placeholder="Detalle (opcional, ej. 12 oz)" value={description} onChange={(e) => setDescription(e.target.value)} />
++              <Button type="submit" disabled={busy || name.trim().length < 2}>
++                Agregar regalo
++              </Button>
++            </form>
++          )}
++
++          {tab === "lista" && (
++            <form onSubmit={addBulk} className="space-y-3">
++              <textarea
++                className={`${inputClass} h-36`}
++                placeholder={"Un producto por línea:\nCafé americano\nPostre del día\nOrden de papas"}
++                value={bulk}
++                onChange={(e) => setBulk(e.target.value)}
++              />
++              <div className="flex flex-wrap items-center gap-3">
++                <label className="text-xs text-muted">
++                  o sube un archivo CSV/TXT:{" "}
++                  <input type="file" accept=".csv,.txt,text/csv,text/plain" onChange={(e) => loadFile(e.target.files?.[0])} />
++                </label>
++              </div>
++              <Button type="submit" disabled={busy || !bulk.trim()}>
++                Agregar lista
++              </Button>
++            </form>
++          )}
++
++          {message && (
++            <p className={`text-sm rounded-md px-3 py-2 mt-3 ${message.ok ? "bg-sage-light text-sage" : "bg-ember/10 text-ember-dark"}`}>
++              {message.text}
++            </p>
++          )}
++        </div>
++      </div>
++    </Card>
++  );
++}
+diff --git a/src/app/(company)/clientes-frecuentes/page.tsx b/src/app/(company)/clientes-frecuentes/page.tsx
+index 10ea93f..6796416 100644
+--- a/src/app/(company)/clientes-frecuentes/page.tsx
++++ b/src/app/(company)/clientes-frecuentes/page.tsx
+@@ -30,22 +30,26 @@ export default async function ClientesFrecuentesPage() {
+     );
+   }
+ 
+-  const [program, stats, customers] = await Promise.all([
++  const [program, stats, customers, gifts, loyaltyOnly] = await Promise.all([
+     loyaltyService.getProgram(companyId),
+     loyaltyService.stats(companyId),
+     loyaltyService.listCustomers(companyId),
++    loyaltyService.listGifts(companyId),
++    isLoyaltyOnly(companyId),
+   ]);
+ 
+   return (
+     <div>
+       <h1 className="font-display text-3xl font-semibold mb-1">Clientes frecuentes</h1>
+       <p className="text-muted text-sm mb-8">
+-        Premia a quien te visita seguido: tarjeta digital con QR, visitas y descuento automático.
++        Premia a quien te visita seguido: tarjeta digital con QR, visitas y un descuento o un producto de regalo.
+       </p>
+       <LoyaltyAdminClient
+         initialProgram={JSON.parse(JSON.stringify(program))}
+         initialStats={stats}
+         initialCustomers={JSON.parse(JSON.stringify(customers))}
++        initialGifts={gifts}
++        posAvailable={!loyaltyOnly}
+       />
+     </div>
+   );
+diff --git a/src/app/(company)/tables/tables-client.tsx b/src/app/(company)/tables/tables-client.tsx
+index edd0639..a49771a 100644
+--- a/src/app/(company)/tables/tables-client.tsx
++++ b/src/app/(company)/tables/tables-client.tsx
+@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
+ import { useRouter } from "next/navigation";
+ import { clsx } from "clsx";
+ import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
+-import { PosLoyaltyPanel, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
++import { PosLoyaltyPanel, selectedGift, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
+ import {
+   PaymentMethodPicker,
+   TipPicker,
+@@ -339,6 +339,7 @@ function CloseTabModal({
+   const [loyaltyDone, setLoyaltyDone] = useState<{
+     customerName: string;
+     redeemed: boolean;
++    giftName?: string | null;
+     visitRegistered: boolean;
+     visitPending: boolean;
+     visits: number;
+@@ -348,6 +349,7 @@ function CloseTabModal({
+   // Si canjea su descuento de cliente frecuente, el total se calcula sobre el subtotal de la cuenta.
+   const subtotalNum = Number(order.subtotal);
+   const afterPromo = subtotalNum - promo.discount;
++  const loyaltyGift = selectedGift(loyalty);
+   const loyaltyDiscount = loyalty?.redeem
+     ? computeLoyaltyDiscount(loyalty.customer.discountType, loyalty.customer.discountValue, afterPromo)
+     : 0;
+@@ -375,6 +377,7 @@ function CloseTabModal({
+           cashReceived: method === "CASH" ? cashReceivedNum : undefined,
+           loyaltyCustomerId: loyalty?.customer.id,
+           redeemLoyalty: !!loyalty?.redeem,
++          loyaltyGiftId: selectedGift(loyalty)?.id,
+           couponCode: coupon ?? undefined,
+         }),
+       });
+@@ -461,7 +464,11 @@ function CloseTabModal({
+           <p className="font-display text-xl font-semibold mb-3">Cobro registrado</p>
+           <div className="text-sm bg-sage/10 text-sage rounded-md px-3 py-2 mb-5">
+             <p className="font-medium">{loyaltyDone.customerName}</p>
+-            {loyaltyDone.redeemed && <p>Descuento de cliente frecuente aplicado.</p>}
++            {loyaltyDone.giftName ? (
++              <p>🎁 Entrega de regalo: {loyaltyDone.giftName}</p>
++            ) : (
++              loyaltyDone.redeemed && <p>Descuento de cliente frecuente aplicado.</p>
++            )}
+             <p>
+               {loyaltyDone.visitRegistered
+                 ? `Visita sumada: ${loyaltyDone.visits}/${loyaltyDone.required}.`
+@@ -488,8 +495,12 @@ function CloseTabModal({
+             Propina ${tip.toFixed(2)} · A cobrar <span className="font-mono font-medium text-ink">${payable.toFixed(2)} MXN</span>
+           </p>
+         )}
+-        {loyalty?.redeem && (
+-          <p className="text-xs text-sage mb-4">Incluye descuento de cliente frecuente (-${loyaltyDiscount.toFixed(2)})</p>
++        {loyaltyGift ? (
++          <p className="text-xs text-sage mb-4">🎁 Regalo de cliente frecuente: {loyaltyGift.name}</p>
++        ) : (
++          loyalty?.redeem && (
++            <p className="text-xs text-sage mb-4">Incluye descuento de cliente frecuente (-${loyaltyDiscount.toFixed(2)})</p>
++          )
+         )}
+         <div className="mb-4 space-y-1">
+           {promo.applied.map((a) => (
+diff --git a/src/app/api/loyalty/gifts/[id]/route.ts b/src/app/api/loyalty/gifts/[id]/route.ts
+new file mode 100644
+index 0000000..31c834f
+--- /dev/null
++++ b/src/app/api/loyalty/gifts/[id]/route.ts
+@@ -0,0 +1,36 @@
++import { NextResponse } from "next/server";
++import { z } from "zod";
++import { PERMISSIONS } from "@/lib/permissions";
++import { loyaltyService } from "@/modules/loyalty/service";
++import { loyaltyGuard, errorResponse } from "@/modules/loyalty/guard";
++
++const patchSchema = z.object({
++  name: z.string().max(120).optional(),
++  description: z.string().max(300).nullable().optional(),
++  isActive: z.boolean().optional(),
++});
++
++export async function PATCH(req: Request, { params }: { params: { id: string } }) {
++  const g = await loyaltyGuard(PERMISSIONS.LOYALTY_MANAGE);
++  if (g.error) return g.error;
++
++  const parsed = patchSchema.safeParse(await req.json().catch(() => null));
++  if (!parsed.success) return NextResponse.json({ error: "Datos inválidos" }, { status: 400 });
++  try {
++    const gift = await loyaltyService.updateGift(g.companyId, g.ctx.userId, params.id, parsed.data);
++    return NextResponse.json({ gift });
++  } catch (err) {
++    return errorResponse(err, "No se pudo actualizar el regalo");
++  }
++}
++
++export async function DELETE(_req: Request, { params }: { params: { id: string } }) {
++  const g = await loyaltyGuard(PERMISSIONS.LOYALTY_MANAGE);
++  if (g.error) return g.error;
++  try {
++    await loyaltyService.deleteGift(g.companyId, g.ctx.userId, params.id);
++    return NextResponse.json({ ok: true });
++  } catch (err) {
++    return errorResponse(err, "No se pudo eliminar el regalo");
++  }
++}
+diff --git a/src/app/api/loyalty/gifts/route.ts b/src/app/api/loyalty/gifts/route.ts
+new file mode 100644
+index 0000000..3e108df
+--- /dev/null
++++ b/src/app/api/loyalty/gifts/route.ts
+@@ -0,0 +1,45 @@
++import { NextResponse } from "next/server";
++import { z } from "zod";
++import { PERMISSIONS } from "@/lib/permissions";
++import { loyaltyService } from "@/modules/loyalty/service";
++import { loyaltyGuard, errorResponse } from "@/modules/loyalty/guard";
++
++export async function GET() {
++  const g = await loyaltyGuard(PERMISSIONS.LOYALTY_MANAGE);
++  if (g.error) return g.error;
++  try {
++    return NextResponse.json({ gifts: await loyaltyService.listGifts(g.companyId) });
++  } catch (err) {
++    return errorResponse(err, "No se pudo cargar el catálogo de regalos");
++  }
++}
++
++// Un regalo (vinculado a un producto del POS con productId, o escrito a mano con name)
++// o una lista completa (names: un producto por línea, pegada o leída de un archivo).
++const schema = z.union([
++  z.object({
++    name: z.string().max(120).optional(),
++    description: z.string().max(300).nullable().optional(),
++    productId: z.string().min(1).nullable().optional(),
++  }),
++  z.object({ names: z.array(z.string().max(120)).min(1).max(500) }),
++]);
++
++export async function POST(req: Request) {
++  const g = await loyaltyGuard(PERMISSIONS.LOYALTY_MANAGE);
++  if (g.error) return g.error;
++
++  const parsed = schema.safeParse(await req.json().catch(() => null));
++  if (!parsed.success) return NextResponse.json({ error: "Datos inválidos" }, { status: 400 });
++
++  try {
++    if ("names" in parsed.data) {
++      const result = await loyaltyService.createGiftsBulk(g.companyId, g.ctx.userId, parsed.data.names);
++      return NextResponse.json(result, { status: 201 });
++    }
++    const gift = await loyaltyService.createGift(g.companyId, g.ctx.userId, parsed.data);
++    return NextResponse.json({ gift }, { status: 201 });
++  } catch (err) {
++    return errorResponse(err, "No se pudo agregar el regalo");
++  }
++}
+diff --git a/src/app/api/loyalty/pos-products/route.ts b/src/app/api/loyalty/pos-products/route.ts
+new file mode 100644
+index 0000000..c363422
+--- /dev/null
++++ b/src/app/api/loyalty/pos-products/route.ts
+@@ -0,0 +1,20 @@
++import { NextResponse } from "next/server";
++import { PERMISSIONS } from "@/lib/permissions";
++import { isLoyaltyOnly } from "@/lib/feature-gating";
++import { loyaltyService } from "@/modules/loyalty/service";
++import { loyaltyGuard, errorResponse } from "@/modules/loyalty/guard";
++
++/** Productos del POS que se pueden vincular como regalo. Vacío en empresas "solo clientes frecuentes". */
++export async function GET(req: Request) {
++  const g = await loyaltyGuard(PERMISSIONS.LOYALTY_MANAGE);
++  if (g.error) return g.error;
++
++  if (await isLoyaltyOnly(g.companyId)) return NextResponse.json({ products: [] });
++
++  const q = new URL(req.url).searchParams.get("q") ?? undefined;
++  try {
++    return NextResponse.json({ products: await loyaltyService.listPosProducts(g.companyId, q) });
++  } catch (err) {
++    return errorResponse(err, "No se pudieron cargar los productos");
++  }
++}
+diff --git a/src/app/api/loyalty/redeem/route.ts b/src/app/api/loyalty/redeem/route.ts
+index 8f63043..f171add 100644
+--- a/src/app/api/loyalty/redeem/route.ts
++++ b/src/app/api/loyalty/redeem/route.ts
+@@ -5,7 +5,7 @@ import { resolveBranchId } from "@/lib/tenant-context";
+ import { loyaltyService } from "@/modules/loyalty/service";
+ import { loyaltyGuard, errorResponse } from "@/modules/loyalty/guard";
+ 
+-const schema = z.object({ customerId: z.string().min(1) });
++const schema = z.object({ customerId: z.string().min(1), giftId: z.string().min(1).optional() });
+ 
+ export async function POST(req: Request) {
+   const g = await loyaltyGuard(PERMISSIONS.LOYALTY_SCAN);
+@@ -15,7 +15,7 @@ export async function POST(req: Request) {
+   if (!parsed.success) return NextResponse.json({ error: "Cliente inválido" }, { status: 400 });
+   try {
+     const branchId = await resolveBranchId(g.ctx, g.companyId);
+-    const customer = await loyaltyService.redeem(g.companyId, g.ctx.userId, branchId, parsed.data.customerId);
++    const customer = await loyaltyService.redeem(g.companyId, g.ctx.userId, branchId, parsed.data.customerId, parsed.data.giftId);
+     return NextResponse.json({ customer });
+   } catch (err) {
+     return errorResponse(err, "No se pudo canjear el descuento");
+diff --git a/src/app/pos/pos-client.tsx b/src/app/pos/pos-client.tsx
+index a31d922..38698b0 100644
+--- a/src/app/pos/pos-client.tsx
++++ b/src/app/pos/pos-client.tsx
+@@ -6,7 +6,7 @@ import Link from "next/link";
+ import { formatMxn } from "@/lib/format";
+ import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
+ import { evaluatePromotions, type PromotionRule } from "@/lib/promotions";
+-import { PosLoyaltyPanel, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
++import { PosLoyaltyPanel, selectedGift, type LoyaltySelection } from "@/components/loyalty/pos-loyalty-panel";
+ import { useBranding } from "@/components/branding-context";
+ import {
+   PaymentMethodPicker,
+@@ -19,6 +19,7 @@ import {
+ type LoyaltyResult = {
+   customerName: string;
+   redeemed: boolean;
++  giftName?: string | null;
+   visitRegistered: boolean;
+   visitPending: boolean;
+   visits: number;
+@@ -211,11 +212,14 @@ function PosClientInner({
+   );
+   const afterPromo = subtotal - promo.discount;
+   // Si canjea su descuento de cliente frecuente, ese descuento reemplaza al descuento manual.
+-  const loyaltyDiscount = loyalty?.redeem
+-    ? computeLoyaltyDiscount(loyalty.customer.discountType, loyalty.customer.discountValue, afterPromo)
++  // Si la recompensa es un producto de regalo no hay descuento: el manual se respeta y el regalo entra aparte.
++  const discountRedeem = !!loyalty?.redeem && loyalty.customer.discountType !== "GIFT";
++  const loyaltyGift = selectedGift(loyalty);
++  const loyaltyDiscount = discountRedeem
++    ? computeLoyaltyDiscount(loyalty!.customer.discountType, loyalty!.customer.discountValue, afterPromo)
+     : 0;
+-  const manualDiscount = loyalty?.redeem ? 0 : Math.min(discount, afterPromo);
+-  const safeDiscount = promo.discount + (loyalty?.redeem ? loyaltyDiscount : manualDiscount);
++  const manualDiscount = discountRedeem ? 0 : Math.min(discount, afterPromo);
++  const safeDiscount = promo.discount + (discountRedeem ? loyaltyDiscount : manualDiscount);
+   const total = subtotal - safeDiscount;
+ 
+   function addLine(product: Product, choices: MenuChoiceOption[]) {
+@@ -425,7 +429,13 @@ function PosClientInner({
+               </div>
+             )}
+             {loyaltyEnabled && !tableInfo && <PosLoyaltyPanel value={loyalty} onChange={setLoyalty} />}
+-            {loyalty?.redeem ? (
++            {loyaltyGift && (
++              <div className="flex items-center justify-between text-sm">
++                <span className="text-muted">Regalo cliente frecuente</span>
++                <span className="font-medium">🎁 {loyaltyGift.name}</span>
++              </div>
++            )}
++            {discountRedeem ? (
+               <div className="flex items-center justify-between text-sm">
+                 <span className="text-muted">Descuento cliente frecuente</span>
+                 <span className="font-mono">-{formatMxn(loyaltyDiscount)}</span>
+@@ -736,6 +746,7 @@ function CheckoutModal({
+           couponCode: couponCode || undefined,
+           loyaltyCustomerId: loyalty?.customer.id,
+           redeemLoyalty: !!loyalty?.redeem,
++          loyaltyGiftId: selectedGift(loyalty)?.id,
+           paymentMethod: method,
+           cardProvider: method === "CARD" && cardProvider ? cardProvider : undefined,
+           tip,
+@@ -790,11 +801,17 @@ function CheckoutModal({
+       setCompletedOrder({
+         orderId: data.order.id,
+         orderNumber: data.order.orderNumber,
+-        items: cart.map((l) => ({
+-          quantity: l.quantity,
+-          name: lineLabel(l),
+-          unitPrice: l.unitPrice,
+-        })),
++        items: [
++          ...cart.map((l) => ({
++            quantity: l.quantity,
++            name: lineLabel(l),
++            unitPrice: l.unitPrice,
++          })),
++          // El producto de regalo aparece en el ticket en $0.
++          ...(data.order.loyalty?.giftName
++            ? [{ quantity: 1, name: `Regalo: ${data.order.loyalty.giftName}`, unitPrice: 0 }]
++            : []),
++        ],
+         subtotal,
+         discount,
+         total,
+@@ -1239,7 +1256,11 @@ function CheckoutModal({
+           {completedOrder.loyalty && (
+             <div className="text-sm bg-sage-light text-sage rounded-md px-3 py-2 mb-4">
+               <p className="font-medium">{completedOrder.loyalty.customerName}</p>
+-              {completedOrder.loyalty.redeemed && <p>Descuento de cliente frecuente aplicado.</p>}
++              {completedOrder.loyalty.giftName ? (
++                <p>🎁 Entrega de regalo: {completedOrder.loyalty.giftName}</p>
++              ) : (
++                completedOrder.loyalty.redeemed && <p>Descuento de cliente frecuente aplicado.</p>
++              )}
+               <p>
+                 {completedOrder.loyalty.visitRegistered
+                   ? `Visita sumada: ${completedOrder.loyalty.visits}/${completedOrder.loyalty.required}.`
+diff --git a/src/components/loyalty/pos-loyalty-panel.tsx b/src/components/loyalty/pos-loyalty-panel.tsx
+index dbb0bd8..378f564 100644
+--- a/src/components/loyalty/pos-loyalty-panel.tsx
++++ b/src/components/loyalty/pos-loyalty-panel.tsx
+@@ -1,6 +1,7 @@
+ "use client";
+ 
+ import { useState } from "react";
++import type { RewardType } from "@/lib/loyalty-discount";
+ import { QrScanner } from "./qr-scanner";
+ 
+ export type LoyaltyCustomer = {
+@@ -14,12 +15,20 @@ export type LoyaltyCustomer = {
+   visitedToday: boolean;
+   programActive: boolean;
+   discountText: string;
+-  discountType: "PERCENT" | "FIXED";
++  discountType: RewardType;
+   discountValue: number;
++  /** Productos de regalo disponibles (solo cuando la recompensa es un regalo). */
++  gifts: { id: string; name: string; description: string | null; productId: string | null }[];
+ };
+ 
+ /** Cliente identificado en Caja y si se canjea su descuento en esta venta. */
+-export type LoyaltySelection = { customer: LoyaltyCustomer; redeem: boolean };
++export type LoyaltySelection = { customer: LoyaltyCustomer; redeem: boolean; giftId?: string };
++
++/** Regalo que se entregará en esta venta (null si no canjea un regalo). */
++export function selectedGift(sel: LoyaltySelection | null) {
++  if (!sel?.redeem || sel.customer.discountType !== "GIFT") return null;
++  return sel.customer.gifts.find((g) => g.id === sel.giftId) ?? sel.customer.gifts[0] ?? null;
++}
+ 
+ /**
+  * Bloque "Cliente frecuente" para Caja (Mostrador y Mesa): escanea la tarjeta (o teclea el
+@@ -78,15 +87,33 @@ export function PosLoyaltyPanel({
+           <p className="text-xs text-muted mt-2">El programa está pausado: no se sumará visita.</p>
+         ) : (
+           <>
+-            {c.rewardAvailable && (
+-              <label className="flex items-center gap-2 mt-2 text-sm font-medium text-sage">
+-                <input
+-                  type="checkbox"
+-                  checked={value.redeem}
+-                  onChange={(e) => onChange({ ...value, redeem: e.target.checked })}
+-                />
+-                Canjear {c.discountText}
+-              </label>
++            {c.rewardAvailable && c.discountType === "GIFT" && c.gifts.length === 0 && (
++              <p className="text-xs text-muted mt-2">Tiene un regalo disponible, pero no hay productos de regalo activos.</p>
++            )}
++            {c.rewardAvailable && (c.discountType !== "GIFT" || c.gifts.length > 0) && (
++              <>
++                <label className="flex items-center gap-2 mt-2 text-sm font-medium text-sage">
++                  <input
++                    type="checkbox"
++                    checked={value.redeem}
++                    onChange={(e) => onChange({ ...value, redeem: e.target.checked, giftId: value.giftId ?? c.gifts[0]?.id })}
++                  />
++                  Canjear {c.discountText}
++                </label>
++                {value.redeem && c.discountType === "GIFT" && c.gifts.length > 1 && (
++                  <select
++                    className="mt-2 w-full rounded-md border border-line px-2 py-1.5 text-sm"
++                    value={value.giftId ?? c.gifts[0].id}
++                    onChange={(e) => onChange({ ...value, giftId: e.target.value })}
++                  >
++                    {c.gifts.map((g) => (
++                      <option key={g.id} value={g.id}>
++                        {g.name}
++                      </option>
++                    ))}
++                  </select>
++                )}
++              </>
+             )}
+             <p className="text-[11px] text-muted mt-1">
+               {c.visitedToday
+diff --git a/src/lib/loyalty-discount.ts b/src/lib/loyalty-discount.ts
+index 23926a8..c533b3d 100644
+--- a/src/lib/loyalty-discount.ts
++++ b/src/lib/loyalty-discount.ts
+@@ -1,8 +1,12 @@
+ /**
+  * Descuento de clientes frecuentes para un subtotal. Módulo puro (sin base de datos) para que
+  * el servidor y las pantallas de Caja calculen exactamente lo mismo.
++ * Las recompensas de tipo GIFT (producto de regalo) no descuentan nada: el regalo se agrega aparte.
+  */
+-export function computeLoyaltyDiscount(type: "PERCENT" | "FIXED", value: number, subtotal: number): number {
++export type RewardType = "PERCENT" | "FIXED" | "GIFT";
++
++export function computeLoyaltyDiscount(type: RewardType, value: number, subtotal: number): number {
++  if (type === "GIFT") return 0;
+   const raw = type === "PERCENT" ? (subtotal * value) / 100 : value;
+   return Math.round(Math.min(raw, subtotal) * 100) / 100;
+ }
+diff --git a/src/modules/loyalty/service.ts b/src/modules/loyalty/service.ts
+index ec65001..21b48dc 100644
+--- a/src/modules/loyalty/service.ts
++++ b/src/modules/loyalty/service.ts
+@@ -3,7 +3,8 @@ import { z } from "zod";
+ import { prisma } from "@/lib/prisma";
+ import { hasFeature } from "@/lib/feature-gating";
+ import { FEATURE_KEYS } from "@/lib/plan-features";
+-import { computeLoyaltyDiscount } from "@/lib/loyalty-discount";
++import { Prisma } from "@prisma/client";
++import { computeLoyaltyDiscount, type RewardType } from "@/lib/loyalty-discount";
+ 
+ /**
+  * Programa de clientes frecuentes.
+@@ -44,7 +45,8 @@ export function normalizePhone(raw: string): string {
+   return digits;
+ }
+ 
+-export function describeDiscount(type: "PERCENT" | "FIXED", value: number): string {
++export function describeDiscount(type: RewardType, value: number): string {
++  if (type === "GIFT") return "un producto de regalo";
+   return type === "PERCENT" ? `${value}% de descuento` : `$${value} MXN de descuento`;
+ }
+ 
+@@ -52,7 +54,7 @@ export const programSchema = z
+   .object({
+     isActive: z.boolean().optional(),
+     visitsRequired: z.coerce.number().int("Debe ser un número entero").min(2, "Mínimo 2 visitas").max(50, "Máximo 50 visitas").optional(),
+-    discountType: z.enum(["PERCENT", "FIXED"]).optional(),
++    discountType: z.enum(["PERCENT", "FIXED", "GIFT"]).optional(),
+     discountValue: z.coerce.number().positive("El descuento debe ser mayor a 0").max(100000).optional(),
+     oneVisitPerDay: z.boolean().optional(),
+     displayName: z.string().trim().max(60).nullable().optional(),
+@@ -73,7 +75,7 @@ function serializeProgram(p: ProgramRow) {
+     id: p.id,
+     isActive: p.isActive,
+     visitsRequired: p.visitsRequired,
+-    discountType: p.discountType as "PERCENT" | "FIXED",
++    discountType: p.discountType as RewardType,
+     discountValue: Number(p.discountValue),
+     oneVisitPerDay: p.oneVisitPerDay,
+     signupToken: p.signupToken,
+@@ -90,7 +92,58 @@ type CustomerRow = {
+   lastVisitAt: Date | null;
+ };
+ 
+-function summarize(customer: CustomerRow, program: ProgramRow) {
++/** Producto de regalo que el cajero puede entregar (nombre efectivo: el del POS si está vinculado). */
++export type GiftOption = { id: string; name: string; description: string | null; productId: string | null };
++
++const giftSelect = {
++  id: true,
++  name: true,
++  description: true,
++  productId: true,
++  isActive: true,
++  product: { select: { name: true, isActive: true } },
++} as const;
++
++function toGiftOption(g: {
++  id: string;
++  name: string;
++  description: string | null;
++  productId: string | null;
++  product: { name: string } | null;
++}): GiftOption {
++  return { id: g.id, name: g.product?.name ?? g.name, description: g.description, productId: g.productId };
++}
++
++type DbWithGifts = Pick<Tx, "loyaltyGift">;
++
++/** Regalos que se pueden entregar hoy: activos y, si están ligados al POS, con el producto activo. */
++async function loadGifts(db: DbWithGifts, companyId: string): Promise<GiftOption[]> {
++  const rows = await db.loyaltyGift.findMany({
++    where: { companyId, isActive: true, OR: [{ productId: null }, { product: { isActive: true } }] },
++    select: giftSelect,
++    orderBy: { name: "asc" },
++  });
++  return rows.map(toGiftOption);
++}
++
++async function giftsFor(db: DbWithGifts, companyId: string, program: ProgramRow): Promise<GiftOption[]> {
++  return program.discountType === "GIFT" ? loadGifts(db, companyId) : [];
++}
++
++/** Valida el regalo elegido (o toma el único disponible). Siempre se resuelve en el servidor. */
++async function resolveGift(db: DbWithGifts, companyId: string, giftId?: string | null): Promise<GiftOption> {
++  const gifts = await loadGifts(db, companyId);
++  if (gifts.length === 0) throw new Error("No hay productos de regalo disponibles. Agrégalos en Clientes frecuentes.");
++  if (giftId) {
++    const gift = gifts.find((g) => g.id === giftId);
++    if (!gift) throw new Error("Ese producto de regalo ya no está disponible");
++    return gift;
++  }
++  if (gifts.length === 1) return gifts[0];
++  throw new Error("Elige el producto de regalo");
++}
++
++function summarize(customer: CustomerRow, program: ProgramRow, gifts: GiftOption[] = []) {
+   const required = program.visitsRequired;
+   const visitedToday =
+     program.oneVisitPerDay && !!customer.lastVisitAt && dayKey(customer.lastVisitAt) === dayKey(new Date());
+@@ -105,9 +158,10 @@ function summarize(customer: CustomerRow, program: ProgramRow) {
+     visitedToday,
+     lastVisitAt: customer.lastVisitAt,
+     programActive: program.isActive,
+-    discountText: describeDiscount(program.discountType as "PERCENT" | "FIXED", Number(program.discountValue)),
+-    discountType: program.discountType as "PERCENT" | "FIXED",
++    discountText: describeDiscount(program.discountType as RewardType, Number(program.discountValue)),
++    discountType: program.discountType as RewardType,
+     discountValue: Number(program.discountValue),
++    gifts,
+   };
+ }
+ 
+@@ -206,6 +260,8 @@ export type LoyaltySalePlan = {
+   customerName: string;
+   redeem: boolean;
+   discount: number;
++  /** Regalo que se entrega con esta venta (solo recompensas de tipo GIFT). */
++  gift: GiftOption | null;
+   program: ProgramRow;
+   visits: number;
+   lastVisitAt: Date | null;
+@@ -222,6 +278,10 @@ export const loyaltyService = {
+     const type = input.discountType ?? before.discountType;
+     const value = input.discountValue ?? Number(before.discountValue);
+     if (type === "PERCENT" && value > 100) throw new Error("Un descuento en porcentaje no puede pasar de 100");
++    if (type === "GIFT" && (input.isActive ?? before.isActive)) {
++      const active = await prisma.loyaltyGift.count({ where: { companyId, isActive: true } });
++      if (active === 0) throw new Error("Agrega al menos un producto de regalo antes de usar esta recompensa");
++    }
+ 
+     const updated = await prisma.loyaltyProgram.update({
+       where: { companyId },
+@@ -305,6 +365,153 @@ export const loyaltyService = {
+     });
+   },
+ 
++  // ───────────── Catálogo de regalos (LOYALTY_MANAGE) ─────────────
++  async listGifts(companyId: string) {
++    const rows = await prisma.loyaltyGift.findMany({
++      where: { companyId },
++      select: giftSelect,
++      orderBy: [{ isActive: "desc" }, { name: "asc" }],
++    });
++    return rows.map((g) => ({
++      ...toGiftOption(g),
++      isActive: g.isActive,
++      linked: !!g.productId,
++      productActive: g.product ? g.product.isActive : true,
++    }));
++  },
++
++  /** Productos del POS que se pueden vincular como regalo (vacío si la empresa no tiene productos). */
++  async listPosProducts(companyId: string, q?: string) {
++    const term = q?.trim();
++    const [products, used] = await Promise.all([
++      prisma.product.findMany({
++        where: { companyId, isActive: true, ...(term ? { name: { contains: term, mode: "insensitive" as const } } : {}) },
++        select: { id: true, name: true, price: true, category: { select: { name: true } } },
++        orderBy: { name: "asc" },
++        take: 60,
++      }),
++      prisma.loyaltyGift.findMany({ where: { companyId, productId: { not: null } }, select: { productId: true } }),
++    ]);
++    const usedSet = new Set(used.map((u) => u.productId));
++    return products.map((p) => ({
++      id: p.id,
++      name: p.name,
++      price: Number(p.price),
++      category: p.category?.name ?? null,
++      alreadyGift: usedSet.has(p.id),
++    }));
++  },
++
++  /** Agrega un regalo: vinculado a un producto del POS (productId) o escrito a mano (name). */
++  async createGift(
++    companyId: string,
++    userId: string,
++    input: { name?: string; description?: string | null; productId?: string | null }
++  ) {
++    let name = input.name?.trim() ?? "";
++    let productId: string | null = null;
++
++    if (input.productId) {
++      const product = await prisma.product.findFirst({
++        where: { id: input.productId, companyId, isActive: true },
++        select: { id: true, name: true },
++      });
++      if (!product) throw new Error("Ese producto no existe en tu POS");
++      productId = product.id;
++      name = product.name;
++    }
++    if (name.length < 2) throw new Error("Escribe el nombre del producto de regalo");
++    if (name.length > 80) throw new Error("El nombre es muy largo (máximo 80 caracteres)");
++
++    try {
++      const gift = await prisma.loyaltyGift.create({
++        data: { companyId, name, description: input.description?.trim().slice(0, 200) || null, productId },
++        select: giftSelect,
++      });
++      await prisma.auditLog.create({
++        data: { companyId, userId, action: "LOYALTY_GIFT_CREATE", entity: "LoyaltyGift", entityId: gift.id, newData: { name, productId } },
++      });
++      return { ...toGiftOption(gift), isActive: gift.isActive, linked: !!gift.productId, productActive: true };
++    } catch (err) {
++      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
++        throw new Error("Ese producto ya está en tu lista de regalos");
++      }
++      throw err;
++    }
++  },
++
++  /** Alta masiva (lista pegada o archivo): un producto por línea. Omite repetidos y nombres muy cortos. */
++  async createGiftsBulk(companyId: string, userId: string, names: string[]) {
++    const existing = await prisma.loyaltyGift.findMany({ where: { companyId }, select: { name: true } });
++    const seen = new Set(existing.map((g) => g.name.trim().toLowerCase()));
++    const toCreate: string[] = [];
++    for (const raw of names) {
++      const name = raw.trim().replace(/\s+/g, " ");
++      const key = name.toLowerCase();
++      if (name.length < 2 || name.length > 80 || seen.has(key)) continue;
++      seen.add(key);
++      toCreate.push(name);
++      if (toCreate.length >= 200) break;
++    }
++    if (toCreate.length > 0) {
++      await prisma.loyaltyGift.createMany({ data: toCreate.map((name) => ({ companyId, name })) });
++      await prisma.auditLog.create({
++        data: { companyId, userId, action: "LOYALTY_GIFT_BULK", entity: "LoyaltyGift", newData: { created: toCreate.length } },
++      });
++    }
++    return { created: toCreate.length, skipped: names.length - toCreate.length };
++  },
++
++  /** Evita dejar al programa de regalos sin ningún regalo activo (nadie podría canjear). */
++  async assertCanRemoveGift(companyId: string, giftId: string) {
++    const program = await prisma.loyaltyProgram.findUnique({ where: { companyId } });
++    if (!program?.isActive || program.discountType !== "GIFT") return;
++    const others = await prisma.loyaltyGift.count({ where: { companyId, isActive: true, id: { not: giftId } } });
++    if (others === 0) {
++      throw new Error("Tu programa entrega regalos: deja al menos un regalo activo o cambia primero el tipo de recompensa");
++    }
++  },
++
++  async updateGift(
++    companyId: string,
++    userId: string,
++    giftId: string,
++    input: { name?: string; description?: string | null; isActive?: boolean }
++  ) {
++    const gift = await prisma.loyaltyGift.findFirst({ where: { id: giftId, companyId } });
++    if (!gift) throw new Error("Regalo no encontrado");
++    if (input.isActive === false && gift.isActive) await this.assertCanRemoveGift(companyId, giftId);
++
++    const name = input.name?.trim();
++    if (name !== undefined && !gift.productId && (name.length < 2 || name.length > 80)) {
++      throw new Error("El nombre debe tener entre 2 y 80 caracteres");
++    }
++    const updated = await prisma.loyaltyGift.update({
++      where: { id: giftId },
++      data: {
++        // Si está vinculado al POS, el nombre sale del producto.
++        ...(name !== undefined && !gift.productId ? { name } : {}),
++        ...(input.description !== undefined ? { description: input.description?.trim().slice(0, 200) || null } : {}),
++        ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
++      },
++      select: giftSelect,
++    });
++    await prisma.auditLog.create({
++      data: { companyId, userId, action: "LOYALTY_GIFT_UPDATE", entity: "LoyaltyGift", entityId: giftId, newData: { isActive: updated.isActive } },
++    });
++    return { ...toGiftOption(updated), isActive: updated.isActive, linked: !!updated.productId, productActive: updated.product ? updated.product.isActive : true };
++  },
++
++  async deleteGift(companyId: string, userId: string, giftId: string) {
++    const gift = await prisma.loyaltyGift.findFirst({ where: { id: giftId, companyId } });
++    if (!gift) throw new Error("Regalo no encontrado");
++    if (gift.isActive) await this.assertCanRemoveGift(companyId, giftId);
++    await prisma.loyaltyGift.delete({ where: { id: giftId } });
++    await prisma.auditLog.create({
++      data: { companyId, userId, action: "LOYALTY_GIFT_DELETE", entity: "LoyaltyGift", entityId: giftId, previousData: { name: gift.name } },
++    });
++  },
++
+   // ───────────── Operación del personal (LOYALTY_SCAN) ─────────────
+   /** Acepta el contenido del QR (URL de la tarjeta), el token solo, o el código corto de 6 caracteres. */
+   async lookup(companyId: string, rawCode: string) {
+@@ -321,13 +528,14 @@ export const loyaltyService = {
+         });
+     if (!customer) throw new Error("No encontramos esa tarjeta en este restaurante");
+ 
+-    return summarize(customer, await getProgramRow(companyId));
++    const program = await getProgramRow(companyId);
++    return summarize(customer, program, await giftsFor(prisma, companyId, program));
+   },
+ 
+   async enrollByStaff(companyId: string, userId: string, input: z.infer<typeof enrollSchema>) {
+     const { customer, created } = await enroll(companyId, input, { userId });
+     const program = await getProgramRow(companyId);
+-    return { customer: summarize(customer, program), cardToken: customer.cardToken as string, created };
++    return { customer: summarize(customer, program, await giftsFor(prisma, companyId, program)), cardToken: customer.cardToken as string, created };
+   },
+ 
+   async registerVisit(companyId: string, userId: string, branchId: string | null, customerId: string) {
+@@ -347,11 +555,11 @@ export const loyaltyService = {
+         where: { id: customerId },
+         data: { visitsInCycle: { increment: 1 }, lastVisitAt: now },
+       });
+-      return summarize(updated, program);
++      return summarize(updated, program, await giftsFor(tx, companyId, program));
+     });
+   },
+ 
+-  async redeem(companyId: string, userId: string, branchId: string | null, customerId: string) {
++  async redeem(companyId: string, userId: string, branchId: string | null, customerId: string, giftId?: string | null) {
+     return prisma.$transaction(async (tx) => {
+       await lockCustomer(tx, companyId, customerId);
+       const customer = await tx.customer.findFirstOrThrow({ where: { id: customerId, companyId } });
+@@ -361,6 +569,9 @@ export const loyaltyService = {
+         throw new Error(`Aún no llega a ${program.visitsRequired} visitas`);
+       }
+ 
++      // Recompensa de tipo regalo: el servidor valida cuál se entrega.
++      const gift = program.discountType === "GIFT" ? await resolveGift(tx, companyId, giftId) : null;
++
+       const redemption = await tx.loyaltyRedemption.create({
+         data: {
+           companyId,
+@@ -370,6 +581,8 @@ export const loyaltyService = {
+           discountType: program.discountType,
+           discountValue: program.discountValue,
+           visitsUsed: program.visitsRequired,
++          giftId: gift?.id ?? null,
++          giftName: gift?.name ?? null,
+         },
+       });
+       // Se descuentan solo las visitas del ciclo: si el cliente ya llevaba de más, el excedente se conserva.
+@@ -389,10 +602,14 @@ export const loyaltyService = {
+             discountType: program.discountType,
+             discountValue: Number(program.discountValue),
+             visitsUsed: program.visitsRequired,
++            giftName: gift?.name ?? null,
+           },
+         },
+       });
+-      return { ...summarize(updated, program), redeemed: describeDiscount(program.discountType as "PERCENT" | "FIXED", Number(program.discountValue)) };
++      return {
++        ...summarize(updated, program, await giftsFor(tx, companyId, program)),
++        redeemed: gift ? `Regalo: ${gift.name}` : describeDiscount(program.discountType as RewardType, Number(program.discountValue)),
++      };
+     });
+   },
+ 
+@@ -408,7 +625,7 @@ export const loyaltyService = {
+     return {
+       restaurantName: program.displayName || program.company.name,
+       visitsRequired: program.visitsRequired,
+-      discountText: describeDiscount(program.discountType as "PERCENT" | "FIXED", Number(program.discountValue)),
++      discountText: describeDiscount(program.discountType as RewardType, Number(program.discountValue)),
+     };
+   },
+ 
+@@ -444,7 +661,14 @@ export const loyaltyService = {
+    * SERVIDOR (lo que mande el navegador no se usa). Devuelve null si el programa está pausado y
+    * no se pidió canje: la venta sigue normal, solo sin visita.
+    */
+-  async prepareForSale(tx: Tx, companyId: string, customerId: string, wantsRedeem: boolean, subtotal: number) {
++  async prepareForSale(
++    tx: Tx,
++    companyId: string,
++    customerId: string,
++    wantsRedeem: boolean,
++    subtotal: number,
++    giftId?: string | null
++  ) {
+     await lockCustomer(tx, companyId, customerId);
+     const customer = await tx.customer.findFirst({ where: { id: customerId, companyId, cardToken: { not: null } } });
+     if (!customer) throw new Error("Ese cliente no está en el programa de clientes frecuentes");
+@@ -458,13 +682,16 @@ export const loyaltyService = {
+       throw new Error("Este cliente aún no tiene descuento disponible");
+     }
+ 
++    const gift = wantsRedeem && program.discountType === "GIFT" ? await resolveGift(tx, companyId, giftId) : null;
++
+     const plan: LoyaltySalePlan = {
+       customerId,
+       customerName: customer.name,
+       redeem: wantsRedeem,
+       discount: wantsRedeem
+-        ? computeLoyaltyDiscount(program.discountType as "PERCENT" | "FIXED", Number(program.discountValue), subtotal)
++        ? computeLoyaltyDiscount(program.discountType as RewardType, Number(program.discountValue), subtotal)
+         : 0,
++      gift,
+       program,
+       visits: customer.visitsInCycle,
+       lastVisitAt: customer.lastVisitAt,
+@@ -497,6 +724,8 @@ export const loyaltyService = {
+           discountType: program.discountType,
+           discountValue: program.discountValue,
+           visitsUsed: program.visitsRequired,
++          giftId: plan.gift?.id ?? null,
++          giftName: plan.gift?.name ?? null,
+         },
+       });
+       visits -= program.visitsRequired;
+@@ -513,6 +742,7 @@ export const loyaltyService = {
+             discountType: program.discountType,
+             discountValue: Number(program.discountValue),
+             discountApplied: plan.discount,
++            giftName: plan.gift?.name ?? null,
+           },
+         },
+       });
+@@ -534,6 +764,8 @@ export const loyaltyService = {
+       customerName: plan.customerName,
+       redeemed: plan.redeem,
+       discountApplied: plan.discount,
++      giftName: plan.gift?.name ?? null,
++      giftProductId: plan.gift?.productId ?? null,
+       visitRegistered,
+       visitPending: !ctx.paymentApproved,
+       visits,
+diff --git a/src/modules/sales/service.ts b/src/modules/sales/service.ts
+index 7249863..b4b7db1 100644
+--- a/src/modules/sales/service.ts
++++ b/src/modules/sales/service.ts
+@@ -34,6 +34,8 @@ export const saleSchema = z
+     // Programa de clientes frecuentes (opcional): cliente identificado y si se canjea su descuento.
+     loyaltyCustomerId: z.string().min(1).optional(),
+     redeemLoyalty: z.boolean().default(false),
++    // Si la recompensa es un producto de regalo: cuál de los disponibles se entrega.
++    loyaltyGiftId: z.string().min(1).optional(),
+     // Cupón de promoción (opcional) escrito por el cajero.
+     couponCode: z.string().trim().max(20).optional(),
+   })
+@@ -142,12 +144,13 @@ export const salesService = {
+     //    clientes frecuentes, si el cliente fue identificado).
+     const { order, loyalty } = await prisma.$transaction(async (tx) => {
+       const plan = input.loyaltyCustomerId
+-        ? await loyaltyService.prepareForSale(tx, companyId, input.loyaltyCustomerId, input.redeemLoyalty, subtotal - promo.discount)
++        ? await loyaltyService.prepareForSale(tx, companyId, input.loyaltyCustomerId, input.redeemLoyalty, subtotal - promo.discount, input.loyaltyGiftId)
+         : null;
+ 
+       // Si canjea su descuento de cliente frecuente, ese descuento (calculado en el servidor)
+       // reemplaza al descuento manual del cajero.
+-      const manualDiscount = plan?.redeem ? 0 : input.discount;
++      // (Si la recompensa es un producto de regalo no hay descuento: el manual se respeta.)
++      const manualDiscount = plan?.redeem && !plan.gift ? 0 : input.discount;
+       const discount = Math.min(manualDiscount + (plan?.discount ?? 0) + promo.discount, subtotal); // el descuento nunca deja el total en negativo
+       const total = subtotal - discount;
+ 
+@@ -168,6 +171,16 @@ export const salesService = {
+           ? input.cashReceived - payable
+           : undefined;
+ 
++      // Producto de regalo: si está vinculado a un producto del POS entra a la venta en $0 (aparece en
++      // cocina y descuenta inventario); si es un regalo escrito a mano, queda anotado en la orden.
++      const giftItem = plan?.gift?.productId
++        ? { productId: plan.gift.productId, quantity: 1, unitPriceAtSale: 0, lineTotal: 0, extraCostAtSale: 0 }
++        : null;
++      const orderNotes =
++        [input.notes?.trim(), plan?.gift && !plan.gift.productId ? `Regalo cliente frecuente: ${plan.gift.name}` : null]
++          .filter(Boolean)
++          .join(" · ") || null;
++
+       const order = await tx.order.create({
+         data: {
+           localId: crypto.randomUUID(),
+@@ -178,14 +191,14 @@ export const salesService = {
+           tableId: input.tableId ?? null,
+           status: "PENDING",
+           orderType: input.orderType,
+-          notes: input.notes?.trim() || null,
++          notes: orderNotes,
+           deliveryAddress: input.orderType === "DOMICILIO" ? input.deliveryAddress?.trim() : null,
+           subtotal,
+           discount,
+           tax: 0,
+           total,
+           tip,
+-          items: { create: orderItemsData },
++          items: { create: giftItem ? [...orderItemsData, giftItem] : orderItemsData },
+           payments: {
+             create: {
+               method: input.paymentMethod,
+@@ -231,11 +244,10 @@ export const salesService = {
+     if (input.paymentMethod !== "MERCADOPAGO" && input.paymentMethod !== "MERCADOPAGO_TERMINAL") {
+       const { inventoryService } = await import("@/modules/inventory/service");
+       try {
+-        await inventoryService.deductForSale(
+-          branchId,
+-          userId,
+-          expandMenuInventory(input.items.map((i, idx) => ({ productId: i.productId, quantity: i.quantity, menuChoices: resolved[idx].choices })))
+-        );
++        const inventoryItems = input.items.map((i, idx) => ({ productId: i.productId, quantity: i.quantity, menuChoices: resolved[idx].choices }));
++        // El producto de regalo también sale del inventario.
++        if (loyalty?.giftProductId) inventoryItems.push({ productId: loyalty.giftProductId, quantity: 1, menuChoices: [] });
++        await inventoryService.deductForSale(branchId, userId, expandMenuInventory(inventoryItems));
+       } catch {
+         // El inventario es informativo respecto a la venta; un fallo aquí
+         // no debe revertir un cobro ya realizado al cliente.
+diff --git a/src/modules/tableTabs/service.ts b/src/modules/tableTabs/service.ts
+index ade2692..48e9b28 100644
+--- a/src/modules/tableTabs/service.ts
++++ b/src/modules/tableTabs/service.ts
+@@ -32,6 +32,8 @@ export const closeTabSchema = z.object({
+   // Programa de clientes frecuentes (opcional): cliente identificado y si se canjea su descuento.
+   loyaltyCustomerId: z.string().min(1).optional(),
+   redeemLoyalty: z.boolean().default(false),
++  // Si la recompensa es un producto de regalo: cuál de los disponibles se entrega.
++  loyaltyGiftId: z.string().min(1).optional(),
+   // Cupón de promoción (opcional) escrito por el cajero.
+   couponCode: z.string().trim().max(20).optional(),
+ });
+@@ -246,12 +248,13 @@ export const tableTabsService = {
+ 
+     const { updated, total, loyalty } = await prisma.$transaction(async (tx) => {
+       const plan = input.loyaltyCustomerId
+-        ? await loyaltyService.prepareForSale(tx, companyId, input.loyaltyCustomerId, input.redeemLoyalty, subtotal - promo.discount)
++        ? await loyaltyService.prepareForSale(tx, companyId, input.loyaltyCustomerId, input.redeemLoyalty, subtotal - promo.discount, input.loyaltyGiftId)
+         : null;
+ 
+       // Si canjea su descuento de cliente frecuente, ese descuento (calculado en el servidor)
+       // reemplaza al descuento manual.
+-      const manualDiscount = plan?.redeem ? 0 : input.discount;
++      // (Si la recompensa es un producto de regalo no hay descuento: el manual se respeta.)
++      const manualDiscount = plan?.redeem && !plan.gift ? 0 : input.discount;
+       const discount = Math.min(manualDiscount + (plan?.discount ?? 0) + promo.discount, subtotal);
+       const total = subtotal - discount;
+ 
+@@ -269,6 +272,14 @@ export const tableTabsService = {
+       const change =
+         input.paymentMethod === "CASH" && input.cashReceived !== undefined ? input.cashReceived - payable : undefined;
+ 
++      // Producto de regalo: si está vinculado al POS entra a la cuenta en $0 como una ronda nueva
++      // (cocina lo ve como un ticket aparte); si es un regalo escrito a mano, queda anotado.
++      const nextRound = Math.max(0, ...order.items.map((i) => i.roundNumber)) + 1;
++      const giftItem = plan?.gift?.productId
++        ? { productId: plan.gift.productId, quantity: 1, unitPriceAtSale: 0, lineTotal: 0, roundNumber: nextRound }
++        : null;
++      const giftNote = plan?.gift && !plan.gift.productId ? `Regalo cliente frecuente: ${plan.gift.name}` : null;
++
+       const updated = await tx.order.update({
+         where: { id: orderId },
+         data: {
+@@ -277,6 +288,8 @@ export const tableTabsService = {
+           total,
+           tip,
+           ...(plan ? { customerId: plan.customerId } : {}),
++          ...(giftItem ? { items: { create: giftItem } } : {}),
++          ...(giftNote ? { notes: [order.notes, giftNote].filter(Boolean).join(" · ") } : {}),
+           payments: {
+             create: {
+               method: input.paymentMethod,
+@@ -306,6 +319,20 @@ export const tableTabsService = {
+       return { updated, total, loyalty };
+     });
+ 
++    // El producto de regalo también sale del inventario (el resto de la cuenta ya se descontó por ronda).
++    if (loyalty?.giftProductId) {
++      try {
++        const { inventoryService } = await import("@/modules/inventory/service");
++        await inventoryService.deductForSale(
++          order.branchId,
++          userId,
++          expandMenuInventory([{ productId: loyalty.giftProductId, quantity: 1, menuChoices: [] }])
++        );
++      } catch {
++        // El inventario es informativo; no debe bloquear el cobro de la cuenta.
++      }
++    }
++
+     await prisma.auditLog.create({
+       data: {
+         companyId,

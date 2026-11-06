@@ -1,0 +1,2711 @@
+diff --git a/prisma/migrations/20261029210000_checador_asistencia/migration.sql b/prisma/migrations/20261029210000_checador_asistencia/migration.sql
+new file mode 100644
+index 0000000..cb40f7c
+--- /dev/null
++++ b/prisma/migrations/20261029210000_checador_asistencia/migration.sql
+@@ -0,0 +1,100 @@
++-- CreateEnum
++CREATE TYPE "AttendanceKind" AS ENUM ('IN', 'OUT');
++
++-- CreateEnum
++CREATE TYPE "AttendanceSource" AS ENUM ('KIOSK', 'MANUAL');
++
++-- CreateEnum
++CREATE TYPE "ShiftType" AS ENUM ('DIURNA', 'NOCTURNA', 'MIXTA');
++
++-- CreateTable
++CREATE TABLE "attendance_settings" (
++    "id" TEXT NOT NULL,
++    "companyId" TEXT NOT NULL,
++    "timezone" TEXT NOT NULL DEFAULT 'America/Monterrey',
++    "requirePhoto" BOOLEAN NOT NULL DEFAULT true,
++    "lateToleranceMinutes" INTEGER NOT NULL DEFAULT 10,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++
++    CONSTRAINT "attendance_settings_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateTable
++CREATE TABLE "employees" (
++    "id" TEXT NOT NULL,
++    "companyId" TEXT NOT NULL,
++    "branchId" TEXT NOT NULL,
++    "code" INTEGER NOT NULL,
++    "name" TEXT NOT NULL,
++    "position" TEXT,
++    "pinHash" TEXT NOT NULL,
++    "pinFailedCount" INTEGER NOT NULL DEFAULT 0,
++    "pinLockedUntil" TIMESTAMP(3),
++    "shiftType" "ShiftType" NOT NULL DEFAULT 'DIURNA',
++    "shiftStart" TEXT,
++    "workDays" TEXT NOT NULL DEFAULT '1,2,3,4,5,6',
++    "isActive" BOOLEAN NOT NULL DEFAULT true,
++    "consentAcceptedAt" TIMESTAMP(3),
++    "consentVersion" INTEGER,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++
++    CONSTRAINT "employees_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateTable
++CREATE TABLE "attendance_records" (
++    "id" TEXT NOT NULL,
++    "companyId" TEXT NOT NULL,
++    "employeeId" TEXT NOT NULL,
++    "branchId" TEXT NOT NULL,
++    "kind" "AttendanceKind" NOT NULL,
++    "source" "AttendanceSource" NOT NULL DEFAULT 'KIOSK',
++    "punchedAt" TIMESTAMP(3) NOT NULL,
++    "photoUrl" TEXT,
++    "deviceUserId" TEXT,
++    "ipAddress" TEXT,
++    "note" TEXT,
++    "createdById" TEXT,
++    "voidedAt" TIMESTAMP(3),
++    "voidedById" TEXT,
++    "voidReason" TEXT,
++    "prevHash" TEXT,
++    "hash" TEXT NOT NULL,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++
++    CONSTRAINT "attendance_records_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateIndex
++CREATE UNIQUE INDEX "attendance_settings_companyId_key" ON "attendance_settings"("companyId");
++
++-- CreateIndex
++CREATE INDEX "employees_companyId_branchId_idx" ON "employees"("companyId", "branchId");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "employees_companyId_code_key" ON "employees"("companyId", "code");
++
++-- CreateIndex
++CREATE INDEX "attendance_records_companyId_punchedAt_idx" ON "attendance_records"("companyId", "punchedAt");
++
++-- CreateIndex
++CREATE INDEX "attendance_records_employeeId_createdAt_idx" ON "attendance_records"("employeeId", "createdAt");
++
++-- AddForeignKey
++ALTER TABLE "attendance_settings" ADD CONSTRAINT "attendance_settings_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "employees" ADD CONSTRAINT "employees_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "employees" ADD CONSTRAINT "employees_branchId_fkey" FOREIGN KEY ("branchId") REFERENCES "branches"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "attendance_records" ADD CONSTRAINT "attendance_records_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "companies"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "attendance_records" ADD CONSTRAINT "attendance_records_employeeId_fkey" FOREIGN KEY ("employeeId") REFERENCES "employees"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "attendance_records" ADD CONSTRAINT "attendance_records_branchId_fkey" FOREIGN KEY ("branchId") REFERENCES "branches"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 3289f8d..b0ca21c 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -58,6 +58,11 @@ model Company {
+   promotions         Promotion[]
+   ingredients        Ingredient[]
+ 
++  // Checador de asistencia (feature "checador_asistencia")
++  attendanceSettings AttendanceSettings?
++  employees          Employee[]
++  attendanceRecords  AttendanceRecord[]
++
+   @@map("companies")
+ }
+ 
+@@ -140,6 +145,8 @@ model Branch {
+   inventoryMovements InventoryMovement[]
+   tables             Table[]
+   mercadoPagoTerminal MercadoPagoTerminal?
++  employees           Employee[]
++  attendanceRecords   AttendanceRecord[]
+ 
+   @@index([companyId])
+   stocks          BranchStock[]
+@@ -793,6 +800,114 @@ model LoyaltyRedemption {
+   @@map("loyalty_redemptions")
+ }
+ 
++// ------------------------------------------------------------
++// CHECADOR DE ASISTENCIA (registro electrónico de jornada)
++// ------------------------------------------------------------
++
++enum AttendanceKind {
++  IN
++  OUT
++}
++
++enum AttendanceSource {
++  KIOSK  // checada hecha por el empleado en el quiosco (PIN + foto)
++  MANUAL // captura de un gerente/administrador, siempre con motivo y auditoría
++}
++
++enum ShiftType {
++  DIURNA
++  NOCTURNA
++  MIXTA
++}
++
++/// Configuración del checador de cada empresa (una por empresa, se crea al primer uso).
++model AttendanceSettings {
++  id                   String   @id @default(uuid())
++  companyId            String   @unique
++  company              Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
++
++  timezone             String   @default("America/Monterrey")
++  requirePhoto         Boolean  @default(true)
++  lateToleranceMinutes Int      @default(10)
++  updatedAt            DateTime @updatedAt
++
++  @@map("attendance_settings")
++}
++
++/// Persona que checa. No siempre tiene usuario de Tappy (lavaloza, ayudante...), por eso es
++/// un modelo aparte. Se identifica en el quiosco con número de empleado + PIN (el PIN se
++/// guarda cifrado con bcrypt, nunca en claro).
++model Employee {
++  id        String  @id @default(uuid())
++  companyId String
++  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
++  branchId  String
++  branch    Branch  @relation(fields: [branchId], references: [id])
++
++  code     Int // número de empleado, único por empresa
++  name     String
++  position String?
++
++  pinHash        String
++  pinFailedCount Int       @default(0)
++  pinLockedUntil DateTime?
++
++  shiftType  ShiftType @default(DIURNA)
++  shiftStart String? // "HH:mm" hora de entrada programada (para retardos)
++  workDays   String    @default("1,2,3,4,5,6") // días de trabajo, ISO: 1 = lunes ... 7 = domingo
++
++  isActive Boolean @default(true)
++
++  // Aceptación del empleado de que su asistencia se registre electrónicamente (PIN + foto).
++  consentAcceptedAt DateTime?
++  consentVersion    Int?
++
++  createdAt DateTime @default(now())
++  updatedAt DateTime @updatedAt
++
++  records AttendanceRecord[]
++
++  @@unique([companyId, code])
++  @@index([companyId, branchId])
++  @@map("employees")
++}
++
++/// Una marca de entrada o salida. NUNCA se edita ni se borra: una marca equivocada se ANULA
++/// (queda guardada con quién y por qué), y una olvidada se agrega como MANUAL con motivo.
++/// Cada marca encadena el hash de la anterior del mismo empleado para poder demostrar que el
++/// historial no fue alterado.
++model AttendanceRecord {
++  id         String   @id @default(uuid())
++  companyId  String
++  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
++  employeeId String
++  employee   Employee @relation(fields: [employeeId], references: [id])
++  branchId   String
++  branch     Branch   @relation(fields: [branchId], references: [id])
++
++  kind      AttendanceKind
++  source    AttendanceSource @default(KIOSK)
++  punchedAt DateTime // hora del servidor (nunca la del equipo del restaurante)
++
++  photoUrl     String?
++  deviceUserId String? // usuario de Tappy con sesión abierta en el equipo del quiosco
++  ipAddress    String?
++  note         String? // motivo (captura manual)
++  createdById  String? // quien hizo la captura manual
++
++  voidedAt   DateTime?
++  voidedById String?
++  voidReason String?
++
++  prevHash  String?
++  hash      String
++  createdAt DateTime @default(now())
++
++  @@index([companyId, punchedAt])
++  @@index([employeeId, createdAt])
++  @@map("attendance_records")
++}
++
+ // ------------------------------------------------------------
+ // AUDITORÍA
+ // ------------------------------------------------------------
+diff --git a/src/app/(company)/checador/empleados/employees-client.tsx b/src/app/(company)/checador/empleados/employees-client.tsx
+new file mode 100644
+index 0000000..d6089d0
+--- /dev/null
++++ b/src/app/(company)/checador/empleados/employees-client.tsx
+@@ -0,0 +1,299 @@
++"use client";
++
++import { useState } from "react";
++import { useRouter } from "next/navigation";
++import { Button, Card, StatusBadge } from "@/components/ui";
++import { Field, Modal, inputClass } from "@/components/ui/modal";
++import { ResponsiveTable, type ResponsiveColumn } from "@/components/ui/responsive-table";
++import { TIMEZONES } from "@/lib/attendance";
++
++type Employee = {
++  id: string;
++  code: number;
++  name: string;
++  position: string | null;
++  branchId: string;
++  branch: { name: string };
++  shiftType: "DIURNA" | "NOCTURNA" | "MIXTA";
++  shiftStart: string | null;
++  workDays: string;
++  isActive: boolean;
++  consentAcceptedAt: string | null;
++};
++type Branch = { id: string; name: string };
++type Settings = { timezone: string; requirePhoto: boolean; lateToleranceMinutes: number };
++
++const DAY_LABELS = [
++  { n: 1, label: "L" },
++  { n: 2, label: "M" },
++  { n: 3, label: "Mi" },
++  { n: 4, label: "J" },
++  { n: 5, label: "V" },
++  { n: 6, label: "S" },
++  { n: 7, label: "D" },
++];
++const SHIFT_LABELS = { DIURNA: "Diurno (8 h)", NOCTURNA: "Nocturno (7 h)", MIXTA: "Mixto (7.5 h)" };
++
++type FormState = {
++  id: string | null;
++  name: string;
++  position: string;
++  branchId: string;
++  pin: string;
++  shiftType: Employee["shiftType"];
++  shiftStart: string;
++  workDays: number[];
++  isActive: boolean;
++};
++
++export function EmployeesClient({
++  initialEmployees,
++  branches,
++  initialSettings,
++}: {
++  initialEmployees: Employee[];
++  branches: Branch[];
++  initialSettings: Settings;
++}) {
++  const router = useRouter();
++  const [settings, setSettings] = useState(initialSettings);
++  const [settingsMsg, setSettingsMsg] = useState("");
++  const [form, setForm] = useState<FormState | null>(null);
++  const [error, setError] = useState("");
++  const [busy, setBusy] = useState(false);
++
++  function openNew() {
++    setError("");
++    setForm({ id: null, name: "", position: "", branchId: branches[0]?.id ?? "", pin: "", shiftType: "DIURNA", shiftStart: "", workDays: [1, 2, 3, 4, 5, 6], isActive: true });
++  }
++
++  function openEdit(e: Employee) {
++    setError("");
++    setForm({
++      id: e.id,
++      name: e.name,
++      position: e.position ?? "",
++      branchId: e.branchId,
++      pin: "",
++      shiftType: e.shiftType,
++      shiftStart: e.shiftStart ?? "",
++      workDays: e.workDays.split(",").map(Number).filter(Boolean),
++      isActive: e.isActive,
++    });
++  }
++
++  async function save() {
++    if (!form) return;
++    setBusy(true);
++    setError("");
++    const body = {
++      name: form.name,
++      position: form.position || null,
++      branchId: form.branchId,
++      shiftType: form.shiftType,
++      shiftStart: form.shiftStart || null,
++      workDays: form.workDays,
++      ...(form.pin ? { pin: form.pin } : {}),
++      ...(form.id ? { isActive: form.isActive } : {}),
++    };
++    const res = await fetch(form.id ? `/api/attendance/employees/${form.id}` : "/api/attendance/employees", {
++      method: form.id ? "PATCH" : "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify(body),
++    });
++    const data = await res.json().catch(() => ({}));
++    setBusy(false);
++    if (!res.ok) {
++      setError(data.error ?? "No se pudo guardar");
++      return;
++    }
++    setForm(null);
++    router.refresh();
++  }
++
++  async function saveSettings() {
++    setSettingsMsg("");
++    const res = await fetch("/api/attendance/settings", {
++      method: "PUT",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify(settings),
++    });
++    const data = await res.json().catch(() => ({}));
++    setSettingsMsg(res.ok ? "Configuración guardada" : data.error ?? "No se pudo guardar");
++  }
++
++  const columns: ResponsiveColumn<Employee>[] = [
++    { key: "code", header: "No.", render: (e) => <span className="font-medium">{e.code}</span>, mobile: "aside" },
++    {
++      key: "name",
++      header: "Empleado",
++      mobile: "title",
++      render: (e) => (
++        <div>
++          <p className="font-medium">{e.name}</p>
++          {e.position && <p className="text-xs text-muted">{e.position}</p>}
++        </div>
++      ),
++    },
++    { key: "branch", header: "Sucursal", render: (e) => e.branch.name },
++    {
++      key: "shift",
++      header: "Horario",
++      render: (e) => `${SHIFT_LABELS[e.shiftType]}${e.shiftStart ? ` · entra ${e.shiftStart}` : ""}`,
++    },
++    {
++      key: "days",
++      header: "Días",
++      render: (e) =>
++        e.workDays
++          .split(",")
++          .map((n) => DAY_LABELS.find((d) => d.n === Number(n))?.label)
++          .filter(Boolean)
++          .join(" "),
++    },
++    {
++      key: "consent",
++      header: "Aviso aceptado",
++      render: (e) => (e.consentAcceptedAt ? "Sí" : <span className="text-muted">Pendiente (lo acepta al checar)</span>),
++    },
++    {
++      key: "status",
++      header: "Estado",
++      render: (e) => <StatusBadge status={e.isActive ? "active" : "inactive"} label={e.isActive ? "Activo" : "Inactivo"} />,
++    },
++  ];
++
++  return (
++    <div className="space-y-8">
++      <Card className="p-5">
++        <h2 className="font-display text-lg font-semibold mb-3">Configuración del checador</h2>
++        <div className="grid gap-4 sm:grid-cols-3">
++          <Field label="Zona horaria">
++            <select className={inputClass} value={settings.timezone} onChange={(e) => setSettings({ ...settings, timezone: e.target.value })}>
++              {TIMEZONES.map((t) => (
++                <option key={t.value} value={t.value}>
++                  {t.label}
++                </option>
++              ))}
++            </select>
++          </Field>
++          <Field label="Tolerancia de retardo (minutos)">
++            <input
++              type="number"
++              min={0}
++              max={60}
++              className={inputClass}
++              value={settings.lateToleranceMinutes}
++              onChange={(e) => setSettings({ ...settings, lateToleranceMinutes: Math.max(0, Math.min(60, Number(e.target.value) || 0)) })}
++            />
++          </Field>
++          <Field label="Foto al checar">
++            <label className="flex items-center gap-2 text-sm py-2">
++              <input type="checkbox" className="h-5 w-5" checked={settings.requirePhoto} onChange={(e) => setSettings({ ...settings, requirePhoto: e.target.checked })} />
++              Obligatoria (recomendado)
++            </label>
++          </Field>
++        </div>
++        <div className="flex items-center gap-3">
++          <Button onClick={saveSettings}>Guardar configuración</Button>
++          {settingsMsg && <span className="text-sm text-muted">{settingsMsg}</span>}
++        </div>
++      </Card>
++
++      <div>
++        <div className="flex items-center justify-between mb-3">
++          <h2 className="font-display text-lg font-semibold">Empleados</h2>
++          <Button onClick={openNew} disabled={branches.length === 0}>
++            + Nuevo empleado
++          </Button>
++        </div>
++        {initialEmployees.length === 0 ? (
++          <p className="text-sm text-muted">Aún no hay empleados. Agrega el primero para que pueda checar en el quiosco.</p>
++        ) : (
++          <ResponsiveTable columns={columns} rows={initialEmployees} getRowId={(e) => e.id} renderActions={(e) => (
++            <Button variant="secondary" onClick={() => openEdit(e)}>
++              Editar
++            </Button>
++          )} />
++        )}
++      </div>
++
++      <Modal open={!!form} onClose={() => setForm(null)} title={form?.id ? "Editar empleado" : "Nuevo empleado"}>
++        {form && (
++          <div>
++            <Field label="Nombre completo">
++              <input className={inputClass} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
++            </Field>
++            <Field label="Puesto (opcional)">
++              <input className={inputClass} value={form.position} onChange={(e) => setForm({ ...form, position: e.target.value })} />
++            </Field>
++            {branches.length > 1 && (
++              <Field label="Sucursal">
++                <select className={inputClass} value={form.branchId} onChange={(e) => setForm({ ...form, branchId: e.target.value })}>
++                  {branches.map((b) => (
++                    <option key={b.id} value={b.id}>
++                      {b.name}
++                    </option>
++                  ))}
++                </select>
++              </Field>
++            )}
++            <Field label={form.id ? "Nuevo PIN (déjalo vacío para no cambiarlo)" : "PIN (4 a 6 números)"}>
++              <input
++                inputMode="numeric"
++                autoComplete="off"
++                className={inputClass}
++                value={form.pin}
++                onChange={(e) => setForm({ ...form, pin: e.target.value.replace(/\D/g, "").slice(0, 6) })}
++              />
++            </Field>
++            <Field label="Tipo de turno">
++              <select className={inputClass} value={form.shiftType} onChange={(e) => setForm({ ...form, shiftType: e.target.value as FormState["shiftType"] })}>
++                {Object.entries(SHIFT_LABELS).map(([k, v]) => (
++                  <option key={k} value={k}>
++                    {v}
++                  </option>
++                ))}
++              </select>
++            </Field>
++            <Field label="Hora de entrada programada (para retardos, opcional)">
++              <input type="time" className={inputClass} value={form.shiftStart} onChange={(e) => setForm({ ...form, shiftStart: e.target.value })} />
++            </Field>
++            <Field label="Días que trabaja">
++              <div className="flex flex-wrap gap-2">
++                {DAY_LABELS.map((d) => {
++                  const on = form.workDays.includes(d.n);
++                  return (
++                    <button
++                      key={d.n}
++                      type="button"
++                      onClick={() => setForm({ ...form, workDays: on ? form.workDays.filter((n) => n !== d.n) : [...form.workDays, d.n] })}
++                      className={`h-10 w-10 rounded-md border text-sm font-medium ${on ? "border-ember bg-ember text-white" : "border-line bg-white"}`}
++                    >
++                      {d.label}
++                    </button>
++                  );
++                })}
++              </div>
++            </Field>
++            {form.id && (
++              <label className="flex items-center gap-2 text-sm mb-4">
++                <input type="checkbox" className="h-5 w-5" checked={form.isActive} onChange={(e) => setForm({ ...form, isActive: e.target.checked })} />
++                Empleado activo (si se desmarca ya no puede checar; su historial se conserva)
++              </label>
++            )}
++            {error && <p className="text-sm text-ember-dark mb-3">{error}</p>}
++            <div className="flex gap-3">
++              <Button onClick={save} disabled={busy}>
++                {busy ? "Guardando..." : "Guardar"}
++              </Button>
++              <Button variant="secondary" onClick={() => setForm(null)}>
++                Cancelar
++              </Button>
++            </div>
++          </div>
++        )}
++      </Modal>
++    </div>
++  );
++}
+diff --git a/src/app/(company)/checador/empleados/page.tsx b/src/app/(company)/checador/empleados/page.tsx
+new file mode 100644
+index 0000000..7795f81
+--- /dev/null
++++ b/src/app/(company)/checador/empleados/page.tsx
+@@ -0,0 +1,57 @@
++import { redirect } from "next/navigation";
++import Link from "next/link";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { prisma } from "@/lib/prisma";
++import { attendanceService } from "@/modules/attendance/service";
++import { EmployeesClient } from "./employees-client";
++
++export const dynamic = "force-dynamic";
++
++export default async function EmpleadosChecadorPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++  const companyId = session.user.companyId;
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.USERS_MANAGE)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++  if (!(await hasFeature(companyId, FEATURE_KEYS.CHECADOR_ASISTENCIA))) redirect("/checador");
++
++  const [employees, settings, branches] = await Promise.all([
++    attendanceService.listEmployees(companyId),
++    attendanceService.getSettings(companyId),
++    prisma.branch.findMany({ where: { companyId, isActive: true }, select: { id: true, name: true }, orderBy: { createdAt: "asc" } }),
++  ]);
++
++  return (
++    <div>
++      <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
++        <div>
++          <h1 className="font-display text-3xl font-semibold mb-1">Checador: empleados</h1>
++          <p className="text-muted text-sm">Da de alta a quien checa, asigna su PIN y su horario.</p>
++        </div>
++        <div className="flex gap-2 text-sm">
++          <Link href="/checador" className="rounded-md border border-line bg-white px-3 py-2 font-medium hover:bg-paper">
++            Quiosco
++          </Link>
++          <Link href="/checador/reporte" className="rounded-md border border-line bg-white px-3 py-2 font-medium hover:bg-paper">
++            Reporte
++          </Link>
++        </div>
++      </div>
++      <EmployeesClient
++        initialEmployees={JSON.parse(JSON.stringify(employees))}
++        branches={branches}
++        initialSettings={{
++          timezone: settings.timezone,
++          requirePhoto: settings.requirePhoto,
++          lateToleranceMinutes: settings.lateToleranceMinutes,
++        }}
++      />
++    </div>
++  );
++}
+diff --git a/src/app/(company)/checador/kiosk-client.tsx b/src/app/(company)/checador/kiosk-client.tsx
+new file mode 100644
+index 0000000..96eece2
+--- /dev/null
++++ b/src/app/(company)/checador/kiosk-client.tsx
+@@ -0,0 +1,296 @@
++"use client";
++
++import { useCallback, useEffect, useRef, useState } from "react";
++import { Button, Card } from "@/components/ui";
++import { CONSENT_TEXT } from "@/lib/attendance";
++
++type Result = { kind: "IN" | "OUT"; employeeName: string; punchedAt: string; sessionMinutes: number | null };
++type Field = "code" | "pin";
++
++const RESULT_SECONDS = 6;
++
++function formatDuration(minutes: number) {
++  return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
++}
++
++export function KioskClient({ requirePhoto, timezone }: { requirePhoto: boolean; timezone: string }) {
++  const videoRef = useRef<HTMLVideoElement>(null);
++  const streamRef = useRef<MediaStream | null>(null);
++  const photoRef = useRef<Blob | null>(null);
++
++  const [cameraOn, setCameraOn] = useState(false);
++  const [cameraError, setCameraError] = useState("");
++  const [code, setCode] = useState("");
++  const [pin, setPin] = useState("");
++  const [active, setActive] = useState<Field>("code");
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState("");
++  const [result, setResult] = useState<Result | null>(null);
++  const [consentFor, setConsentFor] = useState<string | null>(null);
++  const [consentChecked, setConsentChecked] = useState(false);
++  const [now, setNow] = useState(() => new Date());
++
++  // Reloj en pantalla (solo para que el empleado vea la hora; el registro usa la hora del servidor).
++  useEffect(() => {
++    const t = setInterval(() => setNow(new Date()), 1000);
++    return () => clearInterval(t);
++  }, []);
++
++  const stopCamera = useCallback(() => {
++    streamRef.current?.getTracks().forEach((t) => t.stop());
++    streamRef.current = null;
++    setCameraOn(false);
++  }, []);
++
++  const startCamera = useCallback(async () => {
++    setCameraError("");
++    try {
++      const stream = await navigator.mediaDevices.getUserMedia({
++        video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
++        audio: false,
++      });
++      streamRef.current = stream;
++      const video = videoRef.current;
++      if (video) {
++        video.srcObject = stream;
++        await video.play();
++      }
++      setCameraOn(true);
++    } catch {
++      setCameraError("No se pudo abrir la cámara. Permite el acceso en el navegador para poder checar con foto.");
++    }
++  }, []);
++
++  useEffect(() => {
++    if (requirePhoto) startCamera();
++    return stopCamera;
++  }, [requirePhoto, startCamera, stopCamera]);
++
++  // La pantalla de resultado se cierra sola.
++  useEffect(() => {
++    if (!result) return;
++    const t = setTimeout(() => setResult(null), RESULT_SECONDS * 1000);
++    return () => clearTimeout(t);
++  }, [result]);
++
++  function capturePhoto(): Promise<Blob | null> {
++    const video = videoRef.current;
++    if (!video || !cameraOn || video.videoWidth === 0) return Promise.resolve(null);
++    const scale = Math.min(1, 480 / video.videoWidth);
++    const canvas = document.createElement("canvas");
++    canvas.width = Math.round(video.videoWidth * scale);
++    canvas.height = Math.round(video.videoHeight * scale);
++    const ctx = canvas.getContext("2d");
++    if (!ctx) return Promise.resolve(null);
++    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
++    return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.7));
++  }
++
++  function press(digit: string) {
++    setError("");
++    if (active === "code") setCode((c) => (c + digit).slice(0, 6));
++    else setPin((p) => (p + digit).slice(0, 6));
++  }
++
++  function backspace() {
++    setError("");
++    if (active === "code") setCode((c) => c.slice(0, -1));
++    else setPin((p) => p.slice(0, -1));
++  }
++
++  function reset() {
++    setCode("");
++    setPin("");
++    setActive("code");
++    setConsentFor(null);
++    setConsentChecked(false);
++    photoRef.current = null;
++  }
++
++  async function submit(acceptConsent: boolean) {
++    setBusy(true);
++    setError("");
++
++    // La foto se toma una sola vez por intento (si hay que aceptar el aviso, se reutiliza).
++    if (!photoRef.current) photoRef.current = await capturePhoto();
++
++    const form = new FormData();
++    form.set("code", code);
++    form.set("pin", pin);
++    if (acceptConsent) form.set("acceptConsent", "1");
++    if (photoRef.current) form.set("photo", photoRef.current, "checada.jpg");
++
++    try {
++      const res = await fetch("/api/attendance/punch", { method: "POST", body: form });
++      const data = await res.json().catch(() => ({}));
++      if (!res.ok) {
++        setError(data.error ?? "No se pudo registrar la marca");
++        setPin("");
++        setActive("pin");
++        photoRef.current = null;
++        return;
++      }
++      if (data.needsConsent) {
++        setConsentFor(data.employeeName);
++        return;
++      }
++      navigator.vibrate?.(100);
++      setResult(data as Result);
++      reset();
++    } catch {
++      setError("Sin conexión. Revisa el internet e intenta de nuevo.");
++      photoRef.current = null;
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  // Computadora: también se puede teclear (números, borrar y Enter).
++  const keyHandlerRef = useRef<(e: KeyboardEvent) => void>(() => {});
++  keyHandlerRef.current = (e: KeyboardEvent) => {
++    if (result || consentFor || busy) return;
++    if (/^\d$/.test(e.key)) press(e.key);
++    else if (e.key === "Backspace") backspace();
++    else if (e.key === "Enter") {
++      if (active === "code" && code) setActive("pin");
++      else if (code.length > 0 && pin.length >= 4 && (!requirePhoto || cameraOn)) submit(false);
++    }
++  };
++  useEffect(() => {
++    const onKey = (e: KeyboardEvent) => keyHandlerRef.current(e);
++    window.addEventListener("keydown", onKey);
++    return () => window.removeEventListener("keydown", onKey);
++  }, []);
++
++  const canSubmit = code.length > 0 && pin.length >= 4 && !busy && (!requirePhoto || cameraOn);
++  const clock = new Intl.DateTimeFormat("es-MX", { timeZone: timezone, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(now);
++  const dateText = new Intl.DateTimeFormat("es-MX", { timeZone: timezone, weekday: "long", day: "numeric", month: "long" }).format(now);
++
++  // ── Resultado ───────────────────────────────────────────────────────
++  if (result) {
++    const isIn = result.kind === "IN";
++    const time = new Intl.DateTimeFormat("es-MX", { timeZone: timezone, hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(result.punchedAt));
++    return (
++      <Card className={`max-w-xl mx-auto p-8 text-center ${isIn ? "border-sage/40 bg-sage-light" : "border-marigold/40 bg-marigold/10"}`}>
++        <p className="text-5xl mb-3">{isIn ? "✅" : "👋"}</p>
++        <p className="font-display text-3xl font-semibold">{isIn ? "Entrada registrada" : "Salida registrada"}</p>
++        <p className="text-xl mt-2">{result.employeeName}</p>
++        <p className="font-display text-5xl font-semibold mt-4">{time}</p>
++        {result.sessionMinutes !== null && (
++          <p className="text-muted mt-3">Tiempo de esta jornada: {formatDuration(result.sessionMinutes)}</p>
++        )}
++        <Button className="mt-6" variant="secondary" onClick={() => setResult(null)}>
++          Listo
++        </Button>
++      </Card>
++    );
++  }
++
++  // ── Aviso / aceptación (primera vez) ────────────────────────────────
++  if (consentFor) {
++    return (
++      <Card className="max-w-xl mx-auto p-6">
++        <p className="text-sm text-muted mb-1">Hola, {consentFor}</p>
++        <h2 className="font-display text-xl font-semibold mb-3">Antes de checar por primera vez</h2>
++        <div className="max-h-72 overflow-y-auto rounded-md border border-line bg-paper p-4 text-sm whitespace-pre-line">{CONSENT_TEXT}</div>
++        <label className="flex items-start gap-3 mt-4 text-sm">
++          <input type="checkbox" className="mt-1 h-5 w-5" checked={consentChecked} onChange={(e) => setConsentChecked(e.target.checked)} />
++          <span>He leído el aviso y acepto que mi asistencia se registre con mi número de empleado, PIN y fotografía.</span>
++        </label>
++        {error && <p className="text-sm text-ember-dark mt-3">{error}</p>}
++        <div className="flex gap-3 mt-5">
++          <Button disabled={!consentChecked || busy} onClick={() => submit(true)}>
++            {busy ? "Registrando..." : "Aceptar y checar"}
++          </Button>
++          <Button
++            variant="secondary"
++            disabled={busy}
++            onClick={() => {
++              reset();
++              setError("");
++            }}
++          >
++            Cancelar
++          </Button>
++        </div>
++      </Card>
++    );
++  }
++
++  // ── Teclado ─────────────────────────────────────────────────────────
++  const keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
++  return (
++    <div className="max-w-3xl mx-auto grid gap-6 md:grid-cols-2">
++      <div>
++        <Card className="p-4 text-center mb-4">
++          <p className="font-display text-5xl font-semibold tabular-nums">{clock}</p>
++          <p className="text-sm text-muted capitalize mt-1">{dateText}</p>
++        </Card>
++
++        {requirePhoto && (
++          <Card className="overflow-hidden relative aspect-[4/3] bg-black/80">
++            <video ref={videoRef} playsInline muted className="h-full w-full object-cover -scale-x-100" />
++            {!cameraOn && (
++              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-4 text-center text-white text-sm">
++                <p>{cameraError || "Abriendo cámara..."}</p>
++                {cameraError && (
++                  <Button variant="secondary" onClick={startCamera}>
++                    Reintentar
++                  </Button>
++                )}
++              </div>
++            )}
++          </Card>
++        )}
++        {requirePhoto && <p className="text-xs text-muted mt-2 text-center">Se toma una foto al checar para comprobar tu asistencia.</p>}
++      </div>
++
++      <Card className="p-4">
++        <div className="grid gap-3 mb-4">
++          {(["code", "pin"] as Field[]).map((f) => (
++            <button
++              key={f}
++              type="button"
++              onClick={() => setActive(f)}
++              className={`rounded-md border px-4 py-3 text-left ${active === f ? "border-ember bg-white" : "border-line bg-paper"}`}
++            >
++              <span className="block text-xs uppercase tracking-wide text-muted">{f === "code" ? "Número de empleado" : "PIN"}</span>
++              <span className="block font-display text-2xl tracking-widest min-h-[2rem]">
++                {f === "code" ? code || "—" : pin ? "•".repeat(pin.length) : "—"}
++              </span>
++            </button>
++          ))}
++        </div>
++
++        <div className="grid grid-cols-3 gap-2">
++          {keys.map((k) => (
++            <button key={k} type="button" onClick={() => press(k)} className="h-14 rounded-md border border-line bg-white text-xl font-medium active:bg-paper">
++              {k}
++            </button>
++          ))}
++          <button type="button" onClick={backspace} className="h-14 rounded-md border border-line bg-white text-xl active:bg-paper" aria-label="Borrar">
++            ⌫
++          </button>
++          <button type="button" onClick={() => press("0")} className="h-14 rounded-md border border-line bg-white text-xl font-medium active:bg-paper">
++            0
++          </button>
++          <button
++            type="button"
++            onClick={() => {
++              setError("");
++              if (active === "code" && code) setActive("pin");
++            }}
++            className="h-14 rounded-md border border-line bg-white text-sm font-medium active:bg-paper"
++          >
++            Siguiente
++          </button>
++        </div>
++
++        {error && <p className="text-sm text-ember-dark mt-3" role="alert">{error}</p>}
++        <Button className="w-full mt-4 h-14 text-base" disabled={!canSubmit} onClick={() => submit(false)}>
++          {busy ? "Registrando..." : "Checar"}
++        </Button>
++      </Card>
++    </div>
++  );
++}
+diff --git a/src/app/(company)/checador/page.tsx b/src/app/(company)/checador/page.tsx
+new file mode 100644
+index 0000000..afc3138
+--- /dev/null
++++ b/src/app/(company)/checador/page.tsx
+@@ -0,0 +1,53 @@
++import { redirect } from "next/navigation";
++import Link from "next/link";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { attendanceService } from "@/modules/attendance/service";
++import { KioskClient } from "./kiosk-client";
++
++export const dynamic = "force-dynamic";
++
++export default async function ChecadorPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++  const companyId = session.user.companyId;
++
++  if (!(await hasFeature(companyId, FEATURE_KEYS.CHECADOR_ASISTENCIA))) {
++    return (
++      <div>
++        <h1 className="font-display text-3xl font-semibold mb-1">Checador</h1>
++        <p className="text-muted text-sm max-w-md mt-6">
++          El checador de asistencia no está incluido en tu plan. Contacta a Tappy para activarlo como complemento.
++        </p>
++      </div>
++    );
++  }
++
++  const settings = await attendanceService.getSettings(companyId);
++  const canManage = hasPermission(session.user.permissions, PERMISSIONS.USERS_MANAGE);
++
++  return (
++    <div>
++      <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
++        <div>
++          <h1 className="font-display text-3xl font-semibold mb-1">Checador</h1>
++          <p className="text-muted text-sm">Cada empleado registra su entrada y salida con su número y PIN.</p>
++        </div>
++        {canManage && (
++          <div className="flex gap-2 text-sm">
++            <Link href="/checador/empleados" className="rounded-md border border-line bg-white px-3 py-2 font-medium hover:bg-paper">
++              Empleados
++            </Link>
++            <Link href="/checador/reporte" className="rounded-md border border-line bg-white px-3 py-2 font-medium hover:bg-paper">
++              Reporte
++            </Link>
++          </div>
++        )}
++      </div>
++      <KioskClient requirePhoto={settings.requirePhoto} timezone={settings.timezone} />
++    </div>
++  );
++}
+diff --git a/src/app/(company)/checador/reporte/page.tsx b/src/app/(company)/checador/reporte/page.tsx
+new file mode 100644
+index 0000000..73fc2e9
+--- /dev/null
++++ b/src/app/(company)/checador/reporte/page.tsx
+@@ -0,0 +1,58 @@
++import { redirect } from "next/navigation";
++import Link from "next/link";
++import { getServerSession } from "next-auth";
++import { authOptions } from "@/lib/auth";
++import { hasPermission, PERMISSIONS, getHomeRoute } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++import { prisma } from "@/lib/prisma";
++import { addDays, localParts } from "@/lib/attendance";
++import { attendanceService } from "@/modules/attendance/service";
++import { ReportClient } from "./report-client";
++
++export const dynamic = "force-dynamic";
++
++export default async function ReporteChecadorPage() {
++  const session = await getServerSession(authOptions);
++  if (!session?.user?.companyId) redirect("/login");
++  const companyId = session.user.companyId;
++
++  if (!hasPermission(session.user.permissions, PERMISSIONS.USERS_MANAGE)) {
++    redirect(getHomeRoute(session.user.permissions));
++  }
++  if (!(await hasFeature(companyId, FEATURE_KEYS.CHECADOR_ASISTENCIA))) redirect("/checador");
++
++  const settings = await attendanceService.getSettings(companyId);
++  const today = localParts(new Date(), settings.timezone).ymd;
++  const [employees, branches] = await Promise.all([
++    prisma.employee.findMany({ where: { companyId }, select: { id: true, code: true, name: true }, orderBy: { code: "asc" } }),
++    prisma.branch.findMany({ where: { companyId, isActive: true }, select: { id: true, name: true }, orderBy: { createdAt: "asc" } }),
++  ]);
++
++  return (
++    <div>
++      <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
++        <div>
++          <h1 className="font-display text-3xl font-semibold mb-1">Checador: reporte</h1>
++          <p className="text-muted text-sm">Horas, retardos, faltas y registro completo de entradas y salidas.</p>
++        </div>
++        <div className="flex gap-2 text-sm">
++          <Link href="/checador" className="rounded-md border border-line bg-white px-3 py-2 font-medium hover:bg-paper">
++            Quiosco
++          </Link>
++          <Link href="/checador/empleados" className="rounded-md border border-line bg-white px-3 py-2 font-medium hover:bg-paper">
++            Empleados
++          </Link>
++        </div>
++      </div>
++      <ReportClient
++        employees={employees}
++        branches={branches}
++        timezone={settings.timezone}
++        defaultFrom={addDays(today, -6)}
++        defaultTo={today}
++        today={today}
++      />
++    </div>
++  );
++}
+diff --git a/src/app/(company)/checador/reporte/report-client.tsx b/src/app/(company)/checador/reporte/report-client.tsx
+new file mode 100644
+index 0000000..f53d47a
+--- /dev/null
++++ b/src/app/(company)/checador/reporte/report-client.tsx
+@@ -0,0 +1,400 @@
++"use client";
++
++import { useCallback, useEffect, useState } from "react";
++import { Button, Card } from "@/components/ui";
++import { Field, Modal, inputClass } from "@/components/ui/modal";
++import { ALERT_LABELS, formatMinutes } from "@/lib/attendance";
++
++type Emp = { id: string; code: number; name: string };
++type Branch = { id: string; name: string };
++type Row = {
++  employeeId: string;
++  code: number;
++  name: string;
++  position: string | null;
++  branch: string;
++  isActive: boolean;
++  totalMinutes: number;
++  daysWorked: number;
++  lates: number;
++  absences: number;
++  overtimeMinutes: number;
++  alerts: string[];
++  chainOk: boolean;
++};
++type Rec = {
++  id: string;
++  kind: "IN" | "OUT";
++  source: "KIOSK" | "MANUAL";
++  punchedAt: string;
++  photoUrl: string | null;
++  note: string | null;
++  voidedAt: string | null;
++  voidReason: string | null;
++  employee: { name: string; code: number };
++  branch: { name: string };
++};
++
++export function ReportClient({
++  employees,
++  branches,
++  timezone,
++  defaultFrom,
++  defaultTo,
++  today,
++}: {
++  employees: Emp[];
++  branches: Branch[];
++  timezone: string;
++  defaultFrom: string;
++  defaultTo: string;
++  today: string;
++}) {
++  const [tab, setTab] = useState<"summary" | "records">("summary");
++  const [from, setFrom] = useState(defaultFrom);
++  const [to, setTo] = useState(defaultTo);
++  const [employeeId, setEmployeeId] = useState("");
++  const [branchId, setBranchId] = useState("");
++  const [rows, setRows] = useState<Row[]>([]);
++  const [records, setRecords] = useState<Rec[]>([]);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState("");
++  const [photo, setPhoto] = useState<Rec | null>(null);
++  const [voiding, setVoiding] = useState<Rec | null>(null);
++  const [voidReason, setVoidReason] = useState("");
++  const [manualOpen, setManualOpen] = useState(false);
++  const [manual, setManual] = useState({ employeeId: "", kind: "IN", date: today, time: "09:00", note: "" });
++  const [busy, setBusy] = useState(false);
++  const [formError, setFormError] = useState("");
++
++  const query = useCallback(() => {
++    const p = new URLSearchParams({ from, to });
++    if (employeeId) p.set("employeeId", employeeId);
++    if (branchId) p.set("branchId", branchId);
++    return p.toString();
++  }, [from, to, employeeId, branchId]);
++
++  const load = useCallback(async () => {
++    setLoading(true);
++    setError("");
++    try {
++      const [r1, r2] = await Promise.all([fetch(`/api/attendance/report?${query()}`), fetch(`/api/attendance/records?${query()}`)]);
++      const d1 = await r1.json().catch(() => ({}));
++      const d2 = await r2.json().catch(() => ({}));
++      if (!r1.ok) throw new Error(d1.error ?? "No se pudo cargar el reporte");
++      if (!r2.ok) throw new Error(d2.error ?? "No se pudieron cargar los registros");
++      setRows(d1.rows);
++      setRecords(d2.records);
++    } catch (e) {
++      setError(e instanceof Error ? e.message : "Error al cargar");
++    } finally {
++      setLoading(false);
++    }
++  }, [query]);
++
++  useEffect(() => {
++    load();
++    // Solo al abrir la pantalla; después se usa el botón "Aplicar".
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, []);
++
++  const fmtDate = (iso: string) =>
++    new Intl.DateTimeFormat("es-MX", { timeZone: timezone, day: "2-digit", month: "short", year: "numeric" }).format(new Date(iso));
++  const fmtTime = (iso: string) =>
++    new Intl.DateTimeFormat("es-MX", { timeZone: timezone, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(iso));
++
++  async function submitVoid() {
++    if (!voiding) return;
++    setBusy(true);
++    setFormError("");
++    const res = await fetch(`/api/attendance/records/${voiding.id}/void`, {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify({ reason: voidReason }),
++    });
++    const data = await res.json().catch(() => ({}));
++    setBusy(false);
++    if (!res.ok) return setFormError(data.error ?? "No se pudo anular");
++    setVoiding(null);
++    setVoidReason("");
++    load();
++  }
++
++  async function submitManual() {
++    setBusy(true);
++    setFormError("");
++    const res = await fetch("/api/attendance/records", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify(manual),
++    });
++    const data = await res.json().catch(() => ({}));
++    setBusy(false);
++    if (!res.ok) return setFormError(data.error ?? "No se pudo guardar");
++    setManualOpen(false);
++    setManual({ ...manual, note: "" });
++    load();
++  }
++
++  return (
++    <div className="space-y-6">
++      <Card className="p-4">
++        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5 items-end">
++          <Field label="Del">
++            <input type="date" className={inputClass} value={from} max={to} onChange={(e) => setFrom(e.target.value)} />
++          </Field>
++          <Field label="Al">
++            <input type="date" className={inputClass} value={to} min={from} onChange={(e) => setTo(e.target.value)} />
++          </Field>
++          <Field label="Empleado">
++            <select className={inputClass} value={employeeId} onChange={(e) => setEmployeeId(e.target.value)}>
++              <option value="">Todos</option>
++              {employees.map((e) => (
++                <option key={e.id} value={e.id}>
++                  {e.code} · {e.name}
++                </option>
++              ))}
++            </select>
++          </Field>
++          {branches.length > 1 ? (
++            <Field label="Sucursal">
++              <select className={inputClass} value={branchId} onChange={(e) => setBranchId(e.target.value)}>
++                <option value="">Todas</option>
++                {branches.map((b) => (
++                  <option key={b.id} value={b.id}>
++                    {b.name}
++                  </option>
++                ))}
++              </select>
++            </Field>
++          ) : (
++            <div />
++          )}
++          <div className="mb-4">
++            <Button onClick={load} disabled={loading} className="w-full">
++              {loading ? "Cargando..." : "Aplicar"}
++            </Button>
++          </div>
++        </div>
++        <div className="flex flex-wrap gap-2 text-sm">
++          <a className="rounded-md border border-line bg-white px-3 py-2 font-medium hover:bg-paper" href={`/api/attendance/export?type=summary&${query()}`}>
++            ⬇ Resumen para nómina (CSV)
++          </a>
++          <a className="rounded-md border border-line bg-white px-3 py-2 font-medium hover:bg-paper" href={`/api/attendance/export?type=records&${query()}`}>
++            ⬇ Registro completo para la autoridad (CSV)
++          </a>
++        </div>
++      </Card>
++
++      {error && <p className="text-sm text-ember-dark">{error}</p>}
++
++      <div className="flex gap-2 border-b border-line">
++        {(["summary", "records"] as const).map((t) => (
++          <button
++            key={t}
++            onClick={() => setTab(t)}
++            className={`px-4 py-2 text-sm font-medium -mb-px border-b-2 ${tab === t ? "border-ember text-ink" : "border-transparent text-muted"}`}
++          >
++            {t === "summary" ? "Resumen" : `Registros (${records.length})`}
++          </button>
++        ))}
++      </div>
++
++      {tab === "summary" && (
++        <div>
++          {rows.length === 0 ? (
++            <p className="text-sm text-muted">No hay empleados para mostrar con estos filtros.</p>
++          ) : (
++            <div className="overflow-x-auto">
++              <Card className="overflow-hidden min-w-[760px]">
++                <table className="w-full text-sm">
++                  <thead className="bg-paper text-xs uppercase text-muted">
++                    <tr>
++                      <th className="text-left px-4 py-3">Empleado</th>
++                      <th className="text-right px-3 py-3">Días</th>
++                      <th className="text-right px-3 py-3">Horas</th>
++                      <th className="text-right px-3 py-3">Retardos</th>
++                      <th className="text-right px-3 py-3">Faltas</th>
++                      <th className="text-right px-3 py-3">Extra (est.)</th>
++                      <th className="text-left px-3 py-3">Alertas</th>
++                      <th className="text-left px-3 py-3">Integridad</th>
++                    </tr>
++                  </thead>
++                  <tbody>
++                    {rows.map((r) => (
++                      <tr key={r.employeeId} className="border-t border-line align-top">
++                        <td className="px-4 py-3">
++                          <p className="font-medium">
++                            {r.code} · {r.name}
++                            {!r.isActive && <span className="ml-2 text-xs text-muted">(inactivo)</span>}
++                          </p>
++                          <p className="text-xs text-muted">{r.branch}</p>
++                        </td>
++                        <td className="px-3 py-3 text-right">{r.daysWorked}</td>
++                        <td className="px-3 py-3 text-right whitespace-nowrap">{formatMinutes(r.totalMinutes)}</td>
++                        <td className="px-3 py-3 text-right">{r.lates}</td>
++                        <td className="px-3 py-3 text-right">{r.absences}</td>
++                        <td className="px-3 py-3 text-right whitespace-nowrap">{formatMinutes(r.overtimeMinutes)}</td>
++                        <td className="px-3 py-3">
++                          <div className="flex flex-wrap gap-1">
++                            {r.alerts.map((a) => (
++                              <span key={a} className="rounded-full bg-marigold/15 px-2 py-0.5 text-xs">
++                                {ALERT_LABELS[a] ?? a}
++                              </span>
++                            ))}
++                          </div>
++                        </td>
++                        <td className="px-3 py-3">
++                          {r.chainOk ? (
++                            <span className="rounded-full bg-sage-light px-2 py-0.5 text-xs text-sage">Verificada</span>
++                          ) : (
++                            <span className="rounded-full bg-ember/10 px-2 py-0.5 text-xs text-ember-dark">Alterada</span>
++                          )}
++                        </td>
++                      </tr>
++                    ))}
++                  </tbody>
++                </table>
++              </Card>
++            </div>
++          )}
++          <p className="text-xs text-muted mt-3 max-w-2xl">
++            Las horas extra son una estimación para apoyar la nómina (se calculan contra la jornada diaria del turno y el tope semanal vigente).
++            El pago final lo define el patrón conforme a la Ley Federal del Trabajo.
++          </p>
++        </div>
++      )}
++
++      {tab === "records" && (
++        <div>
++          <div className="flex justify-end mb-3">
++            <Button
++              variant="secondary"
++              onClick={() => {
++                setFormError("");
++                setManualOpen(true);
++              }}
++              disabled={employees.length === 0}
++            >
++              + Agregar marca olvidada
++            </Button>
++          </div>
++          {records.length === 0 ? (
++            <p className="text-sm text-muted">No hay marcas en este periodo.</p>
++          ) : (
++            <div className="space-y-2">
++              {records.map((r) => (
++                <Card key={r.id} className={`p-3 flex items-center gap-3 ${r.voidedAt ? "opacity-60" : ""}`}>
++                  {r.photoUrl ? (
++                    // eslint-disable-next-line @next/next/no-img-element
++                    <img src={r.photoUrl} alt="Foto de la marca" className="h-14 w-14 rounded-md object-cover cursor-pointer shrink-0" onClick={() => setPhoto(r)} />
++                  ) : (
++                    <div className="h-14 w-14 rounded-md bg-black/5 shrink-0 flex items-center justify-center text-xs text-muted text-center">
++                      {r.source === "MANUAL" ? "Manual" : "Sin foto"}
++                    </div>
++                  )}
++                  <div className="min-w-0 flex-1">
++                    <p className={`font-medium ${r.voidedAt ? "line-through" : ""}`}>
++                      {r.employee.code} · {r.employee.name}
++                    </p>
++                    <p className="text-sm">
++                      <span className={r.kind === "IN" ? "text-sage font-medium" : "text-[#006e85] font-medium"}>{r.kind === "IN" ? "Entrada" : "Salida"}</span>
++                      {" · "}
++                      {fmtDate(r.punchedAt)} {fmtTime(r.punchedAt)}
++                      {" · "}
++                      <span className="text-muted">{r.branch.name}</span>
++                    </p>
++                    {r.source === "MANUAL" && <p className="text-xs text-muted">Captura manual: {r.note}</p>}
++                    {r.voidedAt && <p className="text-xs text-ember-dark">Anulada: {r.voidReason}</p>}
++                  </div>
++                  {!r.voidedAt && (
++                    <Button
++                      variant="ghost"
++                      onClick={() => {
++                        setFormError("");
++                        setVoidReason("");
++                        setVoiding(r);
++                      }}
++                    >
++                      Anular
++                    </Button>
++                  )}
++                </Card>
++              ))}
++            </div>
++          )}
++        </div>
++      )}
++
++      <Modal open={!!photo} onClose={() => setPhoto(null)} title={photo ? `${photo.employee.name} · ${photo.kind === "IN" ? "Entrada" : "Salida"}` : ""}>
++        {photo?.photoUrl && (
++          // eslint-disable-next-line @next/next/no-img-element
++          <img src={photo.photoUrl} alt="Foto de la marca" className="w-full rounded-md" />
++        )}
++        {photo && (
++          <p className="text-sm text-muted mt-2">
++            {fmtDate(photo.punchedAt)} {fmtTime(photo.punchedAt)}
++          </p>
++        )}
++      </Modal>
++
++      <Modal open={!!voiding} onClose={() => setVoiding(null)} title="Anular marca">
++        <p className="text-sm text-muted mb-3">
++          La marca no se borra: queda guardada como anulada con tu nombre y el motivo, y deja de contar para las horas.
++        </p>
++        <Field label="Motivo">
++          <textarea className={inputClass} rows={3} value={voidReason} onChange={(e) => setVoidReason(e.target.value)} />
++        </Field>
++        {formError && <p className="text-sm text-ember-dark mb-3">{formError}</p>}
++        <div className="flex gap-3">
++          <Button onClick={submitVoid} disabled={busy}>
++            {busy ? "Guardando..." : "Anular marca"}
++          </Button>
++          <Button variant="secondary" onClick={() => setVoiding(null)}>
++            Cancelar
++          </Button>
++        </div>
++      </Modal>
++
++      <Modal open={manualOpen} onClose={() => setManualOpen(false)} title="Agregar marca olvidada">
++        <p className="text-sm text-muted mb-3">Queda registrada como captura manual, con tu nombre y el motivo.</p>
++        <Field label="Empleado">
++          <select className={inputClass} value={manual.employeeId} onChange={(e) => setManual({ ...manual, employeeId: e.target.value })}>
++            <option value="">Elige...</option>
++            {employees.map((e) => (
++              <option key={e.id} value={e.id}>
++                {e.code} · {e.name}
++              </option>
++            ))}
++          </select>
++        </Field>
++        <Field label="Tipo">
++          <select className={inputClass} value={manual.kind} onChange={(e) => setManual({ ...manual, kind: e.target.value })}>
++            <option value="IN">Entrada</option>
++            <option value="OUT">Salida</option>
++          </select>
++        </Field>
++        <div className="grid grid-cols-2 gap-3">
++          <Field label="Fecha">
++            <input type="date" className={inputClass} value={manual.date} max={today} onChange={(e) => setManual({ ...manual, date: e.target.value })} />
++          </Field>
++          <Field label="Hora">
++            <input type="time" className={inputClass} value={manual.time} onChange={(e) => setManual({ ...manual, time: e.target.value })} />
++          </Field>
++        </div>
++        <Field label="Motivo">
++          <textarea className={inputClass} rows={3} value={manual.note} onChange={(e) => setManual({ ...manual, note: e.target.value })} />
++        </Field>
++        {formError && <p className="text-sm text-ember-dark mb-3">{formError}</p>}
++        <div className="flex gap-3">
++          <Button onClick={submitManual} disabled={busy || !manual.employeeId}>
++            {busy ? "Guardando..." : "Guardar marca"}
++          </Button>
++          <Button variant="secondary" onClick={() => setManualOpen(false)}>
++            Cancelar
++          </Button>
++        </div>
++      </Modal>
++    </div>
++  );
++}
+diff --git a/src/app/(company)/layout.tsx b/src/app/(company)/layout.tsx
+index b7d7900..fa83513 100644
+--- a/src/app/(company)/layout.tsx
++++ b/src/app/(company)/layout.tsx
+@@ -75,6 +75,7 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+   const dashboardEmpresarialEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.DASHBOARD_EMPRESARIAL);
+   const costeoEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.COSTEO_RECETA);
+   const menusEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.MENUS_COMPLETOS);
++  const checadorEnabled = featureKeys.has(FEATURE_KEYS.CHECADOR_ASISTENCIA);
+ 
+   let navItems: { href: string; label: string; permission?: PermissionKey }[] = tablesEnabled
+     ? [
+@@ -136,6 +137,18 @@ export default async function CompanyLayout({ children }: { children: React.Reac
+     navItems = [...navItems.slice(0, at), ...loyaltyItems, ...navItems.slice(at)];
+   }
+ 
++  // Checador de asistencia: el quiosco lo ve todo el personal; empleados y reporte, quien administra usuarios.
++  if (checadorEnabled && !loyaltyOnly) {
++    const checadorItems: { href: string; label: string; permission?: PermissionKey }[] = [
++      { href: "/checador", label: "Checador" },
++      { href: "/checador/empleados", label: "Checador: empleados", permission: PERMISSIONS.USERS_MANAGE },
++      { href: "/checador/reporte", label: "Checador: reporte", permission: PERMISSIONS.USERS_MANAGE },
++    ];
++    const usersIndex = navItems.findIndex((item) => item.href === "/users");
++    const at = usersIndex === -1 ? navItems.length : usersIndex + 1;
++    navItems = [...navItems.slice(0, at), ...checadorItems, ...navItems.slice(at)];
++  }
++
+   // Sucursal activa: si la empresa tiene varias sucursales activas, el nav muestra
+   // dónde se está operando, y quien administra sucursales puede cambiar de una a otra.
+   const activeBranches = await prisma.branch.findMany({
+diff --git a/src/app/api/attendance/employees/[id]/route.ts b/src/app/api/attendance/employees/[id]/route.ts
+new file mode 100644
+index 0000000..ac6240e
+--- /dev/null
++++ b/src/app/api/attendance/employees/[id]/route.ts
+@@ -0,0 +1,16 @@
++import { NextResponse } from "next/server";
++import { attendanceService, employeeUpdateSchema } from "@/modules/attendance/service";
++import { attendanceGuard, errorResponse } from "@/modules/attendance/guard";
++
++export async function PATCH(req: Request, { params }: { params: { id: string } }) {
++  const g = await attendanceGuard("manage");
++  if (g.error) return g.error;
++  const parsed = employeeUpdateSchema.safeParse(await req.json().catch(() => null));
++  if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Datos inválidos" }, { status: 400 });
++  try {
++    await attendanceService.updateEmployee(g.companyId, params.id, parsed.data);
++    return NextResponse.json({ ok: true });
++  } catch (err) {
++    return errorResponse(err, "No se pudo guardar el empleado");
++  }
++}
+diff --git a/src/app/api/attendance/employees/route.ts b/src/app/api/attendance/employees/route.ts
+new file mode 100644
+index 0000000..879789b
+--- /dev/null
++++ b/src/app/api/attendance/employees/route.ts
+@@ -0,0 +1,21 @@
++import { NextResponse } from "next/server";
++import { attendanceService, employeeCreateSchema } from "@/modules/attendance/service";
++import { attendanceGuard, errorResponse } from "@/modules/attendance/guard";
++
++export async function GET() {
++  const g = await attendanceGuard("manage");
++  if (g.error) return g.error;
++  return NextResponse.json({ employees: await attendanceService.listEmployees(g.companyId) });
++}
++
++export async function POST(req: Request) {
++  const g = await attendanceGuard("manage");
++  if (g.error) return g.error;
++  const parsed = employeeCreateSchema.safeParse(await req.json().catch(() => null));
++  if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Datos inválidos" }, { status: 400 });
++  try {
++    return NextResponse.json(await attendanceService.createEmployee(g.companyId, parsed.data), { status: 201 });
++  } catch (err) {
++    return errorResponse(err, "No se pudo crear el empleado");
++  }
++}
+diff --git a/src/app/api/attendance/export/route.ts b/src/app/api/attendance/export/route.ts
+new file mode 100644
+index 0000000..a94d18a
+--- /dev/null
++++ b/src/app/api/attendance/export/route.ts
+@@ -0,0 +1,43 @@
++import { NextResponse } from "next/server";
++import { prisma } from "@/lib/prisma";
++import { attendanceService } from "@/modules/attendance/service";
++import { attendanceGuard } from "@/modules/attendance/guard";
++import { parseFilters } from "@/modules/attendance/filters";
++
++/**
++ * GET /api/attendance/export?type=summary|records&from=AAAA-MM-DD&to=AAAA-MM-DD[&employeeId=&branchId=]
++ *  - summary: horas, retardos, faltas y horas extra por empleado (para nómina).
++ *  - records: todas las marcas con fecha, hora, origen y hash (para entregar a la autoridad).
++ */
++export async function GET(req: Request) {
++  const g = await attendanceGuard("manage");
++  if (g.error) return g.error;
++  const url = new URL(req.url);
++  const filters = parseFilters(url);
++  if ("error" in filters) return NextResponse.json({ error: filters.error }, { status: 400 });
++  const type = url.searchParams.get("type") === "records" ? "records" : "summary";
++
++  const csv =
++    type === "records"
++      ? await attendanceService.exportRecordsCsv(g.companyId, filters)
++      : await attendanceService.exportSummaryCsv(g.companyId, filters);
++
++  await prisma.auditLog.create({
++    data: {
++      companyId: g.companyId,
++      userId: g.ctx.userId,
++      action: "DATA_EXPORT",
++      entity: "Export",
++      entityId: `attendance_${type}`,
++      newData: { type, from: filters.from, to: filters.to },
++    },
++  });
++
++  return new NextResponse(csv, {
++    headers: {
++      "Content-Type": "text/csv; charset=utf-8",
++      "Content-Disposition": `attachment; filename="checador-${type === "records" ? "registros" : "resumen"}-${filters.from}-a-${filters.to}.csv"`,
++      "Cache-Control": "no-store",
++    },
++  });
++}
+diff --git a/src/app/api/attendance/punch/route.ts b/src/app/api/attendance/punch/route.ts
+new file mode 100644
+index 0000000..1e6902d
+--- /dev/null
++++ b/src/app/api/attendance/punch/route.ts
+@@ -0,0 +1,72 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, resolveBranchId } from "@/lib/tenant-context";
++import { rateLimit } from "@/lib/rate-limit";
++import { attendanceService, type PunchPhoto } from "@/modules/attendance/service";
++import { attendanceGuard, errorResponse } from "@/modules/attendance/guard";
++
++export const runtime = "nodejs";
++
++const MAX_PHOTO_BYTES = 800 * 1024; // el navegador ya la reduce; esto es el tope duro
++
++/** Tipo real de la imagen por sus primeros bytes (no confiamos en lo que declare el navegador). */
++function sniff(buf: Buffer): PunchPhoto | null {
++  if (buf.length > 12 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return { buf, type: "image/jpeg", ext: "jpg" };
++  if (buf.length > 12 && buf.subarray(0, 4).toString("ascii") === "RIFF" && buf.subarray(8, 12).toString("ascii") === "WEBP") {
++    return { buf, type: "image/webp", ext: "webp" };
++  }
++  return null;
++}
++
++/**
++ * POST multipart/form-data (quiosco): code, pin, acceptConsent ("1"), photo.
++ * El servidor decide si es entrada o salida y pone la hora; el navegador nunca manda la hora.
++ */
++export async function POST(req: Request) {
++  const g = await attendanceGuard("kiosk");
++  if (g.error) return g.error;
++
++  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null;
++  if (!rateLimit(`punch:${g.companyId}:${ip ?? "?"}`, 40, 60_000)) {
++    return NextResponse.json({ error: "Demasiados intentos. Espera un momento." }, { status: 429 });
++  }
++
++  let form: FormData;
++  try {
++    form = await req.formData();
++  } catch {
++    return NextResponse.json({ error: "No se pudo leer la solicitud" }, { status: 400 });
++  }
++
++  const code = Number(form.get("code"));
++  const pin = String(form.get("pin") ?? "");
++  if (!Number.isInteger(code) || code < 1 || !/^\d{4,6}$/.test(pin)) {
++    return NextResponse.json({ error: "Número de empleado o PIN incorrecto" }, { status: 400 });
++  }
++
++  let photo: PunchPhoto | null = null;
++  const file = form.get("photo");
++  if (file instanceof File && file.size > 0) {
++    if (file.size > MAX_PHOTO_BYTES) return NextResponse.json({ error: "La foto es muy pesada" }, { status: 400 });
++    photo = sniff(Buffer.from(await file.arrayBuffer()));
++    if (!photo) return NextResponse.json({ error: "Formato de foto no soportado" }, { status: 400 });
++  }
++
++  try {
++    const ctx = await getTenantContext();
++    const branchId = await resolveBranchId(ctx, g.companyId);
++    if (!branchId) throw new Error("La empresa no tiene sucursales activas");
++    const result = await attendanceService.punch({
++      companyId: g.companyId,
++      deviceUserId: g.ctx.userId,
++      branchId,
++      ip,
++      code,
++      pin,
++      acceptConsent: form.get("acceptConsent") === "1",
++      photo,
++    });
++    return NextResponse.json(result);
++  } catch (err) {
++    return errorResponse(err, "No se pudo registrar la marca");
++  }
++}
+diff --git a/src/app/api/attendance/records/[id]/void/route.ts b/src/app/api/attendance/records/[id]/void/route.ts
+new file mode 100644
+index 0000000..8082028
+--- /dev/null
++++ b/src/app/api/attendance/records/[id]/void/route.ts
+@@ -0,0 +1,17 @@
++import { NextResponse } from "next/server";
++import { attendanceService } from "@/modules/attendance/service";
++import { attendanceGuard, errorResponse } from "@/modules/attendance/guard";
++import { voidSchema } from "@/modules/attendance/filters";
++
++export async function POST(req: Request, { params }: { params: { id: string } }) {
++  const g = await attendanceGuard("manage");
++  if (g.error) return g.error;
++  const parsed = voidSchema.safeParse(await req.json().catch(() => null));
++  if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Datos inválidos" }, { status: 400 });
++  try {
++    await attendanceService.voidRecord(g.companyId, g.ctx.userId, params.id, parsed.data.reason);
++    return NextResponse.json({ ok: true });
++  } catch (err) {
++    return errorResponse(err, "No se pudo anular la marca");
++  }
++}
+diff --git a/src/app/api/attendance/records/route.ts b/src/app/api/attendance/records/route.ts
+new file mode 100644
+index 0000000..e2a5368
+--- /dev/null
++++ b/src/app/api/attendance/records/route.ts
+@@ -0,0 +1,27 @@
++import { NextResponse } from "next/server";
++import { attendanceService } from "@/modules/attendance/service";
++import { attendanceGuard, errorResponse } from "@/modules/attendance/guard";
++import { manualRecordSchema, parseFilters } from "@/modules/attendance/filters";
++
++export async function GET(req: Request) {
++  const g = await attendanceGuard("manage");
++  if (g.error) return g.error;
++  const filters = parseFilters(new URL(req.url));
++  if ("error" in filters) return NextResponse.json({ error: filters.error }, { status: 400 });
++  const records = await attendanceService.listRecords(g.companyId, filters);
++  return NextResponse.json({ records });
++}
++
++/** Marca olvidada capturada por un gerente/administrador (siempre con motivo). */
++export async function POST(req: Request) {
++  const g = await attendanceGuard("manage");
++  if (g.error) return g.error;
++  const parsed = manualRecordSchema.safeParse(await req.json().catch(() => null));
++  if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Datos inválidos" }, { status: 400 });
++  try {
++    await attendanceService.addManual(g.companyId, g.ctx.userId, parsed.data);
++    return NextResponse.json({ ok: true }, { status: 201 });
++  } catch (err) {
++    return errorResponse(err, "No se pudo capturar la marca");
++  }
++}
+diff --git a/src/app/api/attendance/report/route.ts b/src/app/api/attendance/report/route.ts
+new file mode 100644
+index 0000000..fa445f2
+--- /dev/null
++++ b/src/app/api/attendance/report/route.ts
+@@ -0,0 +1,12 @@
++import { NextResponse } from "next/server";
++import { attendanceService } from "@/modules/attendance/service";
++import { attendanceGuard } from "@/modules/attendance/guard";
++import { parseFilters } from "@/modules/attendance/filters";
++
++export async function GET(req: Request) {
++  const g = await attendanceGuard("manage");
++  if (g.error) return g.error;
++  const filters = parseFilters(new URL(req.url));
++  if ("error" in filters) return NextResponse.json({ error: filters.error }, { status: 400 });
++  return NextResponse.json(await attendanceService.report(g.companyId, filters));
++}
+diff --git a/src/app/api/attendance/settings/route.ts b/src/app/api/attendance/settings/route.ts
+new file mode 100644
+index 0000000..33ea48d
+--- /dev/null
++++ b/src/app/api/attendance/settings/route.ts
+@@ -0,0 +1,21 @@
++import { NextResponse } from "next/server";
++import { attendanceService, settingsSchema } from "@/modules/attendance/service";
++import { attendanceGuard, errorResponse } from "@/modules/attendance/guard";
++
++export async function GET() {
++  const g = await attendanceGuard("manage");
++  if (g.error) return g.error;
++  return NextResponse.json({ settings: await attendanceService.getSettings(g.companyId) });
++}
++
++export async function PUT(req: Request) {
++  const g = await attendanceGuard("manage");
++  if (g.error) return g.error;
++  const parsed = settingsSchema.safeParse(await req.json().catch(() => null));
++  if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Datos inválidos" }, { status: 400 });
++  try {
++    return NextResponse.json({ settings: await attendanceService.updateSettings(g.companyId, parsed.data) });
++  } catch (err) {
++    return errorResponse(err, "No se pudo guardar la configuración");
++  }
++}
+diff --git a/src/lib/attendance.ts b/src/lib/attendance.ts
+new file mode 100644
+index 0000000..2e645ad
+--- /dev/null
++++ b/src/lib/attendance.ts
+@@ -0,0 +1,335 @@
++import { createHash } from "crypto";
++
++/**
++ * Lógica pura (sin base de datos) del checador de asistencia: zonas horarias, armado de
++ * jornadas a partir de las marcas, retardos, faltas, horas extra estimadas y la cadena de hashes.
++ *
++ * Las horas extra son ESTIMADAS para apoyar la nómina; el pago final lo define el patrón
++ * conforme a la Ley Federal del Trabajo.
++ */
++
++export const CONSENT_VERSION = 1;
++export const SESSION_MAX_HOURS = 16; // una entrada sin salida después de esto se considera "salida olvidada"
++export const MIN_SECONDS_BETWEEN_PUNCHES = 60;
++
++export const TIMEZONES: { value: string; label: string }[] = [
++  { value: "America/Monterrey", label: "Centro (Monterrey, CDMX, Guadalajara)" },
++  { value: "America/Cancun", label: "Sureste (Cancún, Quintana Roo)" },
++  { value: "America/Chihuahua", label: "Chihuahua" },
++  { value: "America/Mazatlan", label: "Pacífico (Sinaloa, Nayarit, BCS)" },
++  { value: "America/Hermosillo", label: "Sonora" },
++  { value: "America/Tijuana", label: "Noroeste (Baja California)" },
++];
++
++/** Horas de jornada diaria por tipo de turno (LFT art. 60). */
++export const DAILY_HOURS: Record<string, number> = { DIURNA: 8, NOCTURNA: 7, MIXTA: 7.5 };
++
++/**
++ * Reducción gradual de la jornada semanal (reforma de 2026) y tope semanal de horas extra.
++ * Si la ley o las disposiciones de la STPS cambian estos valores, se ajustan solo aquí.
++ */
++export function weeklyLimits(year: number): { ordinaryHours: number; overtimeHours: number } {
++  if (year <= 2026) return { ordinaryHours: 48, overtimeHours: 9 };
++  if (year === 2027) return { ordinaryHours: 46, overtimeHours: 9 };
++  if (year === 2028) return { ordinaryHours: 44, overtimeHours: 10 };
++  if (year === 2029) return { ordinaryHours: 42, overtimeHours: 11 };
++  return { ordinaryHours: 40, overtimeHours: 12 };
++}
++
++// ── Zona horaria ────────────────────────────────────────────────────────
++
++export interface LocalParts {
++  ymd: string; // AAAA-MM-DD en la zona de la empresa
++  hour: number;
++  minute: number;
++  isoWeekday: number; // 1 = lunes ... 7 = domingo
++}
++
++export function localParts(date: Date, timeZone: string): LocalParts {
++  const parts = new Intl.DateTimeFormat("en-CA", {
++    timeZone,
++    year: "numeric",
++    month: "2-digit",
++    day: "2-digit",
++    hour: "2-digit",
++    minute: "2-digit",
++    hourCycle: "h23",
++    weekday: "short",
++  }).formatToParts(date);
++  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
++  const weekdays: Record<string, number> = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
++  return {
++    ymd: `${get("year")}-${get("month")}-${get("day")}`,
++    hour: Number(get("hour")) % 24,
++    minute: Number(get("minute")),
++    isoWeekday: weekdays[get("weekday")] ?? 1,
++  };
++}
++
++function tzOffsetMs(utcMs: number, timeZone: string): number {
++  const p = localParts(new Date(utcMs), timeZone);
++  const [y, m, d] = p.ymd.split("-").map(Number);
++  const asUtc = Date.UTC(y, m - 1, d, p.hour, p.minute, 0);
++  return asUtc - Math.floor(utcMs / 60000) * 60000;
++}
++
++/** Instante UTC que corresponde a "AAAA-MM-DD HH:mm" en la zona horaria dada. */
++export function zonedToUtc(ymd: string, hhmm: string, timeZone: string): Date {
++  const [y, m, d] = ymd.split("-").map(Number);
++  const [h, mi] = hhmm.split(":").map(Number);
++  const guess = Date.UTC(y, m - 1, d, h, mi, 0);
++  let utc = guess - tzOffsetMs(guess, timeZone);
++  utc = guess - tzOffsetMs(utc, timeZone);
++  return new Date(utc);
++}
++
++export function addDays(ymd: string, days: number): string {
++  const [y, m, d] = ymd.split("-").map(Number);
++  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
++}
++
++/** Lunes de la semana (ISO) a la que pertenece la fecha. */
++export function weekStart(ymd: string): string {
++  const [y, m, d] = ymd.split("-").map(Number);
++  const wd = new Date(Date.UTC(y, m - 1, d)).getUTCDay() || 7;
++  return addDays(ymd, -(wd - 1));
++}
++
++export function isoWeekdayOf(ymd: string): number {
++  const [y, m, d] = ymd.split("-").map(Number);
++  return new Date(Date.UTC(y, m - 1, d)).getUTCDay() || 7;
++}
++
++export function eachDay(from: string, to: string): string[] {
++  const out: string[] = [];
++  for (let d = from; d <= to && out.length < 400; d = addDays(d, 1)) out.push(d);
++  return out;
++}
++
++// ── Cadena de hashes ───────────────────────────────────────────────────
++
++export function recordHash(input: {
++  prevHash: string | null;
++  companyId: string;
++  employeeId: string;
++  kind: string;
++  source: string;
++  punchedAt: Date;
++}): string {
++  return createHash("sha256")
++    .update(
++      [input.prevHash ?? "", input.companyId, input.employeeId, input.kind, input.source, input.punchedAt.toISOString()].join("|")
++    )
++    .digest("hex");
++}
++
++/** Recalcula la cadena de un empleado (marcas en orden de captura). true = nadie alteró el historial. */
++export function verifyChain(
++  records: { companyId: string; employeeId: string; kind: string; source: string; punchedAt: Date; prevHash: string | null; hash: string }[]
++): boolean {
++  let prev: string | null = null;
++  for (const r of records) {
++    if ((r.prevHash ?? null) !== prev) return false;
++    if (recordHash({ ...r, prevHash: prev }) !== r.hash) return false;
++    prev = r.hash;
++  }
++  return true;
++}
++
++// ── Jornadas, retardos, faltas y horas extra ───────────────────────────
++
++export interface PunchLite {
++  kind: "IN" | "OUT";
++  punchedAt: Date;
++}
++
++export interface WorkSession {
++  inAt: Date | null;
++  outAt: Date | null;
++  minutes: number;
++  flag: "OK" | "SIN_SALIDA" | "SIN_ENTRADA" | "EN_CURSO";
++}
++
++/** Empareja entradas con salidas (marcas no anuladas, ordenadas por hora). */
++export function buildSessions(punches: PunchLite[], now: Date): WorkSession[] {
++  const sorted = [...punches].sort((a, b) => a.punchedAt.getTime() - b.punchedAt.getTime());
++  const sessions: WorkSession[] = [];
++  let open: Date | null = null;
++
++  const closeOpenWithoutOut = () => {
++    if (!open) return;
++    const stale = now.getTime() - open.getTime() > SESSION_MAX_HOURS * 3600_000;
++    sessions.push({ inAt: open, outAt: null, minutes: 0, flag: stale ? "SIN_SALIDA" : "EN_CURSO" });
++    open = null;
++  };
++
++  for (const p of sorted) {
++    if (p.kind === "IN") {
++      if (open) {
++        sessions.push({ inAt: open, outAt: null, minutes: 0, flag: "SIN_SALIDA" });
++      }
++      open = p.punchedAt;
++    } else if (open) {
++      const minutes = Math.max(0, Math.round((p.punchedAt.getTime() - open.getTime()) / 60000));
++      sessions.push({ inAt: open, outAt: p.punchedAt, minutes, flag: "OK" });
++      open = null;
++    } else {
++      sessions.push({ inAt: null, outAt: p.punchedAt, minutes: 0, flag: "SIN_ENTRADA" });
++    }
++  }
++  closeOpenWithoutOut();
++  return sessions;
++}
++
++export interface EmployeeLite {
++  shiftType: string;
++  shiftStart: string | null;
++  workDays: string;
++  createdAt: Date;
++}
++
++export interface DaySummary {
++  ymd: string;
++  minutes: number;
++  firstIn: Date | null;
++  lateMinutes: number; // 0 = a tiempo
++  absent: boolean;
++  alerts: string[];
++}
++
++export interface WeekSummary {
++  weekStart: string;
++  minutes: number;
++  overtimeMinutes: number; // estimadas
++  alerts: string[];
++}
++
++export interface EmployeeSummary {
++  days: DaySummary[];
++  weeks: WeekSummary[];
++  totalMinutes: number;
++  daysWorked: number;
++  lates: number;
++  absences: number;
++  overtimeMinutes: number;
++  alerts: string[];
++}
++
++export function summarizeEmployee(
++  employee: EmployeeLite,
++  punches: PunchLite[],
++  range: { from: string; to: string },
++  opts: { timeZone: string; toleranceMinutes: number; now: Date }
++): EmployeeSummary {
++  const { timeZone, toleranceMinutes, now } = opts;
++  const sessions = buildSessions(punches, now);
++  const todayYmd = localParts(now, timeZone).ymd;
++  const createdYmd = localParts(employee.createdAt, timeZone).ymd;
++  const workDays = new Set(employee.workDays.split(",").map((n) => Number(n.trim())).filter(Boolean));
++  const dailyMinutes = (DAILY_HOURS[employee.shiftType] ?? 8) * 60;
++
++  const byDay = new Map<string, DaySummary>();
++  const dayOf = (ymd: string) => {
++    let d = byDay.get(ymd);
++    if (!d) {
++      d = { ymd, minutes: 0, firstIn: null, lateMinutes: 0, absent: false, alerts: [] };
++      byDay.set(ymd, d);
++    }
++    return d;
++  };
++
++  for (const s of sessions) {
++    const ref = s.inAt ?? s.outAt;
++    if (!ref) continue;
++    const ymd = localParts(ref, timeZone).ymd;
++    if (ymd < range.from || ymd > range.to) continue;
++    const day = dayOf(ymd);
++    day.minutes += s.minutes;
++    if (s.inAt && (!day.firstIn || s.inAt < day.firstIn)) day.firstIn = s.inAt;
++    if (s.flag === "SIN_SALIDA" && !day.alerts.includes("SIN_SALIDA")) day.alerts.push("SIN_SALIDA");
++    if (s.flag === "SIN_ENTRADA" && !day.alerts.includes("SIN_ENTRADA")) day.alerts.push("SIN_ENTRADA");
++    if (s.flag === "EN_CURSO" && !day.alerts.includes("EN_CURSO")) day.alerts.push("EN_CURSO");
++  }
++
++  // Retardos y faltas por día programado.
++  for (const ymd of eachDay(range.from, range.to)) {
++    const scheduled = workDays.has(isoWeekdayOf(ymd));
++    const day = byDay.get(ymd);
++    if (day?.firstIn && employee.shiftStart && scheduled) {
++      const first = localParts(day.firstIn, timeZone);
++      const [sh, sm] = employee.shiftStart.split(":").map(Number);
++      const late = first.hour * 60 + first.minute - (sh * 60 + sm);
++      if (late > toleranceMinutes) day.lateMinutes = late;
++    }
++    if (scheduled && ymd < todayYmd && ymd >= createdYmd && (!day || !day.firstIn)) {
++      dayOf(ymd).absent = true;
++    }
++    if (day && day.minutes > 12 * 60 && !day.alerts.includes("EXCEDE_12H")) day.alerts.push("EXCEDE_12H");
++  }
++
++  const days = Array.from(byDay.values()).sort((a, b) => a.ymd.localeCompare(b.ymd));
++
++  // Semanas: horas, horas extra estimadas y topes legales.
++  const weekMap = new Map<string, { minutes: number; dailyExtra: number }>();
++  for (const d of days) {
++    const wk = weekStart(d.ymd);
++    const w = weekMap.get(wk) ?? { minutes: 0, dailyExtra: 0 };
++    w.minutes += d.minutes;
++    w.dailyExtra += Math.max(0, d.minutes - dailyMinutes);
++    weekMap.set(wk, w);
++  }
++  const weeks: WeekSummary[] = Array.from(weekMap.entries())
++    .sort(([a], [b]) => a.localeCompare(b))
++    .map(([wk, w]) => {
++      const limits = weeklyLimits(Number(wk.slice(0, 4)));
++      const weeklyExcess = Math.max(0, w.minutes - limits.ordinaryHours * 60);
++      const overtimeMinutes = Math.max(w.dailyExtra, weeklyExcess);
++      const alerts: string[] = [];
++      if (overtimeMinutes > limits.overtimeHours * 60) alerts.push("EXCEDE_TOPE_EXTRA_SEMANAL");
++      return { weekStart: wk, minutes: w.minutes, overtimeMinutes, alerts };
++    });
++
++  const alerts = Array.from(new Set([...days.flatMap((d) => d.alerts), ...weeks.flatMap((w) => w.alerts)]));
++  return {
++    days,
++    weeks,
++    totalMinutes: days.reduce((n, d) => n + d.minutes, 0),
++    daysWorked: days.filter((d) => d.minutes > 0 || d.firstIn).length,
++    lates: days.filter((d) => d.lateMinutes > 0).length,
++    absences: days.filter((d) => d.absent).length,
++    overtimeMinutes: weeks.reduce((n, w) => n + w.overtimeMinutes, 0),
++    alerts,
++  };
++}
++
++export const ALERT_LABELS: Record<string, string> = {
++  SIN_SALIDA: "Salida olvidada",
++  SIN_ENTRADA: "Salida sin entrada",
++  EN_CURSO: "Jornada en curso",
++  EXCEDE_12H: "Más de 12 h en un día",
++  EXCEDE_TOPE_EXTRA_SEMANAL: "Excede tope semanal de horas extra",
++};
++
++export function formatMinutes(minutes: number): string {
++  const h = Math.floor(minutes / 60);
++  const m = minutes % 60;
++  return `${h} h ${String(m).padStart(2, "0")} min`;
++}
++
++export function formatLocalDateTime(date: Date, timeZone: string): { date: string; time: string } {
++  const p = localParts(date, timeZone);
++  const sec = new Intl.DateTimeFormat("en-GB", { timeZone, second: "2-digit" }).format(date);
++  return { date: p.ymd, time: `${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")}:${sec.padStart(2, "0")}` };
++}
++
++export const CONSENT_TEXT = `Aviso y aceptación del registro electrónico de asistencia
++
++Tu empleador registra tu jornada de trabajo de forma electrónica, como lo establece la Ley Federal del Trabajo (art. 132, fracción XXXIV).
++
++Qué datos se guardan al checar: tu número de empleado, la fecha y hora de tu entrada y salida y una fotografía tomada en ese momento. La fotografía sirve únicamente para comprobar que fuiste tú quien checó; no se usa reconocimiento facial.
++
++Para qué se usan: llevar el control de tu jornada, calcular horas trabajadas, retardos y horas extra, y atender requerimientos de la autoridad laboral.
++
++Tus derechos: puedes pedir a tu empleador acceso, corrección u oposición al tratamiento de tus datos. Tu PIN es personal: no lo compartas, porque cualquier marca hecha con él se te atribuye.
++
++Al aceptar, estás de acuerdo en que este sistema (número de empleado, PIN y fotografía) sea el medio para registrar tu asistencia.`;
+diff --git a/src/lib/plan-features.ts b/src/lib/plan-features.ts
+index 3d3a267..5a78e55 100644
+--- a/src/lib/plan-features.ts
++++ b/src/lib/plan-features.ts
+@@ -47,6 +47,9 @@ export const FEATURE_CATALOG: FeatureDef[] = [
+   // Programa de clientes frecuentes: opción independiente. No viene incluida en ningún plan
+   // por defecto; se activa por plan o por empresa (plan personalizado) desde Super Admin.
+   { key: "clientes_frecuentes", label: "Programa de clientes frecuentes (tarjeta digital con QR)", status: "live", enforced: true },
++  // Checador de asistencia: registro electrónico de entradas y salidas (PIN + foto) en el mismo equipo del POS.
++  // Opción independiente: no viene incluida en ningún plan por defecto; se activa por plan o por empresa.
++  { key: "checador_asistencia", label: "Checador de asistencia (entradas y salidas con PIN y foto)", status: "live", enforced: true },
+   // Modo "solo clientes frecuentes": para restaurantes que contratan el programa SIN el POS.
+   // Marcar esta casilla (junto con clientes_frecuentes) oculta y bloquea Punto de Venta, Caja, etc.
+   { key: "solo_clientes_frecuentes", label: "Modo solo clientes frecuentes (sin Punto de Venta)", status: "live", enforced: true },
+diff --git a/src/middleware.ts b/src/middleware.ts
+index ca083e4..8cea47e 100644
+--- a/src/middleware.ts
++++ b/src/middleware.ts
+@@ -19,7 +19,7 @@ export default withAuth(
+     // SUPER_ADMIN no opera el panel ni el POS de un restaurante individual
+     if (
+       role === "SUPER_ADMIN" &&
+-      ["/dashboard", "/products", "/categories", "/branches", "/users", "/pos", "/cash", "/reports", "/inventory", "/kitchen", "/clientes-frecuentes"].some((p) => pathname.startsWith(p))
++      ["/dashboard", "/products", "/categories", "/branches", "/users", "/pos", "/cash", "/reports", "/inventory", "/kitchen", "/clientes-frecuentes", "/checador"].some((p) => pathname.startsWith(p))
+     ) {
+       return NextResponse.redirect(new URL("/plataforma/dashboard", req.url));
+     }
+@@ -39,5 +39,5 @@ export default withAuth(
+ );
+ 
+ export const config = {
+-  matcher: ["/dashboard/:path*", "/products/:path*", "/categories/:path*", "/branches/:path*", "/users/:path*", "/pos/:path*", "/cash/:path*", "/reports/:path*", "/inventory/:path*", "/kitchen/:path*", "/clientes-frecuentes/:path*", "/plataforma/:path*", "/facturacion/:path*"],
++  matcher: ["/dashboard/:path*", "/products/:path*", "/categories/:path*", "/branches/:path*", "/users/:path*", "/pos/:path*", "/cash/:path*", "/reports/:path*", "/inventory/:path*", "/kitchen/:path*", "/clientes-frecuentes/:path*", "/checador/:path*", "/plataforma/:path*", "/facturacion/:path*"],
+ };
+diff --git a/src/modules/attendance/filters.ts b/src/modules/attendance/filters.ts
+new file mode 100644
+index 0000000..77268be
+--- /dev/null
++++ b/src/modules/attendance/filters.ts
+@@ -0,0 +1,33 @@
++import { z } from "zod";
++import type { ReportFilters } from "./service";
++
++const ymd = /^\d{4}-\d{2}-\d{2}$/;
++const MAX_RANGE_DAYS = 93;
++
++/** Lee ?from=&to=&employeeId=&branchId= de la URL y valida el rango (máx. ~3 meses). */
++export function parseFilters(url: URL): ReportFilters | { error: string } {
++  const from = url.searchParams.get("from") ?? "";
++  const to = url.searchParams.get("to") ?? "";
++  if (!ymd.test(from) || !ymd.test(to)) return { error: "Fechas no válidas (usa AAAA-MM-DD)" };
++  if (from > to) return { error: "La fecha inicial no puede ser posterior a la final" };
++  const days = (Date.parse(to) - Date.parse(from)) / 86400000;
++  if (days > MAX_RANGE_DAYS) return { error: "El rango máximo es de 3 meses" };
++  return {
++    from,
++    to,
++    employeeId: url.searchParams.get("employeeId") || undefined,
++    branchId: url.searchParams.get("branchId") || undefined,
++  };
++}
++
++export const manualRecordSchema = z.object({
++  employeeId: z.string().min(1, "Elige al empleado"),
++  kind: z.enum(["IN", "OUT"]),
++  date: z.string().regex(ymd, "Fecha inválida"),
++  time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Hora inválida"),
++  note: z.string().trim().min(5, "Escribe el motivo (mínimo 5 letras)").max(300),
++});
++
++export const voidSchema = z.object({
++  reason: z.string().trim().min(5, "Escribe el motivo (mínimo 5 letras)").max(300),
++});
+diff --git a/src/modules/attendance/guard.ts b/src/modules/attendance/guard.ts
+new file mode 100644
+index 0000000..f44d98b
+--- /dev/null
++++ b/src/modules/attendance/guard.ts
+@@ -0,0 +1,36 @@
++import { NextResponse } from "next/server";
++import { getTenantContext, type TenantContext } from "@/lib/tenant-context";
++import { hasPermission, PERMISSIONS } from "@/lib/permissions";
++import { hasFeature } from "@/lib/feature-gating";
++import { FEATURE_KEYS } from "@/lib/plan-features";
++
++/**
++ * Validación común de las rutas de /api/attendance:
++ *  - "kiosk": cualquier usuario con sesión en el equipo (el empleado se identifica con su PIN).
++ *  - "manage": quien administra usuarios (Administrador y Gerente) — empleados, reportes, correcciones.
++ * En ambos casos la empresa debe tener la feature "checador_asistencia" en su plan.
++ */
++export async function attendanceGuard(
++  mode: "kiosk" | "manage"
++): Promise<{ ctx: TenantContext; companyId: string; error?: undefined } | { error: NextResponse }> {
++  let ctx: TenantContext;
++  try {
++    ctx = await getTenantContext();
++  } catch {
++    return { error: NextResponse.json({ error: "No autenticado" }, { status: 401 }) };
++  }
++  if (!ctx.companyId) {
++    return { error: NextResponse.json({ error: "Se requiere una empresa" }, { status: 403 }) };
++  }
++  if (mode === "manage" && !hasPermission(ctx.permissions, PERMISSIONS.USERS_MANAGE)) {
++    return { error: NextResponse.json({ error: "No tienes permiso para esta acción" }, { status: 403 }) };
++  }
++  if (!(await hasFeature(ctx.companyId, FEATURE_KEYS.CHECADOR_ASISTENCIA))) {
++    return { error: NextResponse.json({ error: "Tu plan no incluye el checador de asistencia" }, { status: 403 }) };
++  }
++  return { ctx, companyId: ctx.companyId };
++}
++
++export function errorResponse(err: unknown, fallback: string) {
++  return NextResponse.json({ error: err instanceof Error ? err.message : fallback }, { status: 400 });
++}
+diff --git a/src/modules/attendance/service.ts b/src/modules/attendance/service.ts
+new file mode 100644
+index 0000000..146e210
+--- /dev/null
++++ b/src/modules/attendance/service.ts
+@@ -0,0 +1,496 @@
++import bcrypt from "bcryptjs";
++import { put } from "@vercel/blob";
++import { z } from "zod";
++import { prisma } from "@/lib/prisma";
++import {
++  CONSENT_VERSION,
++  MIN_SECONDS_BETWEEN_PUNCHES,
++  SESSION_MAX_HOURS,
++  TIMEZONES,
++  addDays,
++  formatLocalDateTime,
++  localParts,
++  recordHash,
++  summarizeEmployee,
++  verifyChain,
++  zonedToUtc,
++  type EmployeeSummary,
++} from "@/lib/attendance";
++import { toCsv } from "@/lib/csv";
++
++const MAX_PIN_FAILS = 5;
++const LOCK_MINUTES = 10;
++const GENERIC_LOGIN_ERROR = "Número de empleado o PIN incorrecto";
++
++const pinSchema = z.string().regex(/^\d{4,6}$/, "El PIN debe tener de 4 a 6 números");
++const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Hora inválida (usa HH:mm)");
++const workDaysSchema = z
++  .array(z.number().int().min(1).max(7))
++  .min(1, "Elige al menos un día de trabajo")
++  .transform((days) => Array.from(new Set(days)).sort().join(","));
++
++export const employeeCreateSchema = z.object({
++  name: z.string().trim().min(2, "El nombre es obligatorio").max(80),
++  position: z.string().trim().max(60).optional().nullable(),
++  branchId: z.string().min(1, "Elige la sucursal"),
++  pin: pinSchema,
++  shiftType: z.enum(["DIURNA", "NOCTURNA", "MIXTA"]).default("DIURNA"),
++  shiftStart: hhmm.optional().nullable(),
++  workDays: workDaysSchema.default([1, 2, 3, 4, 5, 6]),
++});
++
++export const employeeUpdateSchema = z.object({
++  name: z.string().trim().min(2).max(80).optional(),
++  position: z.string().trim().max(60).optional().nullable(),
++  branchId: z.string().min(1).optional(),
++  pin: pinSchema.optional(),
++  shiftType: z.enum(["DIURNA", "NOCTURNA", "MIXTA"]).optional(),
++  shiftStart: hhmm.optional().nullable(),
++  workDays: workDaysSchema.optional(),
++  isActive: z.boolean().optional(),
++});
++
++export const settingsSchema = z.object({
++  timezone: z.string().refine((tz) => TIMEZONES.some((t) => t.value === tz), "Zona horaria no válida"),
++  requirePhoto: z.boolean(),
++  lateToleranceMinutes: z.number().int().min(0).max(60),
++});
++
++export interface PunchPhoto {
++  buf: Buffer;
++  type: string;
++  ext: string;
++}
++
++export type PunchResult =
++  | { needsConsent: true; employeeName: string }
++  | {
++      needsConsent?: false;
++      kind: "IN" | "OUT";
++      employeeName: string;
++      punchedAt: string;
++      sessionMinutes: number | null;
++    };
++
++export interface ReportFilters {
++  from: string; // AAAA-MM-DD (zona de la empresa)
++  to: string;
++  employeeId?: string;
++  branchId?: string;
++}
++
++function rangeToInstants(f: ReportFilters, tz: string) {
++  return { start: zonedToUtc(f.from, "00:00", tz), end: zonedToUtc(addDays(f.to, 1), "00:00", tz) };
++}
++
++async function audit(
++  companyId: string,
++  userId: string | null,
++  action: string,
++  entityId: string,
++  previousData: object | null,
++  newData: object | null
++) {
++  await prisma.auditLog.create({
++    data: {
++      companyId,
++      userId,
++      action,
++      entity: "AttendanceRecord",
++      entityId,
++      previousData: previousData ?? undefined,
++      newData: newData ?? undefined,
++    },
++  });
++}
++
++export const attendanceService = {
++  // ── Configuración ───────────────────────────────────────────────────
++  async getSettings(companyId: string) {
++    return prisma.attendanceSettings.upsert({ where: { companyId }, update: {}, create: { companyId } });
++  },
++
++  async updateSettings(companyId: string, input: z.infer<typeof settingsSchema>) {
++    return prisma.attendanceSettings.upsert({ where: { companyId }, update: input, create: { companyId, ...input } });
++  },
++
++  // ── Empleados ───────────────────────────────────────────────────────
++  async listEmployees(companyId: string) {
++    const rows = await prisma.employee.findMany({
++      where: { companyId },
++      include: { branch: { select: { name: true } } },
++      orderBy: [{ isActive: "desc" }, { code: "asc" }],
++    });
++    // Nunca se manda el hash del PIN al navegador.
++    return rows.map(({ pinHash: _pinHash, pinFailedCount: _f, ...rest }) => rest);
++  },
++
++  async createEmployee(companyId: string, input: z.infer<typeof employeeCreateSchema>) {
++    const branch = await prisma.branch.findFirst({ where: { id: input.branchId, companyId }, select: { id: true } });
++    if (!branch) throw new Error("La sucursal no es válida");
++    const pinHash = await bcrypt.hash(input.pin, 10);
++
++    // Número de empleado consecutivo por empresa; si dos altas chocan, se reintenta.
++    for (let attempt = 0; attempt < 3; attempt++) {
++      const last = await prisma.employee.findFirst({ where: { companyId }, orderBy: { code: "desc" }, select: { code: true } });
++      try {
++        const created = await prisma.employee.create({
++          data: {
++            companyId,
++            branchId: input.branchId,
++            code: (last?.code ?? 0) + 1,
++            name: input.name,
++            position: input.position || null,
++            pinHash,
++            shiftType: input.shiftType,
++            shiftStart: input.shiftStart || null,
++            workDays: input.workDays,
++          },
++        });
++        return { id: created.id, code: created.code };
++      } catch (e) {
++        if (attempt === 2) throw e;
++      }
++    }
++    throw new Error("No se pudo crear el empleado");
++  },
++
++  async updateEmployee(companyId: string, id: string, input: z.infer<typeof employeeUpdateSchema>) {
++    const employee = await prisma.employee.findFirst({ where: { id, companyId }, select: { id: true } });
++    if (!employee) throw new Error("Empleado no encontrado");
++    if (input.branchId) {
++      const branch = await prisma.branch.findFirst({ where: { id: input.branchId, companyId }, select: { id: true } });
++      if (!branch) throw new Error("La sucursal no es válida");
++    }
++    const { pin, ...rest } = input;
++    await prisma.employee.update({
++      where: { id },
++      data: {
++        ...rest,
++        position: rest.position === undefined ? undefined : rest.position || null,
++        shiftStart: rest.shiftStart === undefined ? undefined : rest.shiftStart || null,
++        ...(pin ? { pinHash: await bcrypt.hash(pin, 10), pinFailedCount: 0, pinLockedUntil: null } : {}),
++      },
++    });
++  },
++
++  // ── Quiosco: checar ─────────────────────────────────────────────────
++  async punch(params: {
++    companyId: string;
++    deviceUserId: string;
++    branchId: string;
++    ip: string | null;
++    code: number;
++    pin: string;
++    acceptConsent: boolean;
++    photo: PunchPhoto | null;
++  }): Promise<PunchResult> {
++    const { companyId } = params;
++    const now = new Date();
++    const settings = await this.getSettings(companyId);
++
++    const employee = await prisma.employee.findUnique({ where: { companyId_code: { companyId, code: params.code } } });
++    if (!employee || !employee.isActive) throw new Error(GENERIC_LOGIN_ERROR);
++
++    if (employee.pinLockedUntil && employee.pinLockedUntil > now) {
++      const mins = Math.ceil((employee.pinLockedUntil.getTime() - now.getTime()) / 60000);
++      throw new Error(`Demasiados intentos. Intenta de nuevo en ${mins} min o pide ayuda a tu gerente.`);
++    }
++
++    const pinOk = await bcrypt.compare(params.pin, employee.pinHash);
++    if (!pinOk) {
++      const fails = employee.pinFailedCount + 1;
++      await prisma.employee.update({
++        where: { id: employee.id },
++        data:
++          fails >= MAX_PIN_FAILS
++            ? { pinFailedCount: 0, pinLockedUntil: new Date(now.getTime() + LOCK_MINUTES * 60000) }
++            : { pinFailedCount: fails },
++      });
++      throw new Error(GENERIC_LOGIN_ERROR);
++    }
++    if (employee.pinFailedCount > 0 || employee.pinLockedUntil) {
++      await prisma.employee.update({ where: { id: employee.id }, data: { pinFailedCount: 0, pinLockedUntil: null } });
++    }
++
++    // Aceptación del empleado (primera vez, o si cambió la versión del aviso).
++    if (!employee.consentAcceptedAt || (employee.consentVersion ?? 0) < CONSENT_VERSION) {
++      if (!params.acceptConsent) return { needsConsent: true, employeeName: employee.name };
++      await prisma.employee.update({
++        where: { id: employee.id },
++        data: { consentAcceptedAt: now, consentVersion: CONSENT_VERSION },
++      });
++    }
++
++    if (settings.requirePhoto && !params.photo) {
++      throw new Error("No se pudo tomar la foto. Permite el acceso a la cámara e intenta de nuevo.");
++    }
++
++    // Entrada o salida: la decide el servidor según la última marca vigente.
++    const last = await prisma.attendanceRecord.findFirst({
++      where: { employeeId: employee.id, voidedAt: null },
++      orderBy: { punchedAt: "desc" },
++    });
++    if (last && (now.getTime() - last.punchedAt.getTime()) / 1000 < MIN_SECONDS_BETWEEN_PUNCHES) {
++      throw new Error("Ya checaste hace un momento. Espera un minuto.");
++    }
++    const kind: "IN" | "OUT" =
++      last && last.kind === "IN" && now.getTime() - last.punchedAt.getTime() <= SESSION_MAX_HOURS * 3600_000 ? "OUT" : "IN";
++
++    let photoUrl: string | null = null;
++    if (params.photo) {
++      try {
++        const blob = await put(`${companyId}/attendance/${employee.id}.${params.photo.ext}`, params.photo.buf, {
++          access: "public",
++          addRandomSuffix: true,
++          contentType: params.photo.type,
++        });
++        photoUrl = blob.url;
++      } catch (e) {
++        console.error("Error subiendo foto del checador", e);
++        if (settings.requirePhoto) throw new Error("No se pudo guardar la foto. Intenta de nuevo.");
++      }
++    }
++
++    await prisma.$transaction(async (tx) => {
++      const prev = await tx.attendanceRecord.findFirst({
++        where: { employeeId: employee.id },
++        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
++        select: { hash: true },
++      });
++      await tx.attendanceRecord.create({
++        data: {
++          companyId,
++          employeeId: employee.id,
++          branchId: params.branchId,
++          kind,
++          source: "KIOSK",
++          punchedAt: now,
++          photoUrl,
++          deviceUserId: params.deviceUserId,
++          ipAddress: params.ip,
++          prevHash: prev?.hash ?? null,
++          hash: recordHash({
++            prevHash: prev?.hash ?? null,
++            companyId,
++            employeeId: employee.id,
++            kind,
++            source: "KIOSK",
++            punchedAt: now,
++          }),
++        },
++      });
++    });
++
++    return {
++      kind,
++      employeeName: employee.name,
++      punchedAt: now.toISOString(),
++      sessionMinutes: kind === "OUT" && last ? Math.round((now.getTime() - last.punchedAt.getTime()) / 60000) : null,
++    };
++  },
++
++  // ── Registros y correcciones ────────────────────────────────────────
++  async listRecords(companyId: string, f: ReportFilters) {
++    const settings = await this.getSettings(companyId);
++    const { start, end } = rangeToInstants(f, settings.timezone);
++    return prisma.attendanceRecord.findMany({
++      where: {
++        companyId,
++        punchedAt: { gte: start, lt: end },
++        ...(f.employeeId ? { employeeId: f.employeeId } : {}),
++        ...(f.branchId ? { branchId: f.branchId } : {}),
++      },
++      include: { employee: { select: { name: true, code: true } }, branch: { select: { name: true } } },
++      orderBy: { punchedAt: "desc" },
++      take: 2000,
++    });
++  },
++
++  /** Marca olvidada: se agrega como MANUAL, con motivo obligatorio y huella en la auditoría. */
++  async addManual(
++    companyId: string,
++    userId: string,
++    input: { employeeId: string; kind: "IN" | "OUT"; date: string; time: string; note: string }
++  ) {
++    const settings = await this.getSettings(companyId);
++    const employee = await prisma.employee.findFirst({ where: { id: input.employeeId, companyId } });
++    if (!employee) throw new Error("Empleado no encontrado");
++    const punchedAt = zonedToUtc(input.date, input.time, settings.timezone);
++    if (punchedAt.getTime() > Date.now() + 5 * 60000) throw new Error("No se pueden capturar marcas en el futuro");
++
++    const created = await prisma.$transaction(async (tx) => {
++      const prev = await tx.attendanceRecord.findFirst({
++        where: { employeeId: employee.id },
++        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
++        select: { hash: true },
++      });
++      return tx.attendanceRecord.create({
++        data: {
++          companyId,
++          employeeId: employee.id,
++          branchId: employee.branchId,
++          kind: input.kind,
++          source: "MANUAL",
++          punchedAt,
++          note: input.note,
++          createdById: userId,
++          prevHash: prev?.hash ?? null,
++          hash: recordHash({
++            prevHash: prev?.hash ?? null,
++            companyId,
++            employeeId: employee.id,
++            kind: input.kind,
++            source: "MANUAL",
++            punchedAt,
++          }),
++        },
++      });
++    });
++    await audit(companyId, userId, "ATTENDANCE_MANUAL", created.id, null, {
++      employee: employee.name,
++      kind: input.kind,
++      punchedAt: punchedAt.toISOString(),
++      note: input.note,
++    });
++    return created;
++  },
++
++  /** Una marca equivocada NO se borra: se anula y queda guardada con quién y por qué. */
++  async voidRecord(companyId: string, userId: string, recordId: string, reason: string) {
++    const rec = await prisma.attendanceRecord.findFirst({ where: { id: recordId, companyId } });
++    if (!rec) throw new Error("Marca no encontrada");
++    if (rec.voidedAt) throw new Error("Esta marca ya está anulada");
++    await prisma.attendanceRecord.update({
++      where: { id: rec.id },
++      data: { voidedAt: new Date(), voidedById: userId, voidReason: reason },
++    });
++    await audit(
++      companyId,
++      userId,
++      "ATTENDANCE_VOID",
++      rec.id,
++      { kind: rec.kind, punchedAt: rec.punchedAt.toISOString(), source: rec.source },
++      { reason }
++    );
++  },
++
++  // ── Reporte ─────────────────────────────────────────────────────────
++  async report(companyId: string, f: ReportFilters) {
++    const settings = await this.getSettings(companyId);
++    const tz = settings.timezone;
++    const now = new Date();
++    const { start, end } = rangeToInstants(f, tz);
++
++    const employees = await prisma.employee.findMany({
++      where: {
++        companyId,
++        ...(f.employeeId ? { id: f.employeeId } : {}),
++        ...(f.branchId ? { branchId: f.branchId } : {}),
++      },
++      include: { branch: { select: { name: true } } },
++      orderBy: { code: "asc" },
++    });
++
++    // Se piden marcas con un día de margen en cada extremo para emparejar jornadas que cruzan medianoche.
++    const marginMs = 24 * 3600_000;
++    const records = await prisma.attendanceRecord.findMany({
++      where: {
++        companyId,
++        employeeId: { in: employees.map((e) => e.id) },
++        punchedAt: { gte: new Date(start.getTime() - marginMs), lt: new Date(end.getTime() + marginMs) },
++      },
++      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
++    });
++
++    const rows = await Promise.all(
++      employees.map(async (emp) => {
++      const mine = records.filter((r) => r.employeeId === emp.id);
++      const valid = mine.filter((r) => !r.voidedAt).map((r) => ({ kind: r.kind, punchedAt: r.punchedAt }));
++      const summary: EmployeeSummary = summarizeEmployee(emp, valid, f, { timeZone: tz, toleranceMinutes: settings.lateToleranceMinutes, now });
++      return {
++        employeeId: emp.id,
++        code: emp.code,
++        name: emp.name,
++        position: emp.position,
++        branch: emp.branch.name,
++        isActive: emp.isActive,
++        totalMinutes: summary.totalMinutes,
++        daysWorked: summary.daysWorked,
++        lates: summary.lates,
++        absences: summary.absences,
++        overtimeMinutes: summary.overtimeMinutes,
++        alerts: summary.alerts,
++        chainOk: await this.chainOk(emp.id),
++      };
++      })
++    );
++    return { timezone: tz, rows };
++  },
++
++  /** Verifica la cadena completa del empleado (todas sus marcas, no solo el periodo). */
++  async chainOk(employeeId: string) {
++    const all = await prisma.attendanceRecord.findMany({
++      where: { employeeId },
++      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
++      select: { companyId: true, employeeId: true, kind: true, source: true, punchedAt: true, prevHash: true, hash: true },
++    });
++    return verifyChain(all);
++  },
++
++  // ── Exportación (CSV para Excel) ────────────────────────────────────
++  async exportSummaryCsv(companyId: string, f: ReportFilters) {
++    const { rows } = await this.report(companyId, f);
++    const hours = (m: number) => Math.round((m / 60) * 100) / 100;
++    return toCsv(
++      ["No.", "Empleado", "Puesto", "Sucursal", "Del", "Al", "Días con asistencia", "Horas trabajadas", "Retardos", "Faltas", "Horas extra estimadas", "Alertas", "Integridad del registro"],
++      rows.map((r) => [
++        r.code,
++        r.name,
++        r.position ?? "",
++        r.branch,
++        f.from,
++        f.to,
++        r.daysWorked,
++        hours(r.totalMinutes),
++        r.lates,
++        r.absences,
++        hours(r.overtimeMinutes),
++        r.alerts.join(" | "),
++        r.chainOk ? "Verificada" : "ALTERADA",
++      ])
++    );
++  },
++
++  async exportRecordsCsv(companyId: string, f: ReportFilters) {
++    const settings = await this.getSettings(companyId);
++    const records = await this.listRecords(companyId, f);
++    const chronological = [...records].reverse();
++    return toCsv(
++      ["Fecha", "Hora", "No.", "Empleado", "Sucursal", "Tipo", "Origen", "Motivo (captura manual)", "Foto", "Anulada", "Motivo de anulación", "Hash"],
++      chronological.map((r) => {
++        const t = formatLocalDateTime(r.punchedAt, settings.timezone);
++        return [
++          t.date,
++          t.time,
++          r.employee.code,
++          r.employee.name,
++          r.branch.name,
++          r.kind === "IN" ? "Entrada" : "Salida",
++          r.source === "KIOSK" ? "Quiosco" : "Manual",
++          r.note ?? "",
++          r.photoUrl ?? "",
++          r.voidedAt ? "Sí" : "No",
++          r.voidReason ?? "",
++          r.hash,
++        ];
++      })
++    );
++  },
++
++  /** Hoy en la zona de la empresa (AAAA-MM-DD). */
++  async todayYmd(companyId: string) {
++    const settings = await this.getSettings(companyId);
++    return localParts(new Date(), settings.timezone).ymd;
++  },
++};

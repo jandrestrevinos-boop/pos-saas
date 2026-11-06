@@ -59,6 +59,11 @@ model Company {
   promotions         Promotion[]
   ingredients        Ingredient[]
 
+  // Checador de asistencia (feature "checador_asistencia")
+  attendanceSettings AttendanceSettings?
+  employees          Employee[]
+  attendanceRecords  AttendanceRecord[]
+
   @@map("companies")
 }
 
@@ -141,6 +146,8 @@ model Branch {
   inventoryMovements InventoryMovement[]
   tables             Table[]
   mercadoPagoTerminal MercadoPagoTerminal?
+  employees           Employee[]
+  attendanceRecords   AttendanceRecord[]
 
   @@index([companyId])
   stocks          BranchStock[]
@@ -819,6 +826,114 @@ model LoyaltyRedemption {
   @@index([companyId, createdAt])
   @@index([customerId])
   @@map("loyalty_redemptions")
+}
+
+// ------------------------------------------------------------
+// CHECADOR DE ASISTENCIA (registro electrónico de jornada)
+// ------------------------------------------------------------
+
+enum AttendanceKind {
+  IN
+  OUT
+}
+
+enum AttendanceSource {
+  KIOSK  // checada hecha por el empleado en el quiosco (PIN + foto)
+  MANUAL // captura de un gerente/administrador, siempre con motivo y auditoría
+}
+
+enum ShiftType {
+  DIURNA
+  NOCTURNA
+  MIXTA
+}
+
+/// Configuración del checador de cada empresa (una por empresa, se crea al primer uso).
+model AttendanceSettings {
+  id                   String   @id @default(uuid())
+  companyId            String   @unique
+  company              Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  timezone             String   @default("America/Monterrey")
+  requirePhoto         Boolean  @default(true)
+  lateToleranceMinutes Int      @default(10)
+  updatedAt            DateTime @updatedAt
+
+  @@map("attendance_settings")
+}
+
+/// Persona que checa. No siempre tiene usuario de Tappy (lavaloza, ayudante...), por eso es
+/// un modelo aparte. Se identifica en el quiosco con número de empleado + PIN (el PIN se
+/// guarda cifrado con bcrypt, nunca en claro).
+model Employee {
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  branchId  String
+  branch    Branch  @relation(fields: [branchId], references: [id])
+
+  code     Int // número de empleado, único por empresa
+  name     String
+  position String?
+
+  pinHash        String
+  pinFailedCount Int       @default(0)
+  pinLockedUntil DateTime?
+
+  shiftType  ShiftType @default(DIURNA)
+  shiftStart String? // "HH:mm" hora de entrada programada (para retardos)
+  workDays   String    @default("1,2,3,4,5,6") // días de trabajo, ISO: 1 = lunes ... 7 = domingo
+
+  isActive Boolean @default(true)
+
+  // Aceptación del empleado de que su asistencia se registre electrónicamente (PIN + foto).
+  consentAcceptedAt DateTime?
+  consentVersion    Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  records AttendanceRecord[]
+
+  @@unique([companyId, code])
+  @@index([companyId, branchId])
+  @@map("employees")
+}
+
+/// Una marca de entrada o salida. NUNCA se edita ni se borra: una marca equivocada se ANULA
+/// (queda guardada con quién y por qué), y una olvidada se agrega como MANUAL con motivo.
+/// Cada marca encadena el hash de la anterior del mismo empleado para poder demostrar que el
+/// historial no fue alterado.
+model AttendanceRecord {
+  id         String   @id @default(uuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  branchId   String
+  branch     Branch   @relation(fields: [branchId], references: [id])
+
+  kind      AttendanceKind
+  source    AttendanceSource @default(KIOSK)
+  punchedAt DateTime // hora del servidor (nunca la del equipo del restaurante)
+
+  photoUrl     String?
+  deviceUserId String? // usuario de Tappy con sesión abierta en el equipo del quiosco
+  ipAddress    String?
+  note         String? // motivo (captura manual)
+  createdById  String? // quien hizo la captura manual
+
+  voidedAt   DateTime?
+  voidedById String?
+  voidReason String?
+
+  prevHash  String?
+  hash      String
+  createdAt DateTime @default(now())
+
+  @@index([companyId, punchedAt])
+  @@index([employeeId, createdAt])
+  @@map("attendance_records")
 }
 
 // ------------------------------------------------------------

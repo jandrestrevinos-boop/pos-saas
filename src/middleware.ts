@@ -19,7 +19,7 @@ export default withAuth(
     // SUPER_ADMIN no opera el panel ni el POS de un restaurante individual
     if (
       role === "SUPER_ADMIN" &&
-      ["/dashboard", "/products", "/categories", "/branches", "/users", "/pos", "/cash", "/reports", "/inventory", "/kitchen", "/clientes-frecuentes"].some((p) => pathname.startsWith(p))
+      ["/dashboard", "/products", "/categories", "/branches", "/users", "/pos", "/cash", "/reports", "/inventory", "/kitchen", "/clientes-frecuentes", "/checador"].some((p) => pathname.startsWith(p))
     ) {
       return NextResponse.redirect(new URL("/plataforma/dashboard", req.url));
     }
@@ -39,5 +39,5 @@ export default withAuth(
 );
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/products/:path*", "/categories/:path*", "/branches/:path*", "/users/:path*", "/pos/:path*", "/cash/:path*", "/reports/:path*", "/inventory/:path*", "/kitchen/:path*", "/clientes-frecuentes/:path*", "/plataforma/:path*", "/facturacion/:path*"],
+  matcher: ["/dashboard/:path*", "/products/:path*", "/categories/:path*", "/branches/:path*", "/users/:path*", "/pos/:path*", "/cash/:path*", "/reports/:path*", "/inventory/:path*", "/kitchen/:path*", "/clientes-frecuentes/:path*", "/checador/:path*", "/plataforma/:path*", "/facturacion/:path*"],
 };

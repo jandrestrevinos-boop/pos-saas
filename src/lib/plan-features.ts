@@ -47,6 +47,9 @@ export const FEATURE_CATALOG: FeatureDef[] = [
   // Programa de clientes frecuentes: opción independiente. No viene incluida en ningún plan
   // por defecto; se activa por plan o por empresa (plan personalizado) desde Super Admin.
   { key: "clientes_frecuentes", label: "Programa de clientes frecuentes (tarjeta digital con QR)", status: "live", enforced: true },
+  // Checador de asistencia: registro electrónico de entradas y salidas (PIN + foto) en el mismo equipo del POS.
+  // Opción independiente: no viene incluida en ningún plan por defecto; se activa por plan o por empresa.
+  { key: "checador_asistencia", label: "Checador de asistencia (entradas y salidas con PIN y foto)", status: "live", enforced: true },
   // Modo "solo clientes frecuentes": para restaurantes que contratan el programa SIN el POS.
   // Marcar esta casilla (junto con clientes_frecuentes) oculta y bloquea Punto de Venta, Caja, etc.
   { key: "solo_clientes_frecuentes", label: "Modo solo clientes frecuentes (sin Punto de Venta)", status: "live", enforced: true },

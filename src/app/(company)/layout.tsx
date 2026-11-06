@@ -75,6 +75,7 @@ export default async function CompanyLayout({ children }: { children: React.Reac
   const dashboardEmpresarialEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.DASHBOARD_EMPRESARIAL);
   const costeoEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.COSTEO_RECETA);
   const menusEnabled = await hasFeature(session.user.companyId, FEATURE_KEYS.MENUS_COMPLETOS);
+  const checadorEnabled = featureKeys.has(FEATURE_KEYS.CHECADOR_ASISTENCIA);
 
   let navItems: { href: string; label: string; permission?: PermissionKey }[] = tablesEnabled
     ? [
@@ -134,6 +135,18 @@ export default async function CompanyLayout({ children }: { children: React.Reac
     const cashIndex = navItems.findIndex((item) => item.href === "/cash");
     const at = cashIndex === -1 ? navItems.length : cashIndex + 1;
     navItems = [...navItems.slice(0, at), ...loyaltyItems, ...navItems.slice(at)];
+  }
+
+  // Checador de asistencia: el quiosco lo ve todo el personal; empleados y reporte, quien administra usuarios.
+  if (checadorEnabled && !loyaltyOnly) {
+    const checadorItems: { href: string; label: string; permission?: PermissionKey }[] = [
+      { href: "/checador", label: "Checador" },
+      { href: "/checador/empleados", label: "Checador: empleados", permission: PERMISSIONS.USERS_MANAGE },
+      { href: "/checador/reporte", label: "Checador: reporte", permission: PERMISSIONS.USERS_MANAGE },
+    ];
+    const usersIndex = navItems.findIndex((item) => item.href === "/users");
+    const at = usersIndex === -1 ? navItems.length : usersIndex + 1;
+    navItems = [...navItems.slice(0, at), ...checadorItems, ...navItems.slice(at)];
   }
 
   // Sucursal activa: si la empresa tiene varias sucursales activas, el nav muestra
