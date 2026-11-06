@@ -29,7 +29,14 @@ const workDaysSchema = z
   .min(1, "Elige al menos un día de trabajo")
   .transform((days) => Array.from(new Set(days)).sort().join(","));
 
+const codeSchema = z
+  .number({ invalid_type_error: "El número de empleado debe ser un número" })
+  .int("El número de empleado debe ser un número entero")
+  .min(1, "El número de empleado debe ser 1 o mayor")
+  .max(999999, "El número de empleado es demasiado grande");
+
 export const employeeCreateSchema = z.object({
+  code: codeSchema.optional(),
   name: z.string().trim().min(2, "El nombre es obligatorio").max(80),
   position: z.string().trim().max(60).optional().nullable(),
   branchId: z.string().min(1, "Elige la sucursal"),
@@ -40,6 +47,7 @@ export const employeeCreateSchema = z.object({
 });
 
 export const employeeUpdateSchema = z.object({
+  code: codeSchema.optional(),
   name: z.string().trim().min(2).max(80).optional(),
   position: z.string().trim().max(60).optional().nullable(),
   branchId: z.string().min(1).optional(),
@@ -130,23 +138,34 @@ export const attendanceService = {
     if (!branch) throw new Error("La sucursal no es válida");
     const pinHash = await bcrypt.hash(input.pin, 10);
 
-    // Número de empleado consecutivo por empresa; si dos altas chocan, se reintenta.
+    const data = {
+      companyId,
+      branchId: input.branchId,
+      name: input.name,
+      position: input.position || null,
+      pinHash,
+      shiftType: input.shiftType,
+      shiftStart: input.shiftStart || null,
+      workDays: input.workDays,
+    };
+
+    // Número de empleado capturado a mano: debe estar libre en la empresa.
+    if (input.code !== undefined) {
+      const taken = await prisma.employee.findUnique({ where: { companyId_code: { companyId, code: input.code } }, select: { id: true } });
+      if (taken) throw new Error(`El número de empleado ${input.code} ya está en uso`);
+      try {
+        const created = await prisma.employee.create({ data: { ...data, code: input.code } });
+        return { id: created.id, code: created.code };
+      } catch {
+        throw new Error(`El número de empleado ${input.code} ya está en uso`);
+      }
+    }
+
+    // Sin número capturado: el siguiente consecutivo por empresa; si dos altas chocan, se reintenta.
     for (let attempt = 0; attempt < 3; attempt++) {
       const last = await prisma.employee.findFirst({ where: { companyId }, orderBy: { code: "desc" }, select: { code: true } });
       try {
-        const created = await prisma.employee.create({
-          data: {
-            companyId,
-            branchId: input.branchId,
-            code: (last?.code ?? 0) + 1,
-            name: input.name,
-            position: input.position || null,
-            pinHash,
-            shiftType: input.shiftType,
-            shiftStart: input.shiftStart || null,
-            workDays: input.workDays,
-          },
-        });
+        const created = await prisma.employee.create({ data: { ...data, code: (last?.code ?? 0) + 1 } });
         return { id: created.id, code: created.code };
       } catch (e) {
         if (attempt === 2) throw e;
@@ -156,8 +175,12 @@ export const attendanceService = {
   },
 
   async updateEmployee(companyId: string, id: string, input: z.infer<typeof employeeUpdateSchema>) {
-    const employee = await prisma.employee.findFirst({ where: { id, companyId }, select: { id: true } });
+    const employee = await prisma.employee.findFirst({ where: { id, companyId }, select: { id: true, code: true } });
     if (!employee) throw new Error("Empleado no encontrado");
+    if (input.code !== undefined && input.code !== employee.code) {
+      const taken = await prisma.employee.findUnique({ where: { companyId_code: { companyId, code: input.code } }, select: { id: true } });
+      if (taken) throw new Error(`El número de empleado ${input.code} ya está en uso`);
+    }
     if (input.branchId) {
       const branch = await prisma.branch.findFirst({ where: { id: input.branchId, companyId }, select: { id: true } });
       if (!branch) throw new Error("La sucursal no es válida");

@@ -36,6 +36,7 @@ const SHIFT_LABELS = { DIURNA: "Diurno (8 h)", NOCTURNA: "Nocturno (7 h)", MIXTA
 
 type FormState = {
   id: string | null;
+  code: string;
   name: string;
   position: string;
   branchId: string;
@@ -59,18 +60,21 @@ export function EmployeesClient({
   const [settings, setSettings] = useState(initialSettings);
   const [settingsMsg, setSettingsMsg] = useState("");
   const [form, setForm] = useState<FormState | null>(null);
+  const [created, setCreated] = useState<{ name: string; code: number; pin: string } | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
   function openNew() {
     setError("");
-    setForm({ id: null, name: "", position: "", branchId: branches[0]?.id ?? "", pin: "", shiftType: "DIURNA", shiftStart: "", workDays: [1, 2, 3, 4, 5, 6], isActive: true });
+    const nextCode = Math.max(0, ...initialEmployees.map((e) => e.code)) + 1;
+    setForm({ id: null, code: String(nextCode), name: "", position: "", branchId: branches[0]?.id ?? "", pin: "", shiftType: "DIURNA", shiftStart: "", workDays: [1, 2, 3, 4, 5, 6], isActive: true });
   }
 
   function openEdit(e: Employee) {
     setError("");
     setForm({
       id: e.id,
+      code: String(e.code),
       name: e.name,
       position: e.position ?? "",
       branchId: e.branchId,
@@ -86,7 +90,19 @@ export function EmployeesClient({
     if (!form) return;
     setBusy(true);
     setError("");
+    const code = Number(form.code);
+    if (!Number.isInteger(code) || code < 1) {
+      setBusy(false);
+      setError("Escribe el número de empleado (1 o mayor)");
+      return;
+    }
+    if (!form.id && form.pin.length < 4) {
+      setBusy(false);
+      setError("El PIN debe tener de 4 a 6 números");
+      return;
+    }
     const body = {
+      code,
       name: form.name,
       position: form.position || null,
       branchId: form.branchId,
@@ -107,6 +123,7 @@ export function EmployeesClient({
       setError(data.error ?? "No se pudo guardar");
       return;
     }
+    if (!form.id) setCreated({ name: form.name, code: data.code ?? code, pin: form.pin });
     setForm(null);
     router.refresh();
   }
@@ -123,7 +140,7 @@ export function EmployeesClient({
   }
 
   const columns: ResponsiveColumn<Employee>[] = [
-    { key: "code", header: "No.", render: (e) => <span className="font-medium">{e.code}</span>, mobile: "aside" },
+    { key: "code", header: "No. de empleado", render: (e) => <span className="font-display text-lg font-semibold">{e.code}</span>, mobile: "aside" },
     {
       key: "name",
       header: "Empleado",
@@ -218,9 +235,40 @@ export function EmployeesClient({
         )}
       </div>
 
+      <Modal open={!!created} onClose={() => setCreated(null)} title="Empleado dado de alta">
+        {created && (
+          <div className="text-center">
+            <p className="text-sm text-muted mb-4">
+              Entrégale estos datos a <span className="font-medium text-ink">{created.name}</span> para que cheque en el quiosco.
+            </p>
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              <div className="rounded-md border border-line bg-paper p-4">
+                <p className="text-xs uppercase tracking-wide text-muted">Número de empleado</p>
+                <p className="font-display text-4xl font-semibold">{created.code}</p>
+              </div>
+              <div className="rounded-md border border-line bg-paper p-4">
+                <p className="text-xs uppercase tracking-wide text-muted">PIN</p>
+                <p className="font-display text-4xl font-semibold tracking-widest">{created.pin}</p>
+              </div>
+            </div>
+            <p className="text-xs text-muted mb-4">Anótalos ahora: por seguridad el PIN no se vuelve a mostrar (si se olvida, se asigna uno nuevo en Editar).</p>
+            <Button onClick={() => setCreated(null)}>Listo</Button>
+          </div>
+        )}
+      </Modal>
+
       <Modal open={!!form} onClose={() => setForm(null)} title={form?.id ? "Editar empleado" : "Nuevo empleado"}>
         {form && (
           <div>
+            <Field label="Número de empleado (con este número y su PIN checa en el quiosco)">
+              <input
+                inputMode="numeric"
+                autoComplete="off"
+                className={inputClass}
+                value={form.code}
+                onChange={(e) => setForm({ ...form, code: e.target.value.replace(/\D/g, "").slice(0, 6) })}
+              />
+            </Field>
             <Field label="Nombre completo">
               <input className={inputClass} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </Field>
